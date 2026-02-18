@@ -1,0 +1,107 @@
+# WSI Tissue Pipeline - GPU-Enabled Dockerfile
+# Based on NVIDIA CUDA runtime for GPU acceleration
+
+ARG CUDA_VERSION=12.1.0
+ARG CUDNN_VERSION=8
+ARG PYTHON_VERSION=3.11
+
+FROM nvidia/cuda:${CUDA_VERSION}-cudnn${CUDNN_VERSION}-runtime-ubuntu22.04 as base
+
+# Prevent interactive prompts
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_NO_CACHE_DIR=1
+
+# CUDA environment
+ENV CUDA_HOME=/usr/local/cuda
+ENV PATH="${CUDA_HOME}/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}"
+
+# Install system dependencies and Python
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Python
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+    python3-pip \
+    # Build tools
+    build-essential \
+    cmake \
+    git \
+    # Image processing
+    libopencv-dev \
+    libjpeg-dev \
+    libpng-dev \
+    libtiff-dev \
+    libwebp-dev \
+    # HDF5
+    libhdf5-dev \
+    # OpenSlide
+    libopenslide-dev \
+    # Networking
+    curl \
+    wget \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python aliases
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash appuser
+WORKDIR /home/appuser
+
+# ============================================
+# Builder stage
+# ============================================
+FROM base as builder
+
+# Create virtual environment
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
+
+# Install PyTorch with CUDA support first
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# Copy and install package
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+
+RUN pip install ".[visualization]"
+
+# ============================================
+# Runtime stage
+# ============================================
+FROM base as runtime
+
+# Copy virtual environment
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Copy application
+COPY --chown=appuser:appuser . /home/appuser/app
+WORKDIR /home/appuser/app
+
+# Create directories
+RUN mkdir -p /data /output /mlruns \
+    && chown -R appuser:appuser /data /output /mlruns
+
+USER appuser
+
+# Environment variables
+ENV MLFLOW_TRACKING_URI=sqlite:///mlruns/mlflow.db
+ENV MLFLOW_ARTIFACT_ROOT=/mlruns
+
+# Ports
+EXPOSE 8888 5000 9999
+
+# Verify GPU access at runtime
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')" || exit 1
+
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--NotebookApp.token=''"]

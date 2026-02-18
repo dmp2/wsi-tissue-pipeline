@@ -1,0 +1,151 @@
+# WSI Tissue Pipeline - Docker Compose Configuration
+# 
+# Usage:
+#   Development:  docker-compose up
+#   Production:   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
+#   GPU:          docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
+
+version: '3.8'
+
+services:
+  # ===========================================
+  # Main Pipeline Service (Jupyter + Processing)
+  # ===========================================
+  pipeline:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: development
+    container_name: wsi-pipeline
+    hostname: pipeline
+    
+    # Port mappings
+    ports:
+      - "8888:8888"   # Jupyter Lab
+      - "9999:9999"   # Neuroglancer
+      - "8000:8000"   # CORS file server (for Neuroglancer)
+    
+    # Volume mounts
+    volumes:
+      # Source code (live reload)
+      - ../src:/home/appuser/app/src:ro
+      - ../notebooks:/home/appuser/app/notebooks
+      - ../configs:/home/appuser/app/configs:ro
+      
+      # Data directories (configure these)
+      - ${DATA_DIR:-./data}:/data
+      - ${OUTPUT_DIR:-./output}:/output
+      
+      # MLflow artifacts
+      - mlflow_data:/mlruns
+      
+      # Jupyter config persistence
+      - jupyter_config:/home/appuser/.jupyter
+    
+    # Environment variables
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - JUPYTER_ENABLE_LAB=yes
+      - PYTHONPATH=/home/appuser/app/src
+    
+    # Dependencies
+    depends_on:
+      - mlflow
+    
+    # Resource limits (adjust as needed)
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+        reservations:
+          memory: 4G
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ===========================================
+  # MLflow Tracking Server
+  # ===========================================
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    container_name: wsi-mlflow
+    hostname: mlflow
+    
+    ports:
+      - "5000:5000"
+    
+    volumes:
+      - mlflow_data:/mlruns
+      - mlflow_db:/mlflow
+    
+    environment:
+      - MLFLOW_BACKEND_STORE_URI=sqlite:///mlflow/mlflow.db
+      - MLFLOW_DEFAULT_ARTIFACT_ROOT=/mlruns
+    
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlruns
+      --host 0.0.0.0
+      --port 5000
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================
+  # MinIO Object Storage (optional - for cloud-like artifact storage)
+  # ===========================================
+  minio:
+    image: minio/minio:latest
+    container_name: wsi-minio
+    hostname: minio
+    profiles:
+      - storage  # Only start with: docker-compose --profile storage up
+    
+    ports:
+      - "9000:9000"   # API
+      - "9001:9001"   # Console
+    
+    volumes:
+      - minio_data:/data
+    
+    environment:
+      - MINIO_ROOT_USER=${MINIO_USER:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD:-minioadmin}
+    
+    command: server /data --console-address ":9001"
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ===========================================
+# Named Volumes
+# ===========================================
+volumes:
+  mlflow_data:
+    name: wsi_mlflow_data
+  mlflow_db:
+    name: wsi_mlflow_db
+  jupyter_config:
+    name: wsi_jupyter_config
+  minio_data:
+    name: wsi_minio_data
+
+# ===========================================
+# Networks
+# ===========================================
+networks:
+  default:
+    name: wsi_network
+    driver: bridge

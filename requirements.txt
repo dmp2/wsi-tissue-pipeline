@@ -1,0 +1,59 @@
+# WSI Tissue Pipeline - Core Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core scientific computing
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-image>=0.21.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+tinybrain>=1.3.0
+
+# Image I/O and formats
+tifffile>=2024.1.30
+imageio>=2.31.0
+zarr>=2.16.0
+ngff-zarr>=0.4.0
+tensorstore>=0.1.45
+numcodecs>=0.12.0
+
+# Dask for parallel computing
+dask[array,distributed]>=2024.1.0
+dask-image>=2024.1.0
+
+# Configuration and CLI
+pyyaml>=6.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+click>=8.1.0
+rich>=13.0.0
+
+# MLflow for experiment tracking
+mlflow>=2.10.0
+
+# Utilities
+tqdm>=4.65.0
+pandas>=2.0.0
+
+# Optional: PyTorch (for GPU-accelerated processing)
+# Uncomment if using GPU features
+# torch>=2.0.0
+# torchvision>=0.15.0
+
+# Optional: Neuroglancer visualization
+# neuroglancer>=2.37
+
+# Optional: TIAToolbox for advanced segmentation
+# tiatoolbox>=1.5.0
+
+# Optional: PathML for pathology ML
+# pathml>=2.0.0
+
+# Development dependencies
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
+# black>=23.0.0
+# ruff>=0.1.0
+# mypy>=1.5.0
+# pre-commit>=3.4.0

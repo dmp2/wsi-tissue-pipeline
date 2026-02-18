@@ -1,0 +1,77 @@
+# WSI Tissue Pipeline - Default Configuration
+# ============================================
+# This file contains all default settings for the pipeline.
+# Copy and modify for your specific use case.
+
+# Segmentation settings for tissue detection
+segmentation:
+  # Backend algorithm: "local-entropy", "local-otsu", "tiatoolbox", "pathml"
+  backend: "local-entropy"
+  
+  # Target size for thumbnail used in segmentation (longest side in pixels)
+  target_long_side: 2000
+  
+  # Minimum area in pixels for a valid tissue region (at thumbnail scale)
+  min_area_px: 500
+  
+  # Structuring element size for morphological operations
+  struct_elem_px: 5
+  
+  # Whether to split touching tissue sections
+  split_touching: true
+  
+  # Ratio threshold for splitting elongated components
+  r_split: 3.0
+
+# Tile extraction settings
+tiles:
+  # Chunk size for dask processing
+  chunk_size: 4096
+  
+  # Pad output to multiple of this value (for GPU optimization)
+  pad_multiple: 16
+  
+  # Extra margin around detected tissue (pixels at full resolution)
+  extra_margin_px: 100
+
+# Output format settings
+output:
+  # Output format: "ome-zarr", "tiff", or "both"
+  format: "ome-zarr"
+  
+  # Compression codec: "zlib", "blosc", "lz4", null
+  compression: "zlib"
+  
+  # Convert to uint8 (from uint16) to save space
+  convert_to_uint8: true
+  
+  # Generate QC images during processing
+  generate_qc: true
+
+# MLflow experiment tracking settings
+mlflow:
+  # Enable/disable MLflow tracking
+  enabled: true
+  
+  # Tracking server URI (local SQLite by default)
+  tracking_uri: "sqlite:///mlflow.db"
+  
+  # Experiment name for organizing runs
+  experiment_name: "wsi-tissue-pipeline"
+  
+  # Template for run names (supports {specimen}, {timestamp})
+  run_name_template: "{specimen}_{timestamp}"
+  
+  # Whether to log artifacts (output files)
+  log_artifacts: false
+
+# Google Colab specific settings (only used in Colab environment)
+colab:
+  # Mount Google Drive for data access
+  mount_drive: true
+  
+  # Use GPU if available
+  use_gpu: true
+  
+  # Install dependencies automatically
+  install_dependencies: true

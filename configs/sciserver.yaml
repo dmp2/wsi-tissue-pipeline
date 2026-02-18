@@ -1,0 +1,96 @@
+# WSI Tissue Pipeline - SciServer Configuration
+# ==============================================
+# Optimized settings for Johns Hopkins SciServer environment.
+# Configured for large-scale batch processing with shared storage.
+
+segmentation:
+  backend: "local-entropy"
+  target_long_side: 2000
+  min_area_px: 500
+  struct_elem_px: 5
+  split_touching: true
+  r_split: 3.0
+
+tiles:
+  # Optimize for server-class hardware
+  chunk_size: 8192
+  pad_multiple: 32
+  extra_margin_px: 100
+
+output:
+  format: "ome-zarr"
+  compression: "zlib"  # Good compression for archival storage
+  convert_to_uint8: true
+  generate_qc: true
+
+mlflow:
+  enabled: true
+  # Use a shared MLflow server if available, or local SQLite
+  tracking_uri: "sqlite:////Storage/wsi-pipeline/mlruns/mlflow.db"
+  experiment_name: "sciserver-wsi-pipeline"
+  run_name_template: "{specimen}_{timestamp}"
+  log_artifacts: true
+
+colab:
+  # Disable Colab-specific features on SciServer
+  mount_drive: false
+  use_gpu: false  # Set to true if using GPU compute container
+  install_dependencies: false
+
+# SciServer-specific paths
+paths:
+  # SciServer persistent storage mount points
+  # Adjust these based on your allocated storage volumes
+  input_root: "/home/idies/workspace/Storage/username/persistent/wsi-data/input"
+  output_root: "/home/idies/workspace/Storage/username/persistent/wsi-data/output"
+  
+  # Shared data volumes (read-only access to datasets)
+  shared_data: "/home/idies/workspace/Storage/shared-data"
+  
+  # Scratch space for temporary files (faster I/O)
+  scratch_dir: "/home/idies/workspace/Temporary/username/scratch"
+  
+  # MLflow artifacts
+  artifacts_dir: "/home/idies/workspace/Storage/username/persistent/wsi-pipeline/artifacts"
+
+# Performance tuning for SciServer compute containers
+performance:
+  # Number of workers (adjust based on container resources)
+  num_workers: 4
+  
+  # Use Dask distributed scheduler for large jobs
+  use_dask_distributed: true
+  
+  # Dask scheduler address (if using distributed cluster)
+  dask_scheduler: null  # Set to "tcp://scheduler:8786" for cluster
+  
+  # Memory limit per worker
+  memory_limit: "8GB"
+  
+  # Use memory-mapped arrays
+  use_memmap: true
+  
+  # Checkpoint intermediate results
+  enable_checkpointing: true
+  checkpoint_interval: 10  # Save every N processed files
+
+# Batch processing settings
+batch:
+  # Maximum files per batch run
+  max_files_per_batch: 100
+  
+  # Continue from last checkpoint on failure
+  resume_on_failure: true
+  
+  # Email notification on completion (if configured)
+  notify_on_complete: false
+  
+  # Log level for batch jobs
+  log_level: "INFO"
+
+# CasJobs integration (for metadata storage)
+casjobs:
+  enabled: false
+  context: "MyDB"
+  # Table for storing processing metadata
+  metadata_table: "wsi_processing_metadata"

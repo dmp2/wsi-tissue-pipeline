@@ -1,0 +1,91 @@
+name: wsi-pipeline
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+dependencies:
+  # Python version
+  - python>=3.10,<3.13
+  
+  # Core scientific computing
+  - numpy>=1.24
+  - scipy>=1.10
+  - pandas>=2.0
+  
+  # Dask for parallel computing
+  - dask>=2024.1
+  - dask-image>=2023.8
+  - distributed>=2024.1
+  
+  # Image processing
+  - scikit-image>=0.21
+  - pillow>=10.0
+  - imageio>=2.31
+  - tifffile>=2024.1
+  - opencv>=4.8
+  
+  # OME-Zarr ecosystem
+  - zarr>=2.16
+  - numcodecs>=0.12
+  
+  # Visualization
+  - matplotlib>=3.7
+  
+  # PyTorch (optional - uncomment for GPU support)
+  # - pytorch>=2.0
+  # - torchvision>=0.15
+  # - pytorch-cuda=12.1  # Adjust CUDA version as needed
+  
+  # Development tools
+  - jupyter>=1.0
+  - jupyterlab>=4.0
+  - ipywidgets>=8.0
+  - nodejs>=18  # For JupyterLab extensions
+  
+  # Testing
+  - pytest>=7.4
+  - pytest-cov>=4.1
+  
+  # Code quality
+  - black>=23.0
+  - ruff>=0.1
+  - pre-commit>=3.4
+  
+  # Utilities
+  - pyyaml>=6.0
+  - click>=8.1
+  - tqdm>=4.65
+  - rich>=13.0
+  
+  # Pip-only dependencies
+  - pip>=23.0
+  - pip:
+      # OME-Zarr specific packages
+      - ngff-zarr>=0.4.0
+      - tensorstore>=0.1.45
+      
+      # MLflow for experiment tracking
+      - mlflow>=2.10.0
+      
+      # Configuration management
+      - python-dotenv>=1.0.0
+      - pydantic>=2.0.0
+      - pydantic-settings>=2.0.0
+      
+      # Neuroglancer visualization
+      - neuroglancer>=2.37
+      
+      # Install package in editable mode
+      - -e .
+
+# Platform-specific notes:
+# 
+# For GPU support on Linux/Windows:
+#   conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+#
+# For Apple Silicon (M1/M2/M3):
+#   conda install pytorch torchvision -c pytorch
+#   (MPS backend is automatically used)
+#
+# For SciServer:
+#   The default environment should work. See docs/sciserver_guide.md

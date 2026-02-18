@@ -1,0 +1,65 @@
+# WSI Tissue Pipeline - Google Colab Configuration
+# =================================================
+# Optimized settings for Google Colab Pro environment.
+# Uses GPU acceleration and integrates with Google Drive.
+
+segmentation:
+  backend: "local-entropy"
+  target_long_side: 2000
+  min_area_px: 500
+  struct_elem_px: 5
+  split_touching: true
+  r_split: 3.0
+
+tiles:
+  # Larger chunks for GPU memory (Colab Pro has ~16GB GPU RAM)
+  chunk_size: 8192
+  pad_multiple: 32
+  extra_margin_px: 100
+
+output:
+  format: "ome-zarr"
+  compression: "blosc"  # Faster compression for interactive use
+  convert_to_uint8: true
+  generate_qc: true
+
+mlflow:
+  enabled: true
+  # Store MLflow database in Google Drive for persistence
+  tracking_uri: "sqlite:////content/drive/MyDrive/wsi-pipeline/mlruns/mlflow.db"
+  experiment_name: "colab-wsi-pipeline"
+  run_name_template: "{specimen}_{timestamp}"
+  log_artifacts: true
+
+colab:
+  mount_drive: true
+  use_gpu: true
+  install_dependencies: true
+
+# Colab-specific paths (relative to mounted Drive)
+paths:
+  # Default input directory in Google Drive
+  input_root: "/content/drive/MyDrive/wsi-data/input"
+  
+  # Default output directory in Google Drive
+  output_root: "/content/drive/MyDrive/wsi-data/output"
+  
+  # MLflow artifacts directory
+  artifacts_dir: "/content/drive/MyDrive/wsi-pipeline/artifacts"
+  
+  # Temporary processing directory (use Colab's local SSD for speed)
+  temp_dir: "/content/temp"
+
+# Performance tuning for Colab
+performance:
+  # Number of workers for parallel processing
+  num_workers: 2
+  
+  # Use memory-mapped arrays when possible
+  use_memmap: true
+  
+  # Clear GPU cache between large operations
+  clear_gpu_cache: true
+  
+  # Maximum memory usage (fraction of available)
+  max_memory_fraction: 0.8
