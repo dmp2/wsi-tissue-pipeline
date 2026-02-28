@@ -16,6 +16,9 @@ source .venv/bin/activate  # Linux/macOS
 
 # Install in development mode with dev dependencies
 pip install -e ".[dev]"
+
+# Registration tests require PyTorch
+pip install -e ".[dev,torch]"
 ```
 
 ## Code Style
@@ -34,6 +37,13 @@ black src/ tests/
 
 ```bash
 pytest tests/
+```
+
+For registration coverage specifically, install the optional torch extra first:
+
+```bash
+pip install -e ".[dev,torch]"
+pytest tests/registration/test_upsample.py
 ```
 
 ## Making Changes
