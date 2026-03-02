@@ -17,6 +17,13 @@ def _expected_target_volume() -> np.ndarray:
     return volume
 
 
+def _axes_with_spacing(spacing: list[float], *, length: int = 4) -> list[np.ndarray]:
+    return [
+        np.arange(length, dtype=np.float32) * np.float32(axis_spacing)
+        for axis_spacing in spacing
+    ]
+
+
 class FakeBackend:
     name = "fake-backend"
     origin_type = "vendored"
@@ -118,6 +125,112 @@ def test_plan_workflow_resolves_atlas_free_prepared_dir(tmp_path):
     assert plan.target_source_format == "prepared-dir"
     assert "self_alignment" in plan.expected_outputs
     assert plan.workflow_config["normalization"]["atlas_registration_input"] == "none"
+    assert plan.workflow_config["resampling"]["policy"] == "sectioned-stack"
+    assert plan.pre_resampling_plan.policy == "sectioned-stack"
+    assert plan.pre_resampling_plan.target_locked_axes == [0]
+
+
+def test_sectioned_stack_target_pre_resampling_uses_in_plane_resolution_only():
+    axes = _axes_with_spacing([16.0, 16.0, 16.0])
+    resolution_um = workflow_module._sectioned_stack_target_resolution_um(axes, 200.0)
+
+    down = workflow_module._compute_target_downsampling(
+        axes,
+        200.0,
+        per_axis_resolution_um=resolution_um,
+        locked_axes=frozenset({0}),
+    )
+
+    assert down == [1, 12, 12]
+
+
+def test_sectioned_stack_target_pre_resampling_keeps_slice_axis_locked():
+    axes = _axes_with_spacing([10.0, 20.0, 20.0])
+    resolution_um = workflow_module._sectioned_stack_target_resolution_um(axes, 200.0)
+
+    down = workflow_module._compute_target_downsampling(
+        axes,
+        200.0,
+        per_axis_resolution_um=resolution_um,
+        locked_axes=frozenset({0}),
+    )
+
+    assert down == [1, 10, 10]
+
+
+def test_sectioned_stack_atlas_pre_resampling_downsamples_finer_in_plane_axes():
+    target_working_axes = _axes_with_spacing([16.0, 192.0, 192.0])
+    atlas_axes = _axes_with_spacing([50.0, 50.0, 50.0])
+
+    atlas_down = workflow_module._compute_atlas_downsampling(
+        atlas_axes,
+        target_working_axes,
+        locked_axes=frozenset({0}),
+    )
+
+    assert atlas_down == [1, 4, 4]
+
+
+def test_sectioned_stack_atlas_pre_resampling_leaves_matching_grid_unchanged():
+    target_working_axes = _axes_with_spacing([16.0, 192.0, 192.0])
+    atlas_axes = _axes_with_spacing([200.0, 200.0, 200.0])
+
+    atlas_down = workflow_module._compute_atlas_downsampling(
+        atlas_axes,
+        target_working_axes,
+        locked_axes=frozenset({0}),
+    )
+
+    assert atlas_down == [1, 1, 1]
+
+
+def test_sectioned_stack_plan_notes_when_atlas_is_already_coarser():
+    target_axes = _axes_with_spacing([16.0, 16.0, 16.0])
+    target_working_axes = _axes_with_spacing([16.0, 192.0, 192.0])
+    atlas_axes = _axes_with_spacing([400.0, 400.0, 400.0])
+    atlas_down = workflow_module._compute_atlas_downsampling(
+        atlas_axes,
+        target_working_axes,
+        locked_axes=frozenset({0}),
+    )
+
+    plan = workflow_module._plan_pre_resampling(
+        policy="sectioned-stack",
+        target_axes=target_axes,
+        target_downsampling=[1, 12, 12],
+        target_working_axes=target_working_axes,
+        atlas_axes=atlas_axes,
+        atlas_downsampling=atlas_down,
+    )
+
+    assert atlas_down == [1, 1, 1]
+    assert any("coarser than or equal to the target working grid" in note for note in plan.notes)
+
+
+def test_legacy_target_first_target_pre_resampling_preserves_current_all_axis_behavior():
+    axes = _axes_with_spacing([10.0, 20.0, 20.0])
+
+    down = workflow_module._compute_target_downsampling(axes, 200.0)
+
+    assert down == [20, 10, 10]
+
+
+def test_workflow_can_use_legacy_target_first_policy(tmp_path):
+    override = _write_override(tmp_path, {"resampling": {"policy": "legacy-target-first"}})
+
+    plan = workflow_module.plan_emlddmm_workflow(
+        dataset_root=tmp_path,
+        target_source=tmp_path,
+        target_source_format="prepared-dir",
+        registration_output=tmp_path / "emlddmm",
+        emlddmm_config=override,
+        backend=FakeBackend(),
+        dry_run=True,
+    )
+
+    assert plan.pre_resampling_plan.policy == "legacy-target-first"
+    assert plan.pre_resampling_plan.target_locked_axes == []
+    assert plan.target_downsampling == [40, 100, 100]
 
 
 def test_workflow_dry_run_writes_plan_and_summary_only(tmp_path):
@@ -148,10 +261,15 @@ def test_workflow_dry_run_writes_plan_and_summary_only(tmp_path):
     assert summary["provenance_path"].endswith("run_provenance.json")
     assert summary["reproduce_command_path"].endswith("reproduce_step5_command.txt")
     assert "warnings" in summary
+    assert summary["pre_resampling_plan"]["policy"] == "sectioned-stack"
+    assert summary["pre_resampling_plan"]["target_locked_axes"] == [0]
     assert plan["backend_name"] == "fake-backend"
     assert plan["schema_version"] == "emlddmm-step5/v1"
     assert plan["log_path"].endswith("registration.log")
     assert plan["provenance_path"].endswith("run_provenance.json")
+    assert plan["pre_resampling_plan"]["policy"] == "sectioned-stack"
+    assert "target_downsampling" in plan
+    assert "atlas_downsampling" in plan
 
 
 def test_workflow_rejects_label_without_atlas(tmp_path):
@@ -252,6 +370,7 @@ def test_workflow_records_orientation_resolution_and_artifact_manifest(tmp_path)
     assert plan["orientation_resolution"]["mode"] == "orientation"
     assert plan["orientation_resolution"]["orientation_from"] == "PIR"
     assert summary["orientation_resolution"]["orientation_to"] == "RIP"
+    assert plan["pre_resampling_plan"]["policy"] == "sectioned-stack"
     assert any(entry["artifact_kind"] == "config" for entry in artifacts_manifest["entries"])
 
 
@@ -302,7 +421,16 @@ def test_workflow_runs_atlas_registration_and_upsampling(tmp_path, monkeypatch):
     assert summary["upsampling_enabled"] is True
     assert summary["atlas_unit_scale"] == 1000.0
     assert summary["target_unit_scale"] == 1.0
+    assert summary["pre_resampling_plan"]["policy"] == "sectioned-stack"
     assert len(summary["stage_timeline"]) == 3
+
+    effective_config = json.loads(
+        (tmp_path / "emlddmm" / "atlas_registration" / "effective_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert effective_config["resampling_policy"] == "sectioned-stack"
+    assert effective_config["pre_resampling_plan"]["target_locked_axes"] == [0]
 
 
 def test_workflow_rejects_transformation_graph_without_atlas(tmp_path):
@@ -427,6 +555,7 @@ def test_workflow_registration_log_records_stage_progress(tmp_path):
 
     log_text = result.log_path.read_text(encoding="utf-8")
     assert "Starting EM-LDDMM workflow planning" in log_text
+    assert "Pre-resampling policy=sectioned-stack" in log_text
     assert "Starting stage: self_alignment" in log_text
     assert "Completed stage: self_alignment" in log_text
 

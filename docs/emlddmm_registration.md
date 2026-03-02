@@ -41,11 +41,28 @@ The `macaque-notebook` preset is the default and currently assumes:
 - `atlas_unit_scale = 1000.0`
 - `target_unit_scale = 1.0`
 - `desired_resolution_um = 200.0`
+- `resampling.policy = "sectioned-stack"`
 
 Interpretation:
 - Atlas axes are assumed to be stored in millimeters and are converted to micrometers.
 - Target axes are assumed to already be in micrometers.
-- Registration runs on a `200 um` working grid unless overridden.
+- The default pre-resampling policy preserves the target section axis and applies `desired_resolution_um` to in-plane target axes.
+
+## Pre-Resampling Policy
+
+`step5` has an outer pre-resampling layer before EM-LDDMM's internal multiscale `downI/downJ` schedule.
+
+Default policy:
+- `sectioned-stack`
+- Intended for current serial-section targets.
+- Preserves target axis `0`.
+- Uses `desired_resolution_um` for in-plane target preprocessing.
+- Computes atlas preprocessing relative to the already chosen target working grid.
+
+Compatibility policy:
+- `legacy-target-first`
+- Preserves the older target-first all-axis preprocessing behavior.
+- Use this only when you need backward-compatible behavior from earlier step-5 runs.
 
 ## Atlas Initialization
 
@@ -90,6 +107,7 @@ Optional outputs:
 - `--write-notebook-bundle` writes a debug bundle of plan and stage payload summaries
 
 The QC report links to images already produced by the registration stages, including atlas QC outputs and upsampling overview PNGs.
+The plan and summary files also include structured `pre_resampling_plan` metadata describing the chosen policy, native spacings, locked axes, and target/atlas preprocessing factors.
 
 ## Reproducibility
 

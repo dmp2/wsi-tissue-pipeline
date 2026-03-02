@@ -243,6 +243,9 @@ Minimal example:
     "target_unit_scale": 1.0,
     "desired_resolution_um": 200.0
   },
+  "resampling": {
+    "policy": "sectioned-stack"
+  },
   "stage_controls": {
     "self_alignment_enabled": true,
     "atlas_registration_enabled": true,
@@ -269,14 +272,17 @@ Minimal example:
 Important fields:
 - `units.atlas_unit_scale`: scales atlas axes into micrometers. The notebook-aligned preset assumes the atlas is stored in millimeters, so the default is `1000.0`.
 - `units.target_unit_scale`: scales target axes into micrometers. The notebook-aligned preset assumes the prepared target already uses micrometers, so the default is `1.0`.
-- `units.desired_resolution_um`: working-grid resolution. The default notebook-aligned value is `200.0`.
+- `units.desired_resolution_um`: requested target preprocessing resolution. Under the default `resampling.policy = "sectioned-stack"`, this applies to in-plane target axes while preserving the target section axis.
+- `resampling.policy`: outer pre-resampling policy for step 5. `sectioned-stack` is the default and preserves target axis `0` for current serial-section stacks. `legacy-target-first` preserves the older all-axis target-first behavior for compatibility.
 - `orientation_from` and `orientation_to`: backend orientation codes used to derive the initial affine when `init_affine_path` is not supplied. These are validated before registration starts and must use one axis from each pair `{R/L}`, `{A/P}`, and `{S/I}`.
 - `transformation_graph.script_path`: explicit path to the external `emlddmm` package's `transformation_graph_v01.py`. If omitted, step 5 tries to resolve it automatically from the installed package and only falls back to workspace-local development copies.
 - `outputs.write_qc_report`: writes `registration_report.html` and `registration_report.json` in the step-5 output directory.
 
 Step-5 output metadata now also includes:
 - `resolved_run_plan.json.schema_version`
+- `resolved_run_plan.json.pre_resampling_plan`
 - `registration_summary.json.schema_version`
+- `registration_summary.json.pre_resampling_plan`
 - `registration_summary.json.orientation_resolution`
 - `registration_summary.json.stage_timeline`
 - always-on `run_provenance.json`

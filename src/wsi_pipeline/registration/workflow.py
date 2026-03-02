@@ -22,6 +22,7 @@ from .config import (
     EmlddmmWorkflowConfig,
     EmlddmmWorkflowResult,
     OrientationResolution,
+    PreResamplingPlan,
     SCHEMA_VERSION,
     StageTimelineEntry,
     get_preset_config,
@@ -85,6 +86,7 @@ class LoadedInputs:
     Jd: np.ndarray
     Wd: np.ndarray
     target_down: list[int]
+    pre_resampling_plan: PreResamplingPlan
     atlas_inputs: AtlasInputs | None = None
     atlas_down: list[int] | None = None
     initial_affine: np.ndarray | None = None
@@ -226,42 +228,144 @@ def _scale_axes(axes: list[np.ndarray], scale: float) -> list[np.ndarray]:
     return [np.asarray(axis, dtype=np.float32) * np.float32(scale) for axis in axes]
 
 
+def _axis_spacing_um(axis: np.ndarray) -> float:
+    axis_np = np.asarray(axis, dtype=np.float32)
+    if axis_np.size < 2:
+        return 0.0
+    return float(np.median(np.abs(np.diff(axis_np))))
+
+
+def _axis_spacings_um(axes: list[np.ndarray]) -> list[float]:
+    return [_axis_spacing_um(axis) for axis in axes]
+
+
+def _sectioned_stack_target_resolution_um(
+    axes: list[np.ndarray],
+    desired_resolution_um: float,
+) -> list[float]:
+    native_spacing = _axis_spacings_um(axes)
+    if not native_spacing:
+        return []
+    target_resolution = [float(desired_resolution_um)] * len(native_spacing)
+    target_resolution[0] = native_spacing[0]
+    return target_resolution
+
+
 def _compute_target_downsampling(
     axes: list[np.ndarray],
     desired_resolution_um: float,
+    *,
+    per_axis_resolution_um: list[float] | None = None,
+    locked_axes: set[int] | frozenset[int] = frozenset(),
 ) -> list[int]:
+    if per_axis_resolution_um is not None and len(per_axis_resolution_um) != len(axes):
+        raise ValueError(
+            "per_axis_resolution_um must match the number of target axes"
+        )
     down: list[int] = []
-    for axis in axes:
-        axis_np = np.asarray(axis, dtype=np.float32)
-        if axis_np.size < 2:
+    locked = set(locked_axes)
+    for axis_index, axis in enumerate(axes):
+        if axis_index in locked:
             down.append(1)
             continue
-        spacing = float(np.median(np.abs(np.diff(axis_np))))
+        spacing = _axis_spacing_um(axis)
         if spacing <= 0:
             down.append(1)
             continue
-        down.append(max(1, int(round(desired_resolution_um / spacing))))
+        requested_resolution = (
+            float(per_axis_resolution_um[axis_index])
+            if per_axis_resolution_um is not None
+            else float(desired_resolution_um)
+        )
+        down.append(max(1, int(round(requested_resolution / spacing))))
     return down
 
 
 def _compute_atlas_downsampling(
     atlas_axes: list[np.ndarray],
     target_axes: list[np.ndarray],
+    *,
+    locked_axes: set[int] | frozenset[int] = frozenset(),
 ) -> list[int]:
     down: list[int] = []
-    for atlas_axis, target_axis in zip(atlas_axes, target_axes, strict=True):
-        atlas_np = np.asarray(atlas_axis, dtype=np.float32)
-        target_np = np.asarray(target_axis, dtype=np.float32)
-        if atlas_np.size < 2 or target_np.size < 2:
+    locked = set(locked_axes)
+    for axis_index, (atlas_axis, target_axis) in enumerate(
+        zip(atlas_axes, target_axes, strict=True)
+    ):
+        if axis_index in locked:
             down.append(1)
             continue
-        atlas_spacing = float(np.median(np.abs(np.diff(atlas_np))))
-        target_spacing = float(np.median(np.abs(np.diff(target_np))))
+        atlas_spacing = _axis_spacing_um(atlas_axis)
+        target_spacing = _axis_spacing_um(target_axis)
         if atlas_spacing <= 0 or target_spacing <= 0:
             down.append(1)
             continue
         down.append(max(1, int(round(target_spacing / atlas_spacing))))
     return down
+
+
+def _plan_pre_resampling(
+    *,
+    policy: str,
+    target_axes: list[np.ndarray],
+    target_downsampling: list[int],
+    target_working_axes: list[np.ndarray],
+    atlas_axes: list[np.ndarray] | None = None,
+    atlas_downsampling: list[int] | None = None,
+) -> PreResamplingPlan:
+    target_native_spacing = _axis_spacings_um(target_axes)
+    target_working_spacing = _axis_spacings_um(target_working_axes)
+    notes: list[str] = []
+    target_locked_axes: list[int] = []
+    atlas_locked_axes: list[int] = []
+    atlas_native_spacing: list[float] | None = None
+    atlas_reference_spacing: list[float] | None = None
+
+    if policy == "sectioned-stack":
+        target_locked_axes = [0] if target_native_spacing else []
+        atlas_locked_axes = [0] if atlas_axes else []
+        if target_native_spacing:
+            notes.append(
+                "sectioned-stack policy preserves target axis 0 and applies desired_resolution_um only to in-plane axes."
+            )
+    elif policy != "legacy-target-first":
+        raise ValueError(f"Unknown resampling policy: {policy!r}")
+
+    if atlas_axes is not None:
+        atlas_native_spacing = _axis_spacings_um(atlas_axes)
+        atlas_reference_spacing = list(target_working_spacing)
+        if atlas_native_spacing and atlas_reference_spacing and atlas_downsampling is not None:
+            unchanged_axes = [
+                axis_index
+                for axis_index, (atlas_spacing, reference_spacing, factor) in enumerate(
+                    zip(atlas_native_spacing, atlas_reference_spacing, atlas_downsampling, strict=True)
+                )
+                if axis_index not in atlas_locked_axes
+                and atlas_spacing >= reference_spacing
+                and factor == 1
+            ]
+            if unchanged_axes:
+                notes.append(
+                    "Atlas native spacing is already coarser than or equal to the target working grid on axes "
+                    f"{unchanged_axes}; atlas pre-resampling remains unchanged on those axes."
+                )
+
+    return PreResamplingPlan(
+        policy=policy,
+        target_native_spacing_um=target_native_spacing,
+        target_working_spacing_um=target_working_spacing,
+        target_locked_axes=target_locked_axes,
+        target_downsampling=list(target_downsampling),
+        atlas_native_spacing_um=atlas_native_spacing,
+        atlas_reference_spacing_um=atlas_reference_spacing,
+        atlas_locked_axes=atlas_locked_axes,
+        atlas_downsampling=list(atlas_downsampling) if atlas_downsampling is not None else None,
+        notes=notes,
+    )
+
+
+def _pre_resampling_payload(loaded: LoadedInputs) -> dict[str, Any]:
+    return loaded.pre_resampling_plan.model_dump(mode="python")
 
 
 def _derive_mu_channels(Jd: np.ndarray) -> tuple[list[list[float]], list[list[float]]]:
@@ -869,7 +973,23 @@ def _load_inputs_for_plan(
         config.target_source.manifest_path,
     )
     target.xJ = _scale_axes(target.xJ, config.units.target_unit_scale)
-    target_down = _compute_target_downsampling(target.xJ, config.units.desired_resolution_um)
+    if config.resampling.policy == "sectioned-stack":
+        target_locked_axes = frozenset({0}) if target.xJ else frozenset()
+        target_resolution_um = _sectioned_stack_target_resolution_um(
+            target.xJ,
+            config.units.desired_resolution_um,
+        )
+    elif config.resampling.policy == "legacy-target-first":
+        target_locked_axes = frozenset()
+        target_resolution_um = None
+    else:
+        raise ValueError(f"Unknown resampling policy: {config.resampling.policy!r}")
+    target_down = _compute_target_downsampling(
+        target.xJ,
+        config.units.desired_resolution_um,
+        per_axis_resolution_um=target_resolution_um,
+        locked_axes=target_locked_axes,
+    )
     downsampled = backend.downsample_image_domain(target.xJ, target.J, target_down, W=target.W0)
     xJd, Jd, Wd = downsampled
     xJd = [np.asarray(axis, dtype=np.float32) for axis in xJd]
@@ -888,11 +1008,27 @@ def _load_inputs_for_plan(
     atlas_down = None
     initial_affine = None
     orientation_resolution = none_orientation_resolution()
+    atlas_locked_axes = frozenset()
     if config.atlas_path is not None:
         atlas_inputs = _load_atlas_inputs(backend, config)
         if atlas_inputs is not None:
-            atlas_down = _compute_atlas_downsampling(atlas_inputs.xI, xJd)
+            atlas_locked_axes = (
+                frozenset({0}) if config.resampling.policy == "sectioned-stack" else frozenset()
+            )
+            atlas_down = _compute_atlas_downsampling(
+                atlas_inputs.xI,
+                xJd,
+                locked_axes=atlas_locked_axes,
+            )
         initial_affine, orientation_resolution = _load_init_affine(config, backend)
+    pre_resampling_plan = _plan_pre_resampling(
+        policy=config.resampling.policy,
+        target_axes=target.xJ,
+        target_downsampling=target_down,
+        target_working_axes=xJd,
+        atlas_axes=atlas_inputs.xI if atlas_inputs is not None else None,
+        atlas_downsampling=atlas_down,
+    )
 
     warnings: list[str] = []
     default_unit_warnings = []
@@ -905,6 +1041,10 @@ def _load_inputs_for_plan(
             "Using default target_unit_scale=1.0; target coordinates are assumed to already be micrometers."
         )
     warnings = _merge_warnings(warnings, default_unit_warnings)
+    if config.resampling.policy == "legacy-target-first":
+        warnings.append(
+            "Using legacy-target-first resampling policy; this compatibility mode may downsample the target slice axis and differs from sectioned-stack notebook practice."
+        )
     if used_legacy_output_alias:
         warnings.append("Deprecated --output alias was used for step5; prefer --dataset-root.")
     if stage_controls["atlas_registration"] and config.label_path is None:
@@ -949,6 +1089,7 @@ def _load_inputs_for_plan(
         Jd=Jd,
         Wd=Wd,
         target_down=target_down,
+        pre_resampling_plan=pre_resampling_plan,
         atlas_inputs=atlas_inputs,
         atlas_down=atlas_down,
         initial_affine=initial_affine,
@@ -1034,6 +1175,7 @@ def _build_resolved_plan(loaded: LoadedInputs, dry_run: bool) -> EmlddmmResolved
         working_resolution_um=loaded.config.units.desired_resolution_um,
         target_downsampling=loaded.target_down,
         atlas_downsampling=loaded.atlas_down,
+        pre_resampling_plan=loaded.pre_resampling_plan,
         enabled_stages=enabled_stages,
         skipped_stages=skipped,
         warnings=list(loaded.warnings or []),
@@ -1062,6 +1204,7 @@ def _stage_input_payload(loaded: LoadedInputs, stage_name: str) -> dict[str, Any
         "manifest_path": loaded.target.manifest_path,
         "working_resolution_um": loaded.config.units.desired_resolution_um,
         "target_downsampling": loaded.target_down,
+        "pre_resampling_plan": _pre_resampling_payload(loaded),
     }
     if stage_name == "self_alignment":
         base["n_slices"] = int(loaded.Jd.shape[1])
@@ -1355,6 +1498,22 @@ def run_emlddmm_workflow(
             resolved_plan.target_downsampling,
             resolved_plan.atlas_downsampling,
         )
+        logger.info(
+            "Pre-resampling policy=%s target_native_spacing_um=%s target_working_spacing_um=%s target_locked_axes=%s",
+            loaded.pre_resampling_plan.policy,
+            loaded.pre_resampling_plan.target_native_spacing_um,
+            loaded.pre_resampling_plan.target_working_spacing_um,
+            loaded.pre_resampling_plan.target_locked_axes,
+        )
+        if loaded.pre_resampling_plan.atlas_native_spacing_um is not None:
+            logger.info(
+                "Atlas pre-resampling native_spacing_um=%s reference_spacing_um=%s locked_axes=%s",
+                loaded.pre_resampling_plan.atlas_native_spacing_um,
+                loaded.pre_resampling_plan.atlas_reference_spacing_um,
+                loaded.pre_resampling_plan.atlas_locked_axes,
+            )
+        for note in loaded.pre_resampling_plan.notes:
+            logger.info("Pre-resampling note: %s", note)
         if loaded.transformation_graph_script is not None:
             logger.info(
                 "Resolved transformation-graph script: %s (%s)",
@@ -1435,6 +1594,8 @@ def run_emlddmm_workflow(
                         "mode": loaded.config.mode,
                         "device_used": loaded.device_used,
                         "target_downsampling": loaded.target_down,
+                        "resampling_policy": loaded.pre_resampling_plan.policy,
+                        "pre_resampling_plan": _pre_resampling_payload(loaded),
                     },
                 )
                 stage_artifacts["artifacts"] = str(
@@ -1550,6 +1711,8 @@ def run_emlddmm_workflow(
                         "target_downsampling": loaded.target_down,
                         "atlas_downsampling": loaded.atlas_down,
                         "normalization": loaded.config.normalization.atlas_registration_input,
+                        "resampling_policy": loaded.pre_resampling_plan.policy,
+                        "pre_resampling_plan": _pre_resampling_payload(loaded),
                     },
                     label_axes=atlas_inputs.xS,
                     label_data=atlas_inputs.S,
@@ -1727,6 +1890,7 @@ def run_emlddmm_workflow(
             "working_resolution_um": resolved_plan.working_resolution_um,
             "target_downsampling": resolved_plan.target_downsampling,
             "atlas_downsampling": resolved_plan.atlas_downsampling,
+            "pre_resampling_plan": resolved_plan.pre_resampling_plan.model_dump(mode="python"),
             "enabled_stages": resolved_plan.enabled_stages,
             "completed_stages": completed_stages,
             "skipped_stages": resolved_plan.skipped_stages,

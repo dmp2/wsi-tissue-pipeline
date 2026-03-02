@@ -31,6 +31,14 @@ class UnitsConfig(BaseModel):
     desired_resolution_um: float = Field(default=200.0, gt=0.0)
 
 
+class ResamplingConfig(BaseModel):
+    """Outer pre-resampling policy controls."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    policy: Literal["sectioned-stack", "legacy-target-first"] = "sectioned-stack"
+
+
 class StageControlsConfig(BaseModel):
     """High-level stage enablement controls."""
 
@@ -154,6 +162,7 @@ class EmlddmmWorkflowConfig(BaseModel):
     device: str = "auto"
     target_source: TargetSourceConfig = Field(default_factory=TargetSourceConfig)
     units: UnitsConfig = Field(default_factory=UnitsConfig)
+    resampling: ResamplingConfig = Field(default_factory=ResamplingConfig)
     stage_controls: StageControlsConfig = Field(default_factory=StageControlsConfig)
     self_alignment: SelfAlignmentConfig = Field(default_factory=SelfAlignmentConfig)
     atlas_registration: AtlasRegistrationConfig = Field(default_factory=AtlasRegistrationConfig)
@@ -229,6 +238,23 @@ class EmlddmmRunProvenance(BaseModel):
     parity: dict[str, Any] = Field(default_factory=dict)
 
 
+class PreResamplingPlan(BaseModel):
+    """Resolved outer pre-resampling metadata."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    policy: Literal["sectioned-stack", "legacy-target-first"]
+    target_native_spacing_um: list[float] = Field(default_factory=list)
+    target_working_spacing_um: list[float] = Field(default_factory=list)
+    target_locked_axes: list[int] = Field(default_factory=list)
+    target_downsampling: list[int] = Field(default_factory=list)
+    atlas_native_spacing_um: list[float] | None = None
+    atlas_reference_spacing_um: list[float] | None = None
+    atlas_locked_axes: list[int] = Field(default_factory=list)
+    atlas_downsampling: list[int] | None = None
+    notes: list[str] = Field(default_factory=list)
+
+
 class EmlddmmResolvedPlan(BaseModel):
     """Resolved execution plan for a step-5 run."""
 
@@ -253,6 +279,7 @@ class EmlddmmResolvedPlan(BaseModel):
     working_resolution_um: float
     target_downsampling: list[int]
     atlas_downsampling: list[int] | None = None
+    pre_resampling_plan: PreResamplingPlan
     enabled_stages: list[str] = Field(default_factory=list)
     skipped_stages: dict[str, str] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)

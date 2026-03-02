@@ -27,6 +27,7 @@ This page maps the staged `step5` workflow to `legacy_scripts/tb_macaque_emlddmm
   - `run_provenance.json`
   - `reproduce_step5_command.txt`
 - The raw atlas-registration payload is preserved as `atlas_registration/registration_data.npy` instead of only living in notebook state.
+- Step 5 now records explicit `pre_resampling_plan` metadata so the target/atlas preprocessing decision is inspectable outside notebook state.
 
 ## Intentionally Different
 
@@ -63,5 +64,6 @@ High-level fidelity is strong for the main execution spine, but the staged runne
 - stage orchestration is cleaner and more explicit
 - artifact naming is more stable
 - debug and QC surfaces are file-based rather than cell-based
+- the default `sectioned-stack` policy makes the serial-section assumption explicit by preserving target axis `0` during outer preprocessing
 
 That is intentional. The goal is notebook-faithful workflow behavior with a pipeline-friendly interface, not a cell-by-cell clone.
