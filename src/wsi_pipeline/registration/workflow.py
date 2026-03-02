@@ -2,32 +2,38 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 import importlib.util
 import json
 import logging
-from pathlib import Path
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .backend import EmlddmmBackend, resolve_emlddmm_backend
 from .config import (
+    SCHEMA_VERSION,
     EmlddmmResolvedPlan,
     EmlddmmStagePlan,
     EmlddmmWorkflowConfig,
     EmlddmmWorkflowResult,
     OrientationResolution,
     PreResamplingPlan,
-    SCHEMA_VERSION,
     StageTimelineEntry,
     get_preset_config,
     load_workflow_config_override,
     merge_workflow_config,
+)
+from .orientation import (
+    matrix_orientation_resolution,
+    none_orientation_resolution,
+    resolve_orientation_init,
+    validate_orientation_code,
 )
 from .outputs import (
     RegistrationImage,
@@ -35,12 +41,6 @@ from .outputs import (
     write_atlas_registration_outputs,
     write_self_alignment_outputs,
     write_upsampling_outputs,
-)
-from .orientation import (
-    matrix_orientation_resolution,
-    none_orientation_resolution,
-    resolve_orientation_init,
-    validate_orientation_code,
 )
 from .provenance import build_reproduce_command, build_run_provenance
 from .report import build_registration_report_manifest, write_registration_report
@@ -64,7 +64,7 @@ def _upsample_between_slices_impl(*args, **kwargs):
 @dataclass
 class AtlasInputs:
     xI: list[np.ndarray]
-    I: np.ndarray
+    I: np.ndarray  # noqa: E741
     title: str
     names: list[str]
     xS: list[np.ndarray] | None = None
@@ -462,7 +462,7 @@ def _load_atlas_inputs(
 ) -> AtlasInputs | None:
     if config.atlas_path is None:
         return None
-    xI, I, title, names = backend.read_data(str(config.atlas_path))
+    xI, atlas_image, title, names = backend.read_data(str(config.atlas_path))
     xI_scaled = _scale_axes([np.asarray(axis, dtype=np.float32) for axis in xI], config.units.atlas_unit_scale)
     labels_axes = None
     labels_data = None
@@ -475,7 +475,7 @@ def _load_atlas_inputs(
         labels_data = np.asarray(labels_data_raw, dtype=np.float32)
     return AtlasInputs(
         xI=xI_scaled,
-        I=np.asarray(I, dtype=np.float32),
+        I=np.asarray(atlas_image, dtype=np.float32),
         title=title,
         names=list(names),
         xS=labels_axes,
@@ -898,10 +898,6 @@ def _build_workflow_config(
 
     if precomputed_manifest is not None:
         config.target_source.manifest_path = Path(precomputed_manifest)
-    if registration_output is not None:
-        registration_output_path = Path(registration_output)
-    else:
-        registration_output_path = resolved_dataset_root / "emlddmm"
     if atlas is not None:
         config.atlas_path = Path(atlas)
     else:

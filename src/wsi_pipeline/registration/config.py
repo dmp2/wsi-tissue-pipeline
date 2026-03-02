@@ -354,5 +354,5 @@ def load_workflow_config_override(path: str | Path | None) -> dict[str, Any]:
     if path is None:
         return {}
     override_path = Path(path)
-    with open(override_path, "r", encoding="utf-8") as f:
+    with open(override_path, encoding="utf-8") as f:
         return json.load(f)

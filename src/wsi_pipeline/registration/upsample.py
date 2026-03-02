@@ -8,6 +8,7 @@ import numpy as np
 
 from .symmetric import emlddmm_multiscale_symmetric_N
 
+
 def _validate_and_reshape_image_time_series(series, name):
     series = np.asarray(series)
     if series.ndim == 5 and series.shape[0] == 1:
@@ -171,7 +172,10 @@ def upsample_between_slices(
     nt = int(config["nt"])
     present_mask = _resolve_present_mask(J, W, mode, present_mask)
     slices_with_data = np.flatnonzero(present_mask).astype(int)
-    pairs = [(int(i0), int(i1)) for i0, i1 in zip(slices_with_data[:-1], slices_with_data[1:])]
+    pairs = [
+        (int(i0), int(i1))
+        for i0, i1 in zip(slices_with_data[:-1], slices_with_data[1:], strict=False)
+    ]
 
     J_filled = np.array(J, dtype=np.float32, copy=True)
     J_nearest_bad = np.array(J, dtype=np.float32, copy=True)

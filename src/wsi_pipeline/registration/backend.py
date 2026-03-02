@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import importlib.util
 import importlib.metadata
+import importlib.util
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Callable
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ def _coerce_backend_module(imported: ModuleType) -> ModuleType | None:
 
     candidates: list[ModuleType] = []
     if hasattr(imported, "emlddmm"):
-        candidate = getattr(imported, "emlddmm")
+        candidate = imported.emlddmm
         if isinstance(candidate, ModuleType):
             candidates.append(candidate)
     if isinstance(imported, ModuleType):

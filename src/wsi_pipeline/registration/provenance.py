@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import os
-from pathlib import Path
 import platform
 import subprocess
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from wsi_pipeline import __version__
 
-from .config import EmlddmmResolvedPlan, EmlddmmRunProvenance, SCHEMA_VERSION
+from .config import SCHEMA_VERSION, EmlddmmResolvedPlan, EmlddmmRunProvenance
 
 _HASH_LIMIT_BYTES = 2 * 1024 * 1024
 

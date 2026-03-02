@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from html import escape
 import json
 import logging
+from datetime import datetime, timezone
+from html import escape
 from pathlib import Path
 from typing import Any
 
-from .config import EmlddmmResolvedPlan, SCHEMA_VERSION
+from .config import SCHEMA_VERSION, EmlddmmResolvedPlan
 
 logger = logging.getLogger(__name__)
 

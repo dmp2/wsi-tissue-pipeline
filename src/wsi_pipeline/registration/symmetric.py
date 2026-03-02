@@ -8,8 +8,7 @@ underlying numerical behavior here is intentionally left unchanged.
 """
 
 import torch
-import numpy as np
-from emlddmm import emlddmm 
+from emlddmm import emlddmm
 
 
 def _integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
@@ -64,9 +63,18 @@ def _calculate_determinant_of_jacobian(phi, spacing=None):
     det = grads[0][0] * grads[1][1] - grads[0][1] * grads[1][0]
     return det
 
-def emlddmm_multiscale_symmetric_N(xI, I, xJ, J, W0=None, *, combine_velocities="average",
-                                   grid_sample_kwargs=None, **config):
-    """
+def emlddmm_multiscale_symmetric_N(  # noqa: E741
+    xI,
+    I,
+    xJ,
+    J,
+    W0=None,
+    *,
+    combine_velocities="average",
+    grid_sample_kwargs=None,
+    **config,
+):
+    r"""
     Symmetric EM-LDDMM: forward + backward passes with a shared symmetric velocity.
     Returns forward/backward outputs plus time-resolved warped images for both paths.
 
@@ -105,8 +113,8 @@ def emlddmm_multiscale_symmetric_N(xI, I, xJ, J, W0=None, *, combine_velocities=
     fwd_last = out_fwd[-1] if isinstance(out_fwd, list) else out_fwd # last scale output
     v_fwd, xv = fwd_last["v"], [x.clone() for x in fwd_last["xv"]]
 
-    # Now for the symmetric part: flip and negate the forward velocity to get a guess for the backward velocity 
-    v_init_back = torch.flip(-v_fwd, [0]) 
+    # Now for the symmetric part: flip and negate the forward velocity to get a guess for the backward velocity
+    v_init_back = torch.flip(-v_fwd, [0])
 
     # Flow backward
     back_cfg = dict(config)

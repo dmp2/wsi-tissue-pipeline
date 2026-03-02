@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import csv
-from dataclasses import dataclass
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -33,7 +33,7 @@ def load_manifest(path: str | Path | None) -> dict[str, Any] | None:
     if path is None:
         return None
     manifest_path = Path(path)
-    with open(manifest_path, "r", encoding="utf-8") as f:
+    with open(manifest_path, encoding="utf-8") as f:
         manifest = json.load(f)
 
     required_keys = {
@@ -88,7 +88,7 @@ def _load_samples_tsv_sample_ids(subject_dir: Path) -> list[str]:
     samples_tsv = subject_dir / "samples.tsv"
     if not samples_tsv.exists():
         raise FileNotFoundError(f"Prepared directory is missing samples.tsv: {subject_dir}")
-    with open(samples_tsv, "r", encoding="utf-8", newline="") as f:
+    with open(samples_tsv, encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
         return [str(row["sample_id"]) for row in reader]
 
@@ -190,7 +190,7 @@ def _load_dense_precomputed_scale0(precomputed_path: Path) -> np.ndarray:
     dataset = ts.open(spec).result()
     dense = np.asarray(dataset[...].read().result())
     info_path = precomputed_path / "info"
-    with open(info_path, "r", encoding="utf-8") as f:
+    with open(info_path, encoding="utf-8") as f:
         info = json.load(f)
     num_channels = int(info["num_channels"])
 
