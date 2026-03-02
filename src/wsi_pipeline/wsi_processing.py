@@ -7,16 +7,11 @@ Supports VSI/ETS, TIFF, JPG, and other common image formats.
 
 from __future__ import annotations
 
-import gc
 import json
 import logging
-import warnings
-
-logger = logging.getLogger(__name__)
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Literal
 
-import dask
 import dask.array as da
 import numpy as np
 from scipy import ndimage as ndi
@@ -27,6 +22,8 @@ from skimage.segmentation import watershed
 from skimage.transform import resize
 
 from .config import PipelineConfig, SegmentationConfig, TileConfig, load_config
+
+logger = logging.getLogger(__name__)
 
 # Supported image file extensions (lowercase)
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".vsi", ".ets"}
@@ -63,9 +60,9 @@ def _to_gray(img: np.ndarray) -> np.ndarray:
 
 
 def _create_thumbnail(
-    img: Union[np.ndarray, da.Array],
+    img: np.ndarray | da.Array,
     target_long_side: int,
-) -> Tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float]:
     """
     Create a thumbnail and return the scale factor.
 
@@ -95,7 +92,7 @@ def _create_thumbnail(
 
 def _upsample_mask(
     mask_thumbnail: np.ndarray,
-    target_shape: Tuple[int, int],
+    target_shape: tuple[int, int],
 ) -> np.ndarray:
     """Upsample boolean mask using nearest-neighbor interpolation."""
     H, W = target_shape
@@ -105,7 +102,7 @@ def _upsample_mask(
 
 
 def _entropy_mask(
-    gray: Union[np.ndarray, da.Array],
+    gray: np.ndarray | da.Array,
     struct_elem_px: int,
     min_area: int,
 ) -> np.ndarray:
@@ -280,7 +277,7 @@ def _load_image(input_path: Path) -> np.ndarray:
 
 
 def segment_tissue(
-    img: Union[np.ndarray, da.Array],
+    img: np.ndarray | da.Array,
     backend: Backend = "local-entropy",
     target_long_side: int = 1800,
     min_area_px: int = 3000,
@@ -288,7 +285,7 @@ def segment_tissue(
     split_touching: bool = True,
     r_split: int = 2,
     diagnostics: bool = False,
-) -> Tuple[np.ndarray, Dict[str, Any]]:
+) -> tuple[np.ndarray, dict[str, Any]]:
     """
     Segment tissue regions from a whole-slide image.
 
@@ -379,12 +376,12 @@ def segment_tissue(
 
 
 def extract_tissue_tiles(
-    img: Union[np.ndarray, da.Array],
+    img: np.ndarray | da.Array,
     mask: np.ndarray,
     chunk_size: int = 512,
     pad_multiple: int = 512,
     extra_margin_px: int = 0,
-) -> List[da.Array]:
+) -> list[da.Array]:
     """
     Extract individual tissue tiles from image using mask.
 
@@ -480,12 +477,12 @@ def extract_tissue_tiles(
 
 
 def process_wsi(
-    input_path: Union[str, Path],
-    output_dir: Union[str, Path],
-    config: Optional[PipelineConfig] = None,
-    segmentation_config: Optional[SegmentationConfig] = None,
-    tile_config: Optional[TileConfig] = None,
-) -> Dict[str, Any]:
+    input_path: str | Path,
+    output_dir: str | Path,
+    config: PipelineConfig | None = None,
+    segmentation_config: SegmentationConfig | None = None,
+    tile_config: TileConfig | None = None,
+) -> dict[str, Any]:
     """
     Process a single whole-slide image.
 
@@ -601,12 +598,12 @@ def _is_image_file(path: Path) -> bool:
 
 
 def process_directory(
-    input_dir: Union[str, Path],
-    output_dir: Union[str, Path],
+    input_dir: str | Path,
+    output_dir: str | Path,
     pattern: str = "*.vsi",
-    config: Optional[PipelineConfig] = None,
+    config: PipelineConfig | None = None,
     **kwargs,
-) -> Dict[Path, List[Path]]:
+) -> dict[Path, list[Path]]:
     """
     Process all images in a directory.
 
@@ -658,12 +655,12 @@ def process_directory(
 
 
 def process_specimen(
-    input_dir: Union[str, Path],
-    output_dir: Union[str, Path],
-    config: Optional[Union[str, Path, PipelineConfig]] = None,
+    input_dir: str | Path,
+    output_dir: str | Path,
+    config: str | Path | PipelineConfig | None = None,
     pattern: str = "*.vsi",
-    specimen_name: Optional[str] = None,
-) -> Dict[str, Any]:
+    specimen_name: str | None = None,
+) -> dict[str, Any]:
     """
     Process a complete specimen (directory of WSI files).
 
@@ -737,7 +734,7 @@ class WSIProcessor:
 
     def __init__(
         self,
-        config: Optional[Union[str, Path, PipelineConfig]] = None,
+        config: str | Path | PipelineConfig | None = None,
     ):
         if config is None:
             self.config = PipelineConfig()
@@ -748,18 +745,18 @@ class WSIProcessor:
 
     def process_wsi(
         self,
-        input_path: Union[str, Path],
-        output_dir: Union[str, Path],
-    ) -> Dict[str, Any]:
+        input_path: str | Path,
+        output_dir: str | Path,
+    ) -> dict[str, Any]:
         """Process a single WSI file."""
         return process_wsi(input_path, output_dir, config=self.config)
 
     def process_directory(
         self,
-        input_dir: Union[str, Path],
-        output_dir: Union[str, Path],
+        input_dir: str | Path,
+        output_dir: str | Path,
         pattern: str = "*.vsi",
-    ) -> Dict[Path, List[Path]]:
+    ) -> dict[Path, list[Path]]:
         """Process all images in a directory."""
         return process_directory(
             input_dir, output_dir, pattern=pattern, config=self.config
@@ -767,11 +764,11 @@ class WSIProcessor:
 
     def process_specimen(
         self,
-        input_dir: Union[str, Path],
-        output_dir: Union[str, Path],
+        input_dir: str | Path,
+        output_dir: str | Path,
         pattern: str = "*.vsi",
-        specimen_name: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        specimen_name: str | None = None,
+    ) -> dict[str, Any]:
         """Process a complete specimen."""
         return process_specimen(
             input_dir,

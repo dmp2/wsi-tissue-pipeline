@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Tuple
 
 import zarr
 
@@ -37,7 +36,7 @@ def _safe_name(s: str) -> str:
     return name or "untitled"
 
 
-def _get_multiscales_paths(root: zarr.Group) -> List[str]:
+def _get_multiscales_paths(root: zarr.Group) -> list[str]:
     """
     Get the paths info from the datasets within the zarr group.
     """
@@ -45,7 +44,7 @@ def _get_multiscales_paths(root: zarr.Group) -> List[str]:
     return [d["path"] for d in ms["datasets"]]
 
 
-def _phys_xy_um(root: zarr.Group, L: int=0) -> Tuple[float,float]:
+def _phys_xy_um(root: zarr.Group, L: int=0) -> tuple[float,float]:
     """
     Read (phys_x_um, phys_y_um) from the child's NGFF multiscales at Lth resolution.
     L=0 is the highest resolution, used by default
@@ -53,7 +52,7 @@ def _phys_xy_um(root: zarr.Group, L: int=0) -> Tuple[float,float]:
     # dpaths = _get_multiscales_paths(root)
     ms = root.attrs["multiscales"][0]
     scale = ms["datasets"][L]["coordinateTransformations"][0]["scale"]  # NGFF order: [c,y,x]
-    phys_y = float(scale[1]) 
+    phys_y = float(scale[1])
     phys_x = float(scale[2])
     return phys_x, phys_y # (px_um, py_um)
 
@@ -75,7 +74,7 @@ def _detect_source_ds_factor(root: zarr.Group) -> float:
 
 
 
-def _sizes_for_mips_xy(W: int, H: int, levels: int) -> List[Tuple[int,int]]:
+def _sizes_for_mips_xy(W: int, H: int, levels: int) -> list[tuple[int,int]]:
     sizes = []
     w, h = W, H
     for _ in range(levels):
@@ -84,9 +83,9 @@ def _sizes_for_mips_xy(W: int, H: int, levels: int) -> List[Tuple[int,int]]:
         h = max(1, h // 2)
     return sizes
 
-def _voxel_sizes_for_mips_xy(phys_xyz: int, levels: int, scale_factor: int = 2) -> List[Tuple[int,int,int]]:
+def _voxel_sizes_for_mips_xy(phys_xyz: int, levels: int, scale_factor: int = 2) -> list[tuple[int,int,int]]:
     """
-    phys_xyz is (x_nm, y_nm, z_nm). 
+    phys_xyz is (x_nm, y_nm, z_nm).
     Double XY per MIP; keep Z fixed.
     Returns [(x0,y0,z0), (x1,y1,z1), ...] as ints.
     """

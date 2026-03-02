@@ -9,10 +9,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import warnings
-
-logger = logging.getLogger(__name__)
-from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple, Union
+from typing import Literal
 
 import dask
 import dask.array as da
@@ -27,6 +24,8 @@ from .core import create_thumbnail, to_gray, upsample_mask
 from .entropy import entropy_mask
 from .morphology import split_touching_components
 from .otsu import otsu_mask
+
+logger = logging.getLogger(__name__)
 
 # Backend type definition
 Backend = Literal[
@@ -103,10 +102,7 @@ class WSISegmenter:
                 )
             # Try the specific module and surface the *real* error if it fails
             try:
-                from tiatoolbox.tools.tissuemask import (
-                    MorphologicalMasker,
-                    OtsuTissueMasker,
-                )
+                pass
             except Exception as e:
                 raise ImportError(
                     "TIAToolbox is present but `tiatoolbox.tools.tissuemask` failed to import. "
@@ -117,7 +113,7 @@ class WSISegmenter:
         if backend == "pathml-he" and not _HAS_PATHML:
             raise ImportError("PathML not installed but backend requested.")
 
-    def __call__(self, image: Union[np.ndarray, da.Array]) -> np.ndarray:
+    def __call__(self, image: np.ndarray | da.Array) -> np.ndarray:
         """
         Generate boolean mask for a channel-last image.
 
@@ -193,7 +189,7 @@ class WSISegmenter:
 
 
 def segment_mask(
-    image: Union[np.ndarray, da.Array],
+    image: np.ndarray | da.Array,
     *,
     backend: Backend = "local-entropy",
     target_long_side: int = 1800,
@@ -253,15 +249,15 @@ def make_lowres_mask(
     struct_elem_px: int = 9,
     additional_smooth: bool = False,
     output_images: bool = True,
-    ref_hw: Tuple[int, int] = (1458, 2814),
+    ref_hw: tuple[int, int] = (1458, 2814),
     edge_only: bool = True,
     small_switch: int = 1200,
-    keep_top_k: Optional[int] = None,
+    keep_top_k: int | None = None,
     split_touching: bool = True,
     r_split: int = 2,
     diagnostics: bool = False,
     return_diag: bool = False,
-) -> Tuple[np.ndarray, Optional[Dict]]:
+) -> tuple[np.ndarray, dict | None]:
     """
     Create low-resolution tissue mask using entropy-based segmentation.
 
@@ -376,7 +372,7 @@ def make_lowres_mask(
     bw = morphology.remove_small_objects(bw, min_size=min_area)
     bw = morphology.remove_small_holes(bw, area_threshold=min_area)
 
-    diag: Dict = {}
+    diag: dict = {}
     if not bw.any():
         return (bw, diag if return_diag else None)
 

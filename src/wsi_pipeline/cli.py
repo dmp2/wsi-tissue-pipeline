@@ -6,10 +6,10 @@ Provides CLI commands for processing, QC, and visualization.
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
@@ -81,7 +81,7 @@ def main(ctx: click.Context, verbose: bool):
 def process(
     input_path: Path,
     output_dir: Path,
-    config_path: Optional[Path],
+    config_path: Path | None,
     backend: str,
     mlflow_enabled: bool,
 ):
@@ -154,7 +154,7 @@ def batch(
     input_dir: Path,
     output_dir: Path,
     pattern: str,
-    config_path: Optional[Path],
+    config_path: Path | None,
     mlflow_enabled: bool,
 ):
     """Batch process all WSI files in a directory."""
@@ -281,7 +281,7 @@ def visualize(
     try:
         from .neuroglancer import start_neuroglancer_server
 
-        console.print(f"[bold blue]Starting Neuroglancer server...")
+        console.print("[bold blue]Starting Neuroglancer server...")
         console.print(f"[bold blue]Zarr directory:[/] {zarr_dir}")
         console.print(f"[bold blue]Neuroglancer:[/] http://localhost:{port}")
         console.print(f"[bold blue]File server:[/] http://localhost:{http_port}")
@@ -304,7 +304,7 @@ def visualize(
     type=click.Path(path_type=Path),
     help="Output path for config file",
 )
-def init_config(output_path: Optional[Path]):
+def init_config(output_path: Path | None):
     """Create a default configuration file."""
     if output_path is None:
         output_path = Path("config.yaml")
@@ -330,7 +330,7 @@ def init_tracking(tracking_uri: str, experiment: str):
     success = init_mlflow(tracking_uri=tracking_uri, experiment_name=experiment)
 
     if success:
-        console.print(f"[bold green]MLflow initialized")
+        console.print("[bold green]MLflow initialized")
         console.print(f"[bold blue]Tracking URI:[/] {tracking_uri}")
         console.print(f"[bold blue]Experiment:[/] {experiment}")
     else:
@@ -365,7 +365,8 @@ def info():
         table.add_row("MLflow", "[red]Not installed")
 
     try:
-        import neuroglancer
+        if importlib.util.find_spec("neuroglancer") is None:
+            raise ImportError
         table.add_row("Neuroglancer", "[green]Available")
     except ImportError:
         table.add_row("Neuroglancer", "[red]Not installed")

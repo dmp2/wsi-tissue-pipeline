@@ -23,14 +23,12 @@ import json
 import logging
 import os
 import re
-import sys
 from pathlib import Path
-from typing import Any, List, Optional
-
-logger = logging.getLogger(__name__)
+from typing import Any
 
 import numpy as np
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,10 +93,10 @@ def _extract_frame_number(
         raise ValueError(f"Cannot split {name!r} by separator {sep!r}")
     try:
         token = tokens[fnumidx]
-    except IndexError:
+    except IndexError as err:
         raise ValueError(
             f"fnumidx={fnumidx} out of range for {name!r} split by {sep!r}"
-        )
+        ) from err
     m = re.search(r"(\d+)$", token)
     if not m:
         raise ValueError(
@@ -153,7 +151,7 @@ def _format_missing_like(
 def _load_samples_rows(samples_tsv: str | Path) -> list[dict[str, str]]:
     """Load rows from a samples.tsv file."""
 
-    with open(samples_tsv, "r", encoding="utf-8", newline="") as f:
+    with open(samples_tsv, encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
         return list(reader)
 
@@ -163,7 +161,7 @@ def _load_sidecar(path: Path) -> dict[str, Any] | None:
 
     if not path.exists():
         return None
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -347,7 +345,7 @@ def make_samples_tsv(
     species_name: str = "Homo Sapiens",
     ext: str = "",
     slice_downfactor: int = 1,
-    max_slice: Optional[int] = None,
+    max_slice: int | None = None,
     sep: str = "_",
     fnumidx: int = -1,
 ) -> Path:
@@ -464,7 +462,7 @@ def remove_json_sidecars(
     *,
     dry_run: bool = False,
     verbose: bool = True,
-) -> List[Path]:
+) -> list[Path]:
     """Delete all ``.json`` files in a directory (non-recursive).
 
     Useful for cleaning up before regenerating JSON sidecar metadata.
@@ -545,13 +543,13 @@ def set_up_hist_for_emlddmm(config: dict) -> None:
     """
     try:
         import histsetup as hs
-    except ImportError:
+    except ImportError as err:
         raise ImportError(
             "The 'histsetup' module from the 'emlddmm' package is required "
             "for set_up_hist_for_emlddmm(). Install it with:\n"
             "  pip install emlddmm\n"
             "or add it to sys.path manually."
-        )
+        ) from err
 
     subject_dir = Path(config.get("subject_dir", "."))
     output_dir = Path(config.get("output_dir", "."))

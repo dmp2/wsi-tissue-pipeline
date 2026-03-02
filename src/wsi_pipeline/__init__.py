@@ -45,21 +45,21 @@ from wsi_pipeline.config import PipelineConfig, load_config
 
 # ETS/VSI file handling
 from wsi_pipeline.etsfile import ETSFile, ETSFileError
+
+# Quality control
+from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids
+
+# Segmentation (high-level)
+from wsi_pipeline.segmentation import WSISegmenter, segment_mask
 from wsi_pipeline.vsi_converter import find_ets_file, vsi_to_flat_image
 
 # Main processing (top-level interface)
 from wsi_pipeline.wsi_processing import (
     WSIProcessor,
-    process_wsi,
     process_directory,
     process_specimen,
+    process_wsi,
 )
-
-# Segmentation (high-level)
-from wsi_pipeline.segmentation import WSISegmenter, segment_mask
-
-# Quality control
-from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids
 
 __all__ = [
     # Version info

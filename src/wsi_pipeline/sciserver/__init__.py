@@ -18,8 +18,8 @@ get_sciserver_user       Return authenticated SciServer username
 """
 
 from wsi_pipeline.sciserver.environment import (
-    is_sciserver_environment,
     get_sciserver_user,
+    is_sciserver_environment,
 )
 
 __all__ = [

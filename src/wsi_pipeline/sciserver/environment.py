@@ -6,13 +6,12 @@ Compute environment and retrieving user information.
 """
 
 from __future__ import annotations
-from typing import Optional
 
 
 def is_sciserver_environment() -> bool:
     """
     Check if running in SciServer Compute environment.
-    
+
     Returns
     -------
     bool
@@ -27,10 +26,10 @@ def is_sciserver_environment() -> bool:
         return False
 
 
-def get_sciserver_user() -> Optional[str]:
+def get_sciserver_user() -> str | None:
     """
     Get current SciServer username.
-    
+
     Returns
     -------
     str or None
@@ -46,10 +45,10 @@ def get_sciserver_user() -> Optional[str]:
         return None
 
 
-def get_sciserver_token() -> Optional[str]:
+def get_sciserver_token() -> str | None:
     """
     Get current SciServer authentication token.
-    
+
     Returns
     -------
     str or None

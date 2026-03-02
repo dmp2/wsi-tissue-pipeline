@@ -7,8 +7,6 @@ building power-of-two pyramids using efficient downsampling.
 
 from __future__ import annotations
 
-from typing import List
-
 import numpy as np
 
 
@@ -26,14 +24,14 @@ def compute_num_mips_min_side(width: int, height: int, min_side_for_mips: int) -
     return levels
 
 
-def build_mips_from_yxc(base_yxc: np.ndarray, num_mips: int) -> List[np.ndarray]:
+def build_mips_from_yxc(base_yxc: np.ndarray, num_mips: int) -> list[np.ndarray]:
     """
     Make a power-of-two mip chain using tinybrain's 2x2 average pooling.
     Returns [mip0, mip1, ...], each (H, W, C). No recompute later.
     """
     if num_mips <= 1:
         return [base_yxc]
-    
+
     import tinybrain  # local import so module loads without hard dep
 
     # Get channel dim
@@ -48,5 +46,5 @@ def build_mips_from_yxc(base_yxc: np.ndarray, num_mips: int) -> List[np.ndarray]
 
     mips = [np.stack([per_channel[c][lvl] for c in range(C)], axis=-1)
             for lvl in range(num_mips)] # list of (H,W,C)
-    
+
     return mips

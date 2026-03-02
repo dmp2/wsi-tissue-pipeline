@@ -10,7 +10,6 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import dask.array as da
 import numpy as np
@@ -20,20 +19,20 @@ from numcodecs import Blosc
 
 
 def write_ngff_from_mips(
-    mips_yxc: List[np.ndarray],
+    mips_yxc: list[np.ndarray],
     out_dir: os.PathLike,
-    phys_xy_um: Tuple[float, float],
+    phys_xy_um: tuple[float, float],
     name: str = "tissue",
     chunks_xy: int = 512,
-    compressor: Optional[Blosc] = None,
-    dtype: Optional[np.dtype] = None,
+    compressor: Blosc | None = None,
+    dtype: np.dtype | None = None,
 ) -> None:
     """
     Write multiscale NGFF at out_dir with datasets s0..sN (array layout (C,Y,X)).
-    
+
     Uses manual Zarr array creation with OME-NGFF v0.4 metadata.
     Multiscales v0.4 with axes [c,y,x] and per-level 'scale' transform (µm).
-    
+
     Parameters
     ----------
     mips_yxc : List[np.ndarray]
@@ -70,7 +69,7 @@ def write_ngff_from_mips(
     for lvl, img in enumerate(mips_yxc):
         if img.ndim != 3:
             raise ValueError(f"mips[{lvl}] must be (H,W,C), got shape {img.shape}")
-        
+
         # Preallocate the current image shape
         H, W, _ = img.shape
 
@@ -100,7 +99,7 @@ def write_ngff_from_mips(
         # multiscales dataset entry (scale doubles per level)
         scale = [1.0, phys_xy_um[1] * (2 ** lvl), phys_xy_um[0] * (2 ** lvl)]
         datasets.append({
-            "path": f"s{lvl}", 
+            "path": f"s{lvl}",
             "coordinateTransformations": [{"type": "scale", "scale": scale}]
         })
 
@@ -136,24 +135,24 @@ def write_ngff_from_mips(
 
 
 def write_ngff_from_mips_ngffzarr(
-    mips_yxc: List[np.ndarray],
+    mips_yxc: list[np.ndarray],
     out_dir: Path,
-    phys_xy_um: Tuple[float, float],
+    phys_xy_um: tuple[float, float],
     *,
     name: str = "image",
     chunks_xy: int = 512,
     version: str = "0.4",
     overwrite: bool = True,
-    channel_labels: Optional[List[str]] = None,
-    channel_colors: Optional[List[str]] = None,
+    channel_labels: list[str] | None = None,
+    channel_colors: list[str] | None = None,
     add_omero: bool = True
 ) -> None:
     """
     Write a multiscale OME-Zarr (v0.4 metadata) with TensorStore backend.
-    
+
     Uses ngff-zarr library for standardized metadata and TensorStore
     for efficient chunked writes.
-    
+
     Parameters
     ----------
     mips_yxc : List[np.ndarray]
@@ -186,7 +185,7 @@ def write_ngff_from_mips_ngffzarr(
 
     # Ensure each level is (C,Y,X) and dask-chunked
     cyx_levels = []
-    for lvl, yxc in enumerate(mips_yxc):
+    for _lvl, yxc in enumerate(mips_yxc):
         if hasattr(yxc, "chunks"):  # dask array
             arr_yxc = yxc
         else:  # numpy -> dask

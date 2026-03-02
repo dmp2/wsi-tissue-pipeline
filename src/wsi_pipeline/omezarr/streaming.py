@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
 
 import dask.array as da
 import numpy as np
@@ -28,21 +27,21 @@ except ImportError:
 
 
 def write_ngff_from_tile_ts(
-    tile_yxc: Union[np.ndarray, da.Array],
-    out_path: Union[str, Path],
-    base_px_um_xy: Tuple[float, float],
+    tile_yxc: np.ndarray | da.Array,
+    out_path: str | Path,
+    base_px_um_xy: tuple[float, float],
     *,
     chunks_xy: int = 512,
     num_mips: int = 8,
     name: str = "image",
     version: str = "0.4",
-    channel_labels: Optional[List[str]] = None,
-    channel_colors: Optional[List[str]] = None,
+    channel_labels: list[str] | None = None,
+    channel_colors: list[str] | None = None,
 ) -> None:
     """
     Stream a large (Y,X,C) tile to an OME-Zarr multiscale using ngff-zarr
     with the TensorStore backend (no full in-RAM pyramid).
-    
+
     Parameters
     ----------
     tile_yxc : np.ndarray or da.Array
@@ -125,22 +124,22 @@ def write_ngff_from_tile_ts(
 
 def write_ngff_from_tile_streaming_ome(
     tile_yxc_da: da.Array,
-    out_dir: Union[Path, str],
-    phys_xy_um: Tuple[float, float],
+    out_dir: Path | str,
+    phys_xy_um: tuple[float, float],
     *,
     block_xy: int = 512,
     num_mips: int,
     name: str = "image",
     compressor=None,
     dtype: str = "uint8",
-    channel_labels: Optional[List[str]] = None,
-    channel_colors: Optional[List[str]] = None,
+    channel_labels: list[str] | None = None,
+    channel_colors: list[str] | None = None,
 ) -> None:
     """
     Constant-memory, blockwise OME-Zarr writer (v0.4), no ngff-zarr.
-    
+
     Streams each mip directly; attaches multiscales + OMERO metadata.
-    
+
     Parameters
     ----------
     tile_yxc_da : da.Array
@@ -219,7 +218,7 @@ def write_ngff_from_tile_streaming_ome(
 
     # Attach OME-NGFF v0.4 metadata (axes + datasets with scale transforms)
     datasets = []
-    for m, (sy, sx, _sc) in enumerate(shapes):
+    for m, (_sy, _sx, _sc) in enumerate(shapes):
         scale = [1.0, py_um * (2**m), px_um * (2**m)]
         datasets.append({
             "path": f"s{m}",

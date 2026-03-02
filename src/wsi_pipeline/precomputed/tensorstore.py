@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import List, Tuple, Union
 
 import dask.array as da
 import numpy as np
@@ -26,15 +25,15 @@ def create_precomputed_tensorstore(
     W: int,
     H: int,
     Z: int,
-    voxel_size_um: Tuple[float, float, float],
+    voxel_size_um: tuple[float, float, float],
     num_mips: int,
     chunk_xy: int = 512,
     dtype: str = "uint8",
     encoding: str = "raw",
-) -> List[ts.TensorStore]:
+) -> list[ts.TensorStore]:
     """
     Create TensorStore neuroglancer_precomputed dataset with multiple scales.
-    
+
     Parameters
     ----------
     precomp_path : str
@@ -55,7 +54,7 @@ def create_precomputed_tensorstore(
         Data type for the volume.
     encoding : str
         Encoding format ("raw", "jpeg", etc.).
-    
+
     Returns
     -------
     List[ts.TensorStore]
@@ -144,15 +143,15 @@ def create_precomputed_tensorstore(
 
 
 def write_slice_tensorstore(
-    writers: List[ts.TensorStore],
+    writers: list[ts.TensorStore],
     z_index: int,
-    mips_yxc: List[np.ndarray],
+    mips_yxc: list[np.ndarray],
 ) -> None:
     """
     Write one Z slice for all mip levels using TensorStore.
-    
+
     Data is written immediately (synchronous) - no caching issues.
-    
+
     Parameters
     ----------
     writers : List[ts.TensorStore]
@@ -162,7 +161,7 @@ def write_slice_tensorstore(
     mips_yxc : List[np.ndarray]
         List of MIP arrays, each (H, W, C).
     """
-    for mip, (dataset, img_yxc) in enumerate(zip(writers, mips_yxc)):
+    for _mip, (dataset, img_yxc) in enumerate(zip(writers, mips_yxc, strict=False)):
         # Transform: (H, W, C) = (Y, X, C) -> (X, Y, C)
         img_xyc = np.transpose(img_yxc, (1, 0, 2))
 
@@ -171,17 +170,17 @@ def write_slice_tensorstore(
 
 
 def write_slice_tensorstore_streaming(
-    writers: List[ts.TensorStore],
+    writers: list[ts.TensorStore],
     z_index: int,
-    tile_yxc: Union[np.ndarray, da.Array],
+    tile_yxc: np.ndarray | da.Array,
     block_xy: int = 512,
 ) -> None:
     """
     Write one Z slice with streaming (block-by-block) for large tiles.
-    
+
     Writes the base tile and generates lower resolution MIPs on-the-fly
     using nearest-neighbor decimation.
-    
+
     Parameters
     ----------
     writers : List[ts.TensorStore]
@@ -201,8 +200,6 @@ def write_slice_tensorstore_streaming(
         tile_cyx = np.transpose(tile_yxc, (2, 0, 1))
         Y, X = tile_yxc.shape[0], tile_yxc.shape[1]
 
-    num_mips = len(writers)
-    
     for y0 in range(0, Y, block_xy):
         y1 = min(Y, y0 + block_xy)
         for x0 in range(0, X, block_xy):
@@ -218,12 +215,12 @@ def write_slice_tensorstore_streaming(
                 step = 1 << level
                 y0m, y1m = y0 // step, y1 // step
                 x0m, x1m = x0 // step, x1 // step
-                
+
                 if y0m == y1m or x0m == x1m:
                     continue
-                    
+
                 blk_yxc = np.transpose(src_cyx[:, ::step, ::step], (1, 2, 0))  # (bh', bw', C)
                 slab = np.ascontiguousarray(blk_yxc)
-                
+
                 # Synchronous subscript write: TensorStore handles chunking
                 ds[x0m:x1m, y0m:y1m, z_index] = slab

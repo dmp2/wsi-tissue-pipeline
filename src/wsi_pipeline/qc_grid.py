@@ -11,11 +11,10 @@ import math
 import re
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-from typing import Dict, List, Optional, Tuple, Union
-
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+
+logger = logging.getLogger(__name__)
 
 # Try to import torch for faster grid generation
 try:
@@ -37,12 +36,12 @@ DEFAULT_PATTERN = re.compile(
 
 def find_images(
     root: Path,
-    pattern: Optional[re.Pattern] = None,
-    extensions: Tuple[str, ...] = (".tif", ".tiff", ".png", ".jpg", ".jpeg"),
-) -> List[Path]:
+    pattern: re.Pattern | None = None,
+    extensions: tuple[str, ...] = (".tif", ".tiff", ".png", ".jpg", ".jpeg"),
+) -> list[Path]:
     """
     Find all images matching a pattern in a directory.
-    
+
     Parameters
     ----------
     root : Path
@@ -51,7 +50,7 @@ def find_images(
         Regex pattern for filename matching.
     extensions : tuple
         Valid file extensions.
-    
+
     Returns
     -------
     list of Path
@@ -60,30 +59,30 @@ def find_images(
     root = Path(root)
     if pattern is None:
         pattern = DEFAULT_PATTERN
-    
+
     images = []
     for ext in extensions:
         for p in root.glob(f"*{ext}"):
             if pattern.match(p.name):
                 images.append(p)
-    
+
     return sorted(set(images))
 
 
 def parse_filename(
     fname: str,
-    pattern: Optional[re.Pattern] = None,
-) -> Optional[Dict[str, Union[str, int]]]:
+    pattern: re.Pattern | None = None,
+) -> dict[str, str | int] | None:
     """
     Parse tissue image filename into components.
-    
+
     Parameters
     ----------
     fname : str
         Filename to parse.
     pattern : re.Pattern, optional
         Regex pattern with named groups.
-    
+
     Returns
     -------
     dict or None
@@ -91,11 +90,11 @@ def parse_filename(
     """
     if pattern is None:
         pattern = DEFAULT_PATTERN
-    
+
     m = pattern.match(fname)
     if not m:
         return None
-    
+
     groups = m.groupdict()
     return {
         "prefix": groups.get("prefix", ""),
@@ -107,40 +106,40 @@ def parse_filename(
 
 
 def group_by_slide(
-    paths: List[Path],
-    pattern: Optional[re.Pattern] = None,
-) -> Dict[int, List[Tuple[int, int, Path]]]:
+    paths: list[Path],
+    pattern: re.Pattern | None = None,
+) -> dict[int, list[tuple[int, int, Path]]]:
     """
     Group images by slide number.
-    
+
     Parameters
     ----------
     paths : list of Path
         Image file paths.
     pattern : re.Pattern, optional
         Filename pattern.
-    
+
     Returns
     -------
     dict
         {slide_num: [(slice_idx, overall_idx, Path), ...]}
     """
-    grouped: Dict[int, List[Tuple[int, int, Path]]] = {}
-    
+    grouped: dict[int, list[tuple[int, int, Path]]] = {}
+
     for p in paths:
         parsed = parse_filename(p.name, pattern)
         if parsed is None:
             continue
-        
+
         slide = parsed["slide"]
         grouped.setdefault(slide, []).append(
             (parsed["slice_on_slide"], parsed["overall"], p)
         )
-    
+
     # Sort within each slide
     for slide in grouped:
         grouped[slide].sort(key=lambda x: (x[0], x[1]))
-    
+
     return dict(sorted(grouped.items()))
 
 
@@ -151,7 +150,7 @@ def load_thumbnail(
 ) -> Image.Image:
     """
     Load and resize image to thumbnail.
-    
+
     Parameters
     ----------
     path : Path
@@ -160,7 +159,7 @@ def load_thumbnail(
         Maximum size for shortest edge.
     mode : str
         PIL image mode.
-    
+
     Returns
     -------
     PIL.Image
@@ -181,7 +180,7 @@ def annotate_image(
 ) -> Image.Image:
     """
     Add text annotation to image.
-    
+
     Parameters
     ----------
     img : PIL.Image
@@ -192,7 +191,7 @@ def annotate_image(
         Position: 'top-left', 'top-right', 'bottom-left', 'bottom-right'.
     font_size : int
         Font size.
-    
+
     Returns
     -------
     PIL.Image
@@ -200,46 +199,46 @@ def annotate_image(
     """
     img = img.copy()
     draw = ImageDraw.Draw(img)
-    
+
     try:
         font = ImageFont.load_default()
     except Exception:
         font = None
-    
+
     # Get text size
     bbox = draw.textbbox((0, 0), text, font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    
+
     # Calculate position
     w, h = img.size
     pad = 2
-    
+
     if "top" in position:
         y = pad
     else:
         y = h - th - pad * 2
-    
+
     if "left" in position:
         x = pad
     else:
         x = w - tw - pad * 2
-    
+
     # Draw background box
     draw.rectangle([x - pad, y - pad, x + tw + pad, y + th + pad], fill=(0, 0, 0))
     draw.text((x, y), text, fill=(255, 255, 255), font=font)
-    
+
     return img
 
 
 def create_grid_pil(
-    images: List[Image.Image],
+    images: list[Image.Image],
     columns: int,
     padding: int = 1,
-    background: Tuple[int, int, int] = (255, 255, 255),
+    background: tuple[int, int, int] = (255, 255, 255),
 ) -> Image.Image:
     """
     Create image grid using PIL.
-    
+
     Parameters
     ----------
     images : list of PIL.Image
@@ -250,7 +249,7 @@ def create_grid_pil(
         Padding between images.
     background : tuple
         Background color.
-    
+
     Returns
     -------
     PIL.Image
@@ -258,35 +257,35 @@ def create_grid_pil(
     """
     if not images:
         raise ValueError("No images provided")
-    
+
     # Normalize sizes
     w, h = images[0].size
     images = [ImageOps.pad(img, (w, h), color=background) for img in images]
-    
+
     rows = math.ceil(len(images) / columns)
     grid_w = columns * w + (columns - 1) * padding
     grid_h = rows * h + (rows - 1) * padding
-    
+
     grid = Image.new("RGB", (grid_w, grid_h), background)
-    
+
     for idx, img in enumerate(images):
         r = idx // columns
         c = idx % columns
         x = c * (w + padding)
         y = r * (h + padding)
         grid.paste(img, (x, y))
-    
+
     return grid
 
 
 def create_grid_torch(
-    images: List[Image.Image],
+    images: list[Image.Image],
     columns: int,
     padding: int = 1,
 ) -> Image.Image:
     """
     Create image grid using PyTorch (faster for large grids).
-    
+
     Parameters
     ----------
     images : list of PIL.Image
@@ -295,7 +294,7 @@ def create_grid_torch(
         Number of columns.
     padding : int
         Padding between images.
-    
+
     Returns
     -------
     PIL.Image
@@ -303,35 +302,35 @@ def create_grid_torch(
     """
     if not TORCH_AVAILABLE:
         raise RuntimeError("PyTorch not available")
-    
+
     # Convert to tensors
     tensors = []
     for img in images:
         arr = np.array(img, copy=True)
         t = torch.from_numpy(arr).permute(2, 0, 1).float() / 255.0
         tensors.append(t)
-    
+
     batch = torch.stack(tensors)
     grid = make_grid(batch, nrow=columns, padding=padding)
-    
+
     # Convert back to PIL
     grid = (grid.clamp(0, 1) * 255).byte().permute(1, 2, 0).cpu().numpy()
     return Image.fromarray(grid, mode="RGB")
 
 
 def build_qc_grids(
-    input_dir: Union[str, Path],
-    output_dir: Union[str, Path],
+    input_dir: str | Path,
+    output_dir: str | Path,
     thumb_size: int = 256,
     padding: int = 1,
-    columns: Union[int, str] = "auto",
+    columns: int | str = "auto",
     label_mode: str = "slice",
     backend: str = "auto",
     create_master: bool = True,
-) -> List[Path]:
+) -> list[Path]:
     """
     Build QC grids for all images in a directory.
-    
+
     Parameters
     ----------
     input_dir : str or Path
@@ -350,7 +349,7 @@ def build_qc_grids(
         Grid backend: 'auto', 'torch', or 'pil'.
     create_master : bool
         Create master contact sheet with all images.
-    
+
     Returns
     -------
     list of Path
@@ -359,28 +358,28 @@ def build_qc_grids(
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Select backend
     if backend == "auto":
         backend = "torch" if TORCH_AVAILABLE else "pil"
-    
+
     # Find and group images
     images = find_images(input_dir)
     if not images:
         logger.warning("No matching images found in %s", input_dir)
         return []
-    
+
     grouped = group_by_slide(images)
-    
+
     output_paths = []
-    
+
     # Build per-slide grids
     for slide, items in grouped.items():
         thumbs = []
-        
+
         for slice_idx, overall_idx, path in items:
             thumb = load_thumbnail(path, thumb_size)
-            
+
             # Add label
             if label_mode == "slice":
                 text = f"{slice_idx:02d}"
@@ -390,37 +389,37 @@ def build_qc_grids(
                 text = f"s{slice_idx:02d}|g{overall_idx:04d}"
             else:
                 text = None
-            
+
             if text:
                 thumb = annotate_image(thumb, text)
-            
+
             thumbs.append(thumb)
-        
+
         # Calculate columns
         if columns == "auto":
             n_cols = max(1, int(math.sqrt(len(thumbs)) + 0.5))
         else:
             n_cols = int(columns)
-        
+
         # Create grid
         if backend == "torch" and TORCH_AVAILABLE:
             grid = create_grid_torch(thumbs, n_cols, padding)
         else:
             grid = create_grid_pil(thumbs, n_cols, padding)
-        
+
         # Save
         out_path = output_dir / f"slide_{slide:02d}_grid.png"
         grid.save(out_path, dpi=(300, 300))
         output_paths.append(out_path)
-    
+
     # Build master sheet
     if create_master and grouped:
         all_thumbs = []
-        
+
         for slide, items in grouped.items():
             for slice_idx, overall_idx, path in items:
                 thumb = load_thumbnail(path, thumb_size)
-                
+
                 if label_mode == "slice":
                     text = f"s{slide:02d}/{slice_idx:02d}"
                 elif label_mode == "overall":
@@ -429,26 +428,26 @@ def build_qc_grids(
                     text = f"s{slide:02d}:{slice_idx:02d}|{overall_idx:04d}"
                 else:
                     text = None
-                
+
                 if text:
                     thumb = annotate_image(thumb, text)
-                
+
                 all_thumbs.append(thumb)
-        
+
         if columns == "auto":
             n_cols = max(1, int(math.sqrt(len(all_thumbs)) + 0.5))
         else:
             n_cols = int(columns)
-        
+
         if backend == "torch" and TORCH_AVAILABLE:
             master = create_grid_torch(all_thumbs, n_cols, padding)
         else:
             master = create_grid_pil(all_thumbs, n_cols, padding)
-        
+
         master_path = output_dir / "master_contact_sheet.png"
         master.save(master_path, dpi=(300, 300))
         output_paths.append(master_path)
-    
+
     logger.info("Created %d QC grids in %s", len(output_paths), output_dir)
     return output_paths
 
@@ -471,7 +470,7 @@ class QCGridBuilder:
         self,
         thumb_size: int = 256,
         padding: int = 1,
-        columns: Union[int, str] = "auto",
+        columns: int | str = "auto",
         label_mode: str = "slice",
         backend: str = "auto",
     ):
@@ -483,10 +482,10 @@ class QCGridBuilder:
 
     def build(
         self,
-        input_dir: Union[str, Path],
-        output_dir: Union[str, Path],
+        input_dir: str | Path,
+        output_dir: str | Path,
         create_master: bool = True,
-    ) -> List[Path]:
+    ) -> list[Path]:
         """Build QC grids for a directory."""
         return build_qc_grids(
             input_dir,

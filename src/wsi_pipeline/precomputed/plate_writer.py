@@ -6,19 +6,18 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
-
-logger = logging.getLogger(__name__)
 
 import dask.array as da
 
-from ..omezarr.pyramid import compute_num_mips_min_side, build_mips_from_yxc
+from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
 from .cloudvolume import create_precomputed_cloudvolume, write_slice_cloudvolume
 from .tensorstore import (
     create_precomputed_tensorstore,
     write_slice_tensorstore,
     write_slice_tensorstore_streaming,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PlatePrecomputedWriter:
@@ -31,7 +30,7 @@ class PlatePrecomputedWriter:
                  width: int, height: int, z_slices: int,
                  voxel_size_um=(1.0,1.0,1.0),
                  chunk_xy: int = 512,
-                 min_side_for_mips: Optional[int] = None,
+                 min_side_for_mips: int | None = None,
                  backend: str = "tensorstore", # "cloudvolume",
                  dtype: str = "uint8",
                  encoding: str = "raw",
@@ -47,7 +46,7 @@ class PlatePrecomputedWriter:
         self.encoding = encoding
         self.stream_min_side = stream_min_side
         self.stream_bytes_threshold = stream_bytes_threshold
-        
+
 
         if min_side_for_mips is None:
             min_side_for_mips = chunk_xy
@@ -71,7 +70,7 @@ class PlatePrecomputedWriter:
             raise ValueError("backend must be 'cloudvolume' or 'tensorstore'")
 
 
-    def should_stream(self, tile_shape_yxc: Tuple[int,int,int], bytes_per_px: int = 1) -> bool:
+    def should_stream(self, tile_shape_yxc: tuple[int,int,int], bytes_per_px: int = 1) -> bool:
         y, x, c = tile_shape_yxc
         # Large side or large byte footprint? stream.
         if max(y, x) >= self.stream_min_side:
@@ -79,14 +78,14 @@ class PlatePrecomputedWriter:
         # 1.5 GB default safety cap (tune for your RAM; includes temp copies)
         est_bytes = y * x * c * max(1, bytes_per_px)
         return est_bytes >= self.stream_bytes_threshold
-    
+
     # Streaming option writes base tile to all mips
     def write_slice_streaming(self, z_index: int, tile_yxc) -> None:
         if self.backend != "tensorstore":
             raise NotImplementedError("Streaming is implemented for TensorStore backend.")
         write_slice_tensorstore_streaming(self._writers, z_index, tile_yxc, block_xy=self.chunk_xy)
 
-    
+
 
     def write_slice(self, z_index: int, mips_or_tile) -> None:
         """
@@ -136,7 +135,7 @@ class PlatePrecomputedWriter:
             logger.debug("TensorStore writes completed (no flush needed)")
             # Just clear references
             self._writers = None
-    
+
 
     def verify_write(self):
         """Verify data was written correctly."""
@@ -144,14 +143,14 @@ class PlatePrecomputedWriter:
             path = Path(self.precomp_path[7:])
         else:
             path = Path(self.precomp_path)
-        
+
         # Check info file
         info_path = path / "info"
         if info_path.exists():
             info = json.loads(info_path.read_text())
             logger.info("Info file exists: %d channels, %d scales",
                         info['num_channels'], len(info['scales']))
-        
+
         # Check for actual data files
         for scale_idx in range(min(2, self.num_mips)):  # Check first 2 scales
             scale_dir = path / str(scale_idx)
@@ -169,8 +168,7 @@ class PlatePrecomputedWriter:
 
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
         return False
-

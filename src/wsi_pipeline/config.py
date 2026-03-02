@@ -7,12 +7,11 @@ Supports YAML config files and environment variable overrides.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -97,7 +96,7 @@ class OutputConfig(BaseModel):
         default="ome-zarr", description="Output format for tissue sections"
     )
 
-    compression: Optional[str] = Field(
+    compression: str | None = Field(
         default="zstd", description="Compression algorithm (zstd, lz4, gzip, or None)"
     )
 
@@ -185,21 +184,21 @@ class PipelineConfig(BaseModel):
 
     verbose: bool = Field(default=True, description="Enable verbose output")
 
-    random_seed: Optional[int] = Field(
+    random_seed: int | None = Field(
         default=42, description="Random seed for reproducibility"
     )
 
     @model_validator(mode="after")
-    def validate_config(self) -> "PipelineConfig":
+    def validate_config(self) -> PipelineConfig:
         """Validate cross-field dependencies."""
         # Add any cross-field validation here
         return self
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert configuration to dictionary."""
         return self.model_dump()
 
-    def save_yaml(self, path: Union[str, Path]) -> None:
+    def save_yaml(self, path: str | Path) -> None:
         """Save configuration to YAML file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,7 +206,7 @@ class PipelineConfig(BaseModel):
             yaml.dump(self.to_dict(), f, default_flow_style=False, sort_keys=False)
 
     @classmethod
-    def from_yaml(cls, path: Union[str, Path]) -> "PipelineConfig":
+    def from_yaml(cls, path: str | Path) -> PipelineConfig:
         """Load configuration from YAML file."""
         path = Path(path)
         if not path.exists():
@@ -220,7 +219,7 @@ class PipelineConfig(BaseModel):
 class EnvironmentSettings(BaseSettings):
     """
     Environment-based settings.
-    
+
     These can be set via environment variables with WSI_ prefix.
     Example: WSI_MLFLOW_TRACKING_URI=http://mlflow:5000
     """
@@ -235,7 +234,7 @@ class EnvironmentSettings(BaseSettings):
     # Paths
     data_dir: Path = Field(default=Path("/data"))
     output_dir: Path = Field(default=Path("/output"))
-    config_path: Optional[Path] = Field(default=None)
+    config_path: Path | None = Field(default=None)
 
     # MLflow
     mlflow_tracking_uri: str = Field(default="sqlite:///mlflow.db")
@@ -251,8 +250,8 @@ class EnvironmentSettings(BaseSettings):
 
 
 def load_config(
-    config_path: Optional[Union[str, Path]] = None,
-    overrides: Optional[Dict[str, Any]] = None,
+    config_path: str | Path | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> PipelineConfig:
     """
     Load pipeline configuration from file with optional overrides.
@@ -288,7 +287,7 @@ def load_config(
     return config
 
 
-def _deep_update(base: Dict, update: Dict) -> Dict:
+def _deep_update(base: dict, update: dict) -> dict:
     """Recursively update nested dictionary."""
     for key, value in update.items():
         if key in base and isinstance(base[key], dict) and isinstance(value, dict):
@@ -306,16 +305,16 @@ def get_default_config_path() -> Path:
         Path("config.yaml"),
         Path.home() / ".config" / "wsi-pipeline" / "config.yaml",
     ]
-    
+
     for loc in locations:
         if loc.exists():
             return loc
-    
+
     # Return first location (will be created if needed)
     return locations[0]
 
 
-def create_default_config(output_path: Optional[Path] = None) -> Path:
+def create_default_config(output_path: Path | None = None) -> Path:
     """
     Create a default configuration file.
 

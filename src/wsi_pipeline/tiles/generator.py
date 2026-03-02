@@ -8,9 +8,6 @@ including ROI upsampling and masking.
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple, Union
-
-logger = logging.getLogger(__name__)
 
 import dask.array as da
 import numpy as np
@@ -18,25 +15,27 @@ from dask_image.ndinterp import affine_transform
 from scipy.ndimage import binary_fill_holes
 from skimage import measure
 
+logger = logging.getLogger(__name__)
+
 
 def center_crop_pad_dask(yxc: da.Array, target_side: int) -> da.Array:
     """
     Center-crop then pad to square target_side (works with Dask).
-    
+
     Parameters
     ----------
     yxc : da.Array
         Input array (Y, X, C).
     target_side : int
         Target square dimension.
-    
+
     Returns
     -------
     da.Array
         Cropped/padded array (target_side, target_side, C).
     """
     H, W = int(yxc.shape[0]), int(yxc.shape[1])
-    
+
     # Center-crop if larger than target
     ys, ye = (max(0, (H - target_side) // 2), min(H, (H + target_side) // 2))
     xs, xe = (max(0, (W - target_side) // 2), min(W, (W + target_side) // 2))
@@ -60,11 +59,11 @@ def center_crop_pad_dask(yxc: da.Array, target_side: int) -> da.Array:
 def crop_and_pad(
     image: np.ndarray,
     mask: np.ndarray,
-    target_shape: Union[np.ndarray, int],
+    target_shape: np.ndarray | int,
 ) -> np.ndarray:
     """
     Crop the image to the bounding box of the mask and then pad it to target_shape.
-    
+
     Parameters
     ----------
     image : np.ndarray
@@ -73,7 +72,7 @@ def crop_and_pad(
         Binary mask (H, W).
     target_shape : int or array-like
         Target shape. If int, creates square output.
-    
+
     Returns
     -------
     np.ndarray
@@ -87,7 +86,7 @@ def crop_and_pad(
 
     # Crop the image to the bounding box
     cropped_image = image[ymin:ymax + 1, xmin:xmax + 1]
-    
+
     if isinstance(target_shape, int):
         # Calculate padding amounts for square image
         height, width = cropped_image.shape[:2]
@@ -125,12 +124,12 @@ def crop_and_pad(
 
 def generate_tissue_images(
     filled_img: np.ndarray,
-    original_img: Union[np.ndarray, da.Array],
+    original_img: np.ndarray | da.Array,
     display_images: bool = False,
 ) -> da.Array:
     """
     Generate images for each tissue region, cropped and padded to original image size.
-    
+
     Parameters
     ----------
     filled_img : np.ndarray
@@ -139,7 +138,7 @@ def generate_tissue_images(
         Original image (C, Y, X) or (Y, X, C).
     display_images : bool
         Whether to display images using matplotlib.
-    
+
     Returns
     -------
     da.Array
@@ -185,15 +184,15 @@ def generate_tissue_images(
     return tissue_image_stack
 
 
-def sort_labels_left_to_right(filled_lr_lbl: np.ndarray) -> List[int]:
+def sort_labels_left_to_right(filled_lr_lbl: np.ndarray) -> list[int]:
     """
     Return label IDs sorted by low-res centroid x (left->right).
-    
+
     Parameters
     ----------
     filled_lr_lbl : np.ndarray
         Labeled image with filled regions.
-    
+
     Returns
     -------
     list of int
@@ -208,15 +207,15 @@ def generate_tissue_tiles(
     low_res_filled: np.ndarray,
     *,
     chunk: int = 512,
-    pad_multiple: Optional[int] = None,
+    pad_multiple: int | None = None,
     extra_margin_px: int = 0,
-) -> Tuple[List[da.Array], int]:
+) -> tuple[list[da.Array], int]:
     """
     Build one high-res (Y,X,C) Dask tile per tissue with common square side length.
-    
+
     The common side length is derived from the largest high-res bounding box
     across all tissues.
-    
+
     Parameters
     ----------
     s0_cyx : da.Array
@@ -229,7 +228,7 @@ def generate_tissue_tiles(
         Round tile dimension to multiple of this value. Defaults to chunk.
     extra_margin_px : int
         Extra margin around each tissue region.
-    
+
     Returns
     -------
     tiles : list of da.Array
@@ -245,7 +244,7 @@ def generate_tissue_tiles(
 
     # -------- Pass 0: label & fill at low-res --------
     lr_lbl, n_lr = measure.label(low_res_filled.astype(bool), connectivity=2, return_num=True)
-    
+
     # If there are no tissue sections return early
     if n_lr == 0:
         return [], 0
@@ -265,7 +264,7 @@ def generate_tissue_tiles(
     # -------- Pass 1: compute HR bboxes & find common tile_dim --------
     roi_specs = []
     max_side = 0
-    
+
     for lid in sort_labels_left_to_right(lr_lbl):
         lr_mask = lr_lbl == lid
         rows, cols = np.any(lr_mask, 1), np.any(lr_mask, 0)
@@ -308,18 +307,18 @@ def generate_tissue_tiles(
     tile_dim = min(tile_dim, max(Yh, Xh))
 
     # -------- Pass 2: build tiles lazily with common tile_dim --------
-    tiles: List[da.Array] = []
-    
+    tiles: list[da.Array] = []
+
     for (lid, y0_lr, y1_lr, x0_lr, x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, H_hr, W_hr) in roi_specs:
         # Upsample LR labels only within the LR ROI to HR ROI size
         lr_crop_lbl = lr_lbl[y0_lr:y1_lr + 1, x0_lr:x1_lr + 1].astype(np.int32)
-        
+
         # 2x2 affine matrix for scaling
         A_roi = np.array([
             [lr_crop_lbl.shape[1] / W_hr, 0],
             [0, lr_crop_lbl.shape[0] / H_hr],
         ], dtype=float)
-        
+
         hr_roi_lbl = affine_transform(
             da.from_array(lr_crop_lbl, chunks=lr_crop_lbl.shape),
             matrix=A_roi,

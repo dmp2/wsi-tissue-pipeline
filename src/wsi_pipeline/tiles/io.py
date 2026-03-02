@@ -7,7 +7,6 @@ Provides functions for converting and saving tiles as JPEG, PNG, or TIFF.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import tifffile as tf

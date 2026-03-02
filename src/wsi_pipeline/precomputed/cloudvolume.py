@@ -7,9 +7,6 @@ using the CloudVolume library.
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import List, Tuple
-
 import numpy as np
 
 from ..omezarr.metadata import _sizes_for_mips_xy, _voxel_sizes_for_mips_xy
@@ -20,7 +17,7 @@ def create_precomputed_cloudvolume(
     W: int,
     H: int,
     Z: int,
-    voxel_size_um: Tuple[float, float, float],
+    voxel_size_um: tuple[float, float, float],
     num_mips: int,
     chunk_xy: int = 512,
     dtype: str = "uint8",
@@ -30,7 +27,7 @@ def create_precomputed_cloudvolume(
 ):
     """
     Create a precomputed dataset using CloudVolume.
-    
+
     Parameters
     ----------
     precomp_path : str
@@ -55,7 +52,7 @@ def create_precomputed_cloudvolume(
         Whether to handle missing chunks gracefully.
     parallel : bool
         Whether to enable parallel writes.
-    
+
     Returns
     -------
     List[CloudVolume]
@@ -138,12 +135,12 @@ def create_precomputed_cloudvolume(
 def write_slice_cloudvolume(
     writers,
     z_index: int,
-    mips_yxc: List[np.ndarray],
+    mips_yxc: list[np.ndarray],
     flush_every: int = 10,
 ) -> None:
     """
     Write one Z slice (all mips) as XY*C slabs into CloudVolume writers.
-    
+
     Parameters
     ----------
     writers : List[CloudVolume]
@@ -156,8 +153,8 @@ def write_slice_cloudvolume(
         Flush cache every N slices for performance.
     """
     assert len(writers) == len(mips_yxc)
-    
-    for mip, (vol_i, img_yxc) in enumerate(zip(writers, mips_yxc)):
+
+    for _mip, (vol_i, img_yxc) in enumerate(zip(writers, mips_yxc, strict=False)):
         # CloudVolume expects (X, Y, Z, C); input is (H, W, C) = (Y, X, C)
         img_xyc = np.transpose(img_yxc, (1, 0, 2))  # (Y, X, C) -> (X, Y, C)
 

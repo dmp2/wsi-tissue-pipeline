@@ -16,9 +16,9 @@ process_slide_with_plating(slide_path, output_dir, config, ...)
 from __future__ import annotations
 
 from .plating import (
-    process_slide_with_plating,
     _is_big_tile,
     _safe_close_existing_client,
+    process_slide_with_plating,
 )
 
 __all__ = [

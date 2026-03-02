@@ -4,7 +4,6 @@ Core segmentation utilities.
 Provides grayscale conversion, thumbnail generation, and mask upsampling.
 """
 
-from typing import Tuple, Union
 
 import dask.array as da
 import numpy as np
@@ -41,7 +40,7 @@ def to_gray(image: np.ndarray) -> np.ndarray:
 _to_gray = to_gray
 
 
-def create_thumbnail(image: Union[np.ndarray, da.Array], target_long_side: int) -> Tuple[np.ndarray, float]:
+def create_thumbnail(image: np.ndarray | da.Array, target_long_side: int) -> tuple[np.ndarray, float]:
     """
     Create a NumPy thumbnail and return the scale factor.
 
@@ -77,7 +76,7 @@ def create_thumbnail(image: Union[np.ndarray, da.Array], target_long_side: int) 
 _thumb = create_thumbnail
 
 
-def upsample_mask(mask: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+def upsample_mask(mask: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
     """
     Nearest-neighbor upsample of boolean mask.
 

@@ -25,12 +25,12 @@ from .cloudvolume import (
     create_precomputed_cloudvolume,
     write_slice_cloudvolume,
 )
+from .plate_writer import PlatePrecomputedWriter
 from .tensorstore import (
     create_precomputed_tensorstore,
     write_slice_tensorstore,
     write_slice_tensorstore_streaming,
 )
-from .plate_writer import PlatePrecomputedWriter
 
 __all__ = [
     # CloudVolume backend

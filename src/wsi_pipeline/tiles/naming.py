@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import List, Tuple
 
 
 def normalize_ext(ext: str) -> str:
@@ -77,7 +76,7 @@ def rename_outputs_by_overall_index(
     pad: int = 4,
     start: int = 1,        # 0001, 0011, 0021, ...
     dry_run: bool = False,
-) -> List[Tuple[Path, Path]]:
+) -> list[tuple[Path, Path]]:
     """
     One global pass: rank all matching files by (XX,YY) and rename to append `_ZZZZ`,
     where ZZZZ = start + rank * (spacing+1), zero-padded to `pad`. Idempotent.
@@ -93,10 +92,10 @@ def rename_outputs_by_overall_index(
     permissible_exts = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
     all_paths = output_dir.glob(output_glob)
     files = sorted((
-        p for p in all_paths if p.suffix.lower() in permissible_exts), 
+        p for p in all_paths if p.suffix.lower() in permissible_exts),
         key=lambda p: parse_xx_yy_from_name(p.name, rx_xy)
     )
-    renames: List[Tuple[Path, Path]] = []
+    renames: list[tuple[Path, Path]] = []
     for rank, p in enumerate(files):
         label = overall_label(rank, spacing=spacing, pad=pad, start=start)
         new_p = add_overall_suffix(p, label, pad)

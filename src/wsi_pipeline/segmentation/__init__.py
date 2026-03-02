@@ -33,19 +33,31 @@ Backend = Literal[
 ]
 
 # Core utilities
-from .core import to_gray, create_thumbnail, upsample_mask
 # Deprecated aliases — kept for backward compatibility, will be removed in v1.0
-from .core import _to_gray, _thumb, _upsample_bool  # deprecated
+from .core import (  # deprecated
+    _thumb,
+    _to_gray,
+    _upsample_bool,
+    create_thumbnail,
+    to_gray,
+    upsample_mask,
+)
 
 # Segmentation algorithms
-from .entropy import entropy_mask, _entropy_mask  # _entropy_mask deprecated
-from .otsu import otsu_mask, _otsu_mask  # _otsu_mask deprecated
-from .morphology import remove_small_objects, binary_closing, split_touching_components
+from .entropy import _entropy_mask, entropy_mask  # _entropy_mask deprecated
+
 # Deprecated aliases — kept for backward compatibility, will be removed in v1.0
-from .morphology import _remove_small_objects, _split_touching_components  # deprecated
+from .morphology import (  # deprecated
+    _remove_small_objects,
+    _split_touching_components,
+    binary_closing,
+    remove_small_objects,
+    split_touching_components,
+)
+from .otsu import _otsu_mask, otsu_mask  # _otsu_mask deprecated
 
 # High-level segmenter
-from .segmenter import WSISegmenter, segment_mask, make_lowres_mask
+from .segmenter import WSISegmenter, make_lowres_mask, segment_mask
 
 __all__ = [
     # Type

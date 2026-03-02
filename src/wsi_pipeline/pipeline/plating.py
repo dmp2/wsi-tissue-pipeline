@@ -8,9 +8,6 @@ import os
 import time
 import uuid
 from pathlib import Path
-from typing import List, Optional, Tuple
-
-logger = logging.getLogger(__name__)
 
 import dask.array as da
 import dask.config
@@ -18,11 +15,13 @@ import numpy as np
 import zarr
 
 from ..omezarr.metadata import _get_multiscales_paths, _phys_xy_um
-from ..omezarr.pyramid import compute_num_mips_min_side, build_mips_from_yxc
-from ..omezarr.streaming import write_ngff_from_tile_ts, write_ngff_from_tile_streaming_ome
+from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
+from ..omezarr.streaming import write_ngff_from_tile_streaming_ome, write_ngff_from_tile_ts
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
-from ..tiles.generator import generate_tissue_tiles
 from ..precomputed.plate_writer import PlatePrecomputedWriter
+from ..tiles.generator import generate_tissue_tiles
+
+logger = logging.getLogger(__name__)
 
 
 def _is_big_tile(tile_da, bytes_per_px=1, min_side=8192, max_bytes=1_500_000_000):
@@ -51,17 +50,17 @@ def process_slide_with_plating(
     struct_elem_px: int = 9,                         # structuring element radius in pixels
     min_size: int = 2000,
     # Plate options
-    precomputed_plate_path: Optional[str] = None,   # "file:///â€¦/plate_precomp"
+    precomputed_plate_path: str | None = None,   # "file:///â€¦/plate_precomp"
     plate_backend: str = "tensorstore",             # or "cloudvolume"
     plate_chunk_xy: int = 512,
     parallel: bool = False,
     fill_missing: bool = False,
     # mips options
-    min_side_for_mips: Optional[int] = None,        # default to chunk size in writers
+    min_side_for_mips: int | None = None,        # default to chunk size in writers
     downscale: int = 2,                             # default downsampling rate for mips (not used yet)
     # dtype policy
-    dtype: Optional[np.dtype] = "uint8"            # cast ROI to uint8 before mip (recommended for imagery)                     
-    ) -> List[Path]:
+    dtype: np.dtype | None = "uint8"            # cast ROI to uint8 before mip (recommended for imagery)
+    ) -> list[Path]:
     """
     Pipeline for ONE slide root (OME-Zarr):
         1) Run segmentation on coarsest level (sL) -> boolean mask with N labels after filling.
@@ -71,13 +70,13 @@ def process_slide_with_plating(
     Returns: list of per-tissue NGFF output directories.
 
     Processes tissue regions at the highest resolution, generates pyramids, and writes OME-Zarr files.
-    Upsample `low_res_mask` => highest-res, cut out 3 square regions, build a pyramid for each and 
+    Upsample `low_res_mask` => highest-res, cut out 3 square regions, build a pyramid for each and
     (optionally) write them as separate OME-Zarr NGFF datasets.
 
     1) If low_res_mask is None, run your preprocess() on the coarsest level to get it.
     2) Build a **list** of high-res tissue tiles (Y,X,C) via generate_tissue_tiles().
     3) For each tile, build a multiscale pyramid and write one OME-Zarr group.
-    
+
     Parameters:
     - zarr_path: Path to the highest-resolution OME-Zarr image.
     - low_res_mask: Binary mask of tissue regions, assumed to be the lowest resolution. If None, generate the mask.
@@ -89,11 +88,11 @@ def process_slide_with_plating(
     """
     # Ensure the zarr_root_path is a Path object
     zarr_root_path = Path(zarr_root_path)
-    
+
     # Make the output directory if it doesn't already exist
     out_ngff_dir = Path(out_ngff_dir)
     out_ngff_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Step 1: Load the NGFF root, find image and metadata for the levels
     logger.info("Loading the NGFF root.")
 
@@ -102,9 +101,9 @@ def process_slide_with_plating(
     # Fix the level of the highest resolution you want to use: default should be 0 for the highest resolution
     L_idx = 0 # s0 is the highest resolution
     # L_idx = -2 # testing the pipeline with a lower resolution image
-    L_path = ds_paths[L_idx] 
+    L_path = ds_paths[L_idx]
     sL_path = ds_paths[-1]
-    
+
     # Must read physical pixel size from that level, not hard coded
     L_idx = ds_paths.index(L_path)            # robust in case ordering changes
 
@@ -121,8 +120,8 @@ def process_slide_with_plating(
     # wait(base_cyx)
     # sL = sL.persist()
     # wait(sL)
-    
-    # Should I rechunk to force the arrays to align with the tile size? 
+
+    # Should I rechunk to force the arrays to align with the tile size?
     # base_cyx = base_cyx.rechunk((3, plate_chunk_xy, plate_chunk_xy))
     # sL = sL.rechunk((3, plate_chunk_xy, plate_chunk_xy))
 
@@ -133,11 +132,11 @@ def process_slide_with_plating(
     # Precompute shapes and physical pixel sizes at the highest resolution
     C, H0, W0 = base_cyx.shape
     px_um, py_um = _phys_xy_um(root, L_idx) # this is the base s0 scale now
-    
+
     # Step 2: Segment at the coarsest level using the segment_fn to get a tissue region mask
     logger.info("Generating tissue masks at the coarsest resolution.")
 
-    # Ensure channel-first for the grayscale() function within segment_fn 
+    # Ensure channel-first for the grayscale() function within segment_fn
     if sL.ndim == 3 and sL.shape[-1] in (1,3) and sL.shape[0] not in (1,3):
         sL = da.moveaxis(sL, -1, 0) # (C, Y, X)
 
@@ -151,14 +150,14 @@ def process_slide_with_plating(
         additional_smooth=False, # apply an additional smoothing operation for smoother edges
         output_images=False # output tissue images
     )
-        
+
 
     # Step 2: upsample the low-resolution mask to the high-resolution image
     # Build LIST of HR tiles (Y,X,C), ordered left->right
     tiles_yxc, tile_dim = generate_tissue_tiles(
-        s0_cyx=base_cyx, 
+        s0_cyx=base_cyx,
         low_res_filled=filled_lr.astype(bool),
-        chunk=plate_chunk_xy, 
+        chunk=plate_chunk_xy,
         pad_multiple=plate_chunk_xy,  # or another multiple, if we prefer
         extra_margin_px=0
     )
@@ -166,14 +165,14 @@ def process_slide_with_plating(
     if not tiles_yxc:
         logger.warning("[%s] no tissue regions found.", zarr_root_path.name)
         return []
-    
+
     plate = None
     if precomputed_plate_path:
         # Z is the number of tiles; voxel_size_z is arbitrary (1.0 um) for 2D plates
         plate = PlatePrecomputedWriter(
             precomp_path=precomputed_plate_path,
-            width=tile_dim, 
-            height=tile_dim, 
+            width=tile_dim,
+            height=tile_dim,
             z_slices=len(tiles_yxc),
             voxel_size_um=(px_um, py_um, 1.0),
             chunk_xy=plate_chunk_xy,
@@ -186,7 +185,7 @@ def process_slide_with_plating(
         )
 
     # 3) iterate tiles
-    out_paths: List[Path] = []
+    out_paths: list[Path] = []
 
     big_tile_threshold = 8192 # 2^13=8192; tune threshold
     item_size_threshold = 1_500_000_000
@@ -197,12 +196,12 @@ def process_slide_with_plating(
     n_tiles = len(tiles_yxc)
     # If any tile is huge, avoid distributed 'compute-then-write' path
     use_distributed = bool(parallel) and (n_tiles >= n_tiles_threshold) and not any_big
-    
+
     if use_distributed:
-        from dask.distributed import LocalCluster, Client, as_completed, wait
+        from dask.distributed import Client, LocalCluster, as_completed
 
         _safe_close_existing_client()
-    
+
         # Create a local cluster so that we can stream compute tiles. This makes us parallelized across multiple CPUs but not memory-exploding
         # Upper Limit: Each image pyramid should be ~2.5GB so we should be good. Note that agregate_memory = n_workers * memory_limit (e.g. 10 workers, "8GB" -> 80GB)
         # Use context managers so we always shut down cleanly
@@ -216,7 +215,7 @@ def process_slide_with_plating(
             scheduler_port=0,      # random free port, avoids conflicts
             dashboard_address=None # disable dashboard to avoid port issues
         ) as cluster, Client(cluster, set_as_default=True) as client:
-            
+
             # Set distributed configuration
             dask.config.set({
             "array.slicing.split_large_chunks": True, # useful when there are oversized chunks
@@ -238,7 +237,7 @@ def process_slide_with_plating(
 
                 for fut in as_completed(fmap):
                     z_idx = fmap.pop(fut)
-                    tile = fut.result()                     # stores (Y,X,C) numpy array as soon as one tile finishes 
+                    tile = fut.result()                     # stores (Y,X,C) numpy array as soon as one tile finishes
                     # dtype policy (optional)
                     if dtype and tile.dtype != np.uint8:
                         logger.debug("Enforcing dtype policy.")
@@ -283,11 +282,11 @@ def process_slide_with_plating(
                             add_omero=True
                         )
                         # # This function uses zarr and manually specifies the metadata
-                        # write_ngff_from_mips(mips, 
-                        # ngff_dir, 
+                        # write_ngff_from_mips(mips,
+                        # ngff_dir,
                         # (px_um, py_um),
-                        # name=name, 
-                        # chunks_xy=plate_chunk_xy, 
+                        # name=name,
+                        # chunks_xy=plate_chunk_xy,
                         # dtype=mips[0].dtype)
                         out_paths.append(ngff_dir)
                         if plate is not None:
@@ -307,7 +306,7 @@ def process_slide_with_plating(
 
         # For small jobs, threads are faster and simpler (no scheduler ports, no heartbeats)
         _safe_close_existing_client()
-    
+
         with dask.config.set(scheduler="threads"):
             for z_idx, tile_dask in enumerate(tiles_yxc, start=0):
                 # Write per-tissue NGFF
@@ -319,10 +318,10 @@ def process_slide_with_plating(
                 if any_big:
                     # DO NOT compute() â€“ keep it lazy and (optionally) cast lazily
                     # tlazy = tile_dask.astype(np.uint8) if dtype and tile_dask.dtype != np.uint8 else tile_dask
-            
+
                     # write_ngff_from_tile_ts(
-                    #     tlazy, 
-                    #     ngff_dir, 
+                    #     tlazy,
+                    #     ngff_dir,
                     #     (px_um, py_um),
                     #     chunks_xy=plate_chunk_xy,
                     #     num_mips=compute_num_mips_min_side(tlazy.shape[1], tlazy.shape[0],
@@ -361,12 +360,12 @@ def process_slide_with_plating(
                             tile = (tile * 255.0).clip(0,255).astype(np.uint16)
 
                     # Compute mips once
-                    ms = compute_num_mips_min_side(tile.shape[1], 
+                    ms = compute_num_mips_min_side(tile.shape[1],
                                                 tile.shape[0],
                                                 min_side_for_mips or plate_chunk_xy)
                     mips = build_mips_from_yxc(tile, ms)
                     # print(f"mips[0].dtype: {mips[0].dtype}")
-                    
+
                     write_ngff_from_mips_ngffzarr(
                         mips_yxc=mips,
                         out_dir=ngff_dir,
@@ -380,11 +379,11 @@ def process_slide_with_plating(
                         add_omero=True
                     )
                     # This function uses zarr and manually specifies the metadata
-                    # write_ngff_from_mips(mips, 
-                    #                     ngff_dir, 
-                    #                     (px_um, py_um), # base scale physical pixel size 
-                    #                     name=name, 
-                    #                     chunks_xy=plate_chunk_xy, 
+                    # write_ngff_from_mips(mips,
+                    #                     ngff_dir,
+                    #                     (px_um, py_um), # base scale physical pixel size
+                    #                     name=name,
+                    #                     chunks_xy=plate_chunk_xy,
                     #                     dtype=mips[0].dtype)
                     out_paths.append(ngff_dir)
 
@@ -396,14 +395,14 @@ def process_slide_with_plating(
 
     # # Optional: extra cleanup in notebooks so reruns donâ€™t collide
     # gc.collect()
-        
+
     logger.info("Wrote %d tissue OME-Zarrs to %s", len(out_paths), out_ngff_dir)
 
-    try: 
+    try:
         # Shut down the cluster
         client.close()
-        client.shutdown() 
-    except: 
+        client.shutdown()
+    except Exception:
         pass
 
     return out_paths

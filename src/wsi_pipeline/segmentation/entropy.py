@@ -4,7 +4,6 @@ Entropy-based tissue segmentation.
 Provides local-entropy tissue mask generation that works with both NumPy and Dask arrays.
 """
 
-from typing import Union
 
 import dask.array as da
 import numpy as np
@@ -14,7 +13,7 @@ from skimage.filters.rank import entropy as rank_entropy
 from skimage.morphology import disk
 
 
-def entropy_mask(gray: Union[np.ndarray, da.Array], struct_elem_px: int, min_area: int) -> np.ndarray:
+def entropy_mask(gray: np.ndarray | da.Array, struct_elem_px: int, min_area: int) -> np.ndarray:
     """
     Local-entropy tissue mask that works with either NumPy (thumbnail) or Dask arrays.
 

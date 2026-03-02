@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import os
 from collections import namedtuple
+from collections.abc import Callable, Generator
 from pathlib import Path
-from typing import Callable, Generator, List, Optional, Tuple
 
 import numpy as np
 
@@ -27,15 +27,15 @@ class ETSFileError(Exception):
 class ETSFile:
     """
     Reader for Olympus CellSens ETS image files.
-    
+
     ETS files contain tiled, pyramidal image data with JPEG compression.
     This reader provides efficient random access to tiles at any pyramid level.
-    
+
     Parameters
     ----------
     fname : str or Path
         Path to the ETS file.
-    
+
     Attributes
     ----------
     npix_x : int
@@ -54,24 +54,24 @@ class ETSFile:
         Compression type code.
     compression_str : str
         Human-readable compression type.
-    
+
     Examples
     --------
     >>> ets = ETSFile("path/to/image.ets")
     >>> print(f"Image size: {ets.npix_x} x {ets.npix_y}")
     >>> print(f"Pyramid levels: {ets.nlevels}")
-    >>> 
+    >>>
     >>> # Get a tile
     >>> tile_bytes = ets.get_tile(level=0, col=0, row=0)
-    >>> 
+    >>>
     >>> # Get tile as numpy array (JPEG compressed bytes)
     >>> tile_np = ets.get_tile_np(level=0, col=0, row=0)
     """
-    
+
     # Named tuple for tile index entries
     TileIdx = namedtuple("TileIdx", "col row level nbytes seqnum file_offset")
     TileLoc = namedtuple("TileLoc", "fpos nbytes")
-    
+
     # Compression type codes
     COMPRESSION_TYPES = {
         0: "RAW",
@@ -92,7 +92,7 @@ class ETSFile:
         self._fh.seek(0, os.SEEK_END)
         self.fsize = self._fh.tell()
         self._fname = fname
-        
+
         # Initialize attributes
         self.ntiles: int = 0
         self.nlevels: int = 0
@@ -104,7 +104,7 @@ class ETSFile:
         self.compression_quality: int = 0
         self.is_bgr: bool = False
         self.use_pyramid: bool = False
-        
+
         # Read headers
         self._read_headers()
         self._totalbytes = 0
@@ -139,20 +139,20 @@ class ETSFile:
         return self.COMPRESSION_TYPES.get(self.compression, "unknown")
 
     @property
-    def shape(self) -> Tuple[int, int]:
+    def shape(self) -> tuple[int, int]:
         """Full resolution image shape (height, width)."""
         return (self.npix_y, self.npix_x)
 
     def _read_headers(self):
         """Read and parse the SIS and ETS headers."""
         fh = self._fh
-        
+
         # =====================================================
         # Read SIS header (16 uint32 values)
         # =====================================================
         fh.seek(0)
         sis_data = np.fromfile(fh, np.uint32, 16).tolist()
-        
+
         # Validate magic number
         sis_magic = int.from_bytes(b"SIS\x00", "little")
         if sis_data[0] != sis_magic:
@@ -184,7 +184,7 @@ class ETSFile:
             raise ETSFileError("Expected ETS header immediately after SIS header")
 
         ets_data = np.fromfile(fh, np.uint32, 57).tolist()
-        
+
         # Validate magic number
         ets_magic = int.from_bytes(b"ETS\x00", "little")
         if ets_data[0] != ets_magic:
@@ -243,7 +243,7 @@ class ETSFile:
         self.nlevels = max(t.level for t in self._tiles) + 1
         self._level_ntiles = [self._num_tiles_at_level(lvl) for lvl in range(self.nlevels)]
 
-    def _num_tiles_at_level(self, level: int) -> Tuple[int, int]:
+    def _num_tiles_at_level(self, level: int) -> tuple[int, int]:
         """Get (num_cols, num_rows) for a pyramid level."""
         tiles_at_level = [t for t in self._tiles if t.level == level]
         if not tiles_at_level:
@@ -252,15 +252,15 @@ class ETSFile:
         nrow = max(t.row for t in tiles_at_level) + 1
         return (ncol, nrow)
 
-    def level_shape(self, level: int) -> Tuple[int, int]:
+    def level_shape(self, level: int) -> tuple[int, int]:
         """
         Get image shape at a pyramid level.
-        
+
         Parameters
         ----------
         level : int
             Pyramid level (0 = full resolution).
-        
+
         Returns
         -------
         tuple
@@ -269,15 +269,15 @@ class ETSFile:
         scale = 2 ** level
         return (self.npix_y // scale, self.npix_x // scale)
 
-    def level_ntiles(self, level: int) -> Tuple[int, int]:
+    def level_ntiles(self, level: int) -> tuple[int, int]:
         """
         Get tile grid dimensions at a pyramid level.
-        
+
         Parameters
         ----------
         level : int
             Pyramid level.
-        
+
         Returns
         -------
         tuple
@@ -290,7 +290,7 @@ class ETSFile:
     def get_tile(self, level: int, col: int, row: int) -> bytes:
         """
         Read a single tile as raw bytes.
-        
+
         Parameters
         ----------
         level : int
@@ -299,7 +299,7 @@ class ETSFile:
             Column index.
         row : int
             Row index.
-        
+
         Returns
         -------
         bytes
@@ -308,7 +308,7 @@ class ETSFile:
         loc = self._tile_loc.get((level, col, row))
         if loc is None:
             raise KeyError(f"Tile not found: level={level}, col={col}, row={row}")
-        
+
         self._fh.seek(loc.fpos)
         self._totalbytes += loc.nbytes
         return self._fh.read(loc.nbytes)
@@ -316,7 +316,7 @@ class ETSFile:
     def get_tile_np(self, level: int, col: int, row: int) -> np.ndarray:
         """
         Read a single tile as a numpy array of bytes.
-        
+
         Parameters
         ----------
         level : int
@@ -325,7 +325,7 @@ class ETSFile:
             Column index.
         row : int
             Row index.
-        
+
         Returns
         -------
         np.ndarray
@@ -337,7 +337,7 @@ class ETSFile:
     def get_tile_decoded(self, level: int, col: int, row: int) -> np.ndarray:
         """
         Read and decode a tile to RGB image.
-        
+
         Parameters
         ----------
         level : int
@@ -346,37 +346,37 @@ class ETSFile:
             Column index.
         row : int
             Row index.
-        
+
         Returns
         -------
         np.ndarray
             Decoded tile as (H, W, C) uint8 array.
         """
         import cv2
-        
+
         tile_bytes = self.get_tile_np(level, col, row)
         img = cv2.imdecode(tile_bytes, cv2.IMREAD_UNCHANGED)
-        
+
         if img is None:
             raise ETSFileError(f"Failed to decode tile at level={level}, col={col}, row={row}")
-        
+
         # Convert BGR to RGB if needed
         if self.is_bgr and img.ndim == 3 and img.shape[2] == 3:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
+
         return img
 
     def iter_tiles(
         self,
         level: int,
-        row_callback: Optional[Callable] = None,
-        tile_callback: Optional[Callable] = None,
+        row_callback: Callable | None = None,
+        tile_callback: Callable | None = None,
     ) -> Generator[bytes, None, None]:
         """
         Iterate over all tiles at a pyramid level.
-        
+
         Yields tiles in row-major order (across columns, then down rows).
-        
+
         Parameters
         ----------
         level : int
@@ -385,18 +385,18 @@ class ETSFile:
             Called at the start of each row: callback(ets, level, row)
         tile_callback : callable, optional
             Called for each tile: callback(ets, level, col, row)
-        
+
         Yields
         ------
         bytes
             Raw tile data.
         """
         ncol, nrow = self.level_ntiles(level)
-        
+
         for row in range(nrow):
             if row_callback:
                 row_callback(self, level, row)
-            
+
             for col in range(ncol):
                 if tile_callback:
                     tile_callback(self, level, col, row)
@@ -405,64 +405,64 @@ class ETSFile:
     def read_level(self, level: int) -> np.ndarray:
         """
         Read entire image at a pyramid level.
-        
+
         Parameters
         ----------
         level : int
             Pyramid level.
-        
+
         Returns
         -------
         np.ndarray
             Complete image at the specified level as (H, W, C) array.
-        
+
         Warnings
         --------
         This can use significant memory for large images.
         Consider using tiles or Dask arrays for large data.
         """
         import cv2
-        
+
         if level < 0 or level >= self.nlevels:
             raise ValueError(f"Level {level} out of range [0, {self.nlevels - 1}]")
-        
+
         ncol, nrow = self.level_ntiles(level)
         tx, ty = self.tile_xsize, self.tile_ysize
-        
+
         # Create output array
         img = np.zeros((nrow * ty, ncol * tx, 3), dtype=np.uint8)
-        
+
         for tile_col in range(ncol):
             for tile_row in range(nrow):
                 tile_np = self.get_tile_np(level, tile_col, tile_row)
                 tile_img = cv2.imdecode(tile_np, cv2.IMREAD_UNCHANGED)
-                
+
                 if tile_img is not None:
                     y0 = tile_row * ty
                     x0 = tile_col * tx
                     img[y0:y0 + ty, x0:x0 + tx, :] = tile_img
-        
+
         # Crop to actual image size
         h, w = self.level_shape(level)
         img = img[:h, :w, :]
-        
+
         # Convert BGR to RGB if needed
         if self.is_bgr:
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        
+
         return img
 
-    def to_dask(self, level: int = 0, chunks: Optional[Tuple[int, int]] = None):
+    def to_dask(self, level: int = 0, chunks: tuple[int, int] | None = None):
         """
         Create a Dask array for lazy loading.
-        
+
         Parameters
         ----------
         level : int
             Pyramid level.
         chunks : tuple, optional
             Chunk size (height, width). Defaults to tile size.
-        
+
         Returns
         -------
         dask.array.Array
@@ -470,19 +470,19 @@ class ETSFile:
         """
         import dask.array as da
         from dask import delayed
-        
+
         h, w = self.level_shape(level)
         ncol, nrow = self.level_ntiles(level)
         tx, ty = self.tile_xsize, self.tile_ysize
-        
+
         if chunks is None:
             chunks = (ty, tx, 3)
-        
+
         # Create delayed tile readers
         @delayed
         def read_tile(level, col, row):
             return self.get_tile_decoded(level, col, row)
-        
+
         # Build list of delayed arrays
         rows = []
         for tile_row in range(nrow):
@@ -495,9 +495,9 @@ class ETSFile:
                 )
                 row_tiles.append(tile)
             rows.append(da.concatenate(row_tiles, axis=1))
-        
+
         img = da.concatenate(rows, axis=0)
-        
+
         # Crop to actual size
         return img[:h, :w, :]
 

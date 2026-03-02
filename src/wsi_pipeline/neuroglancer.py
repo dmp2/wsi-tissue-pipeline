@@ -37,7 +37,6 @@ import threading
 from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 try:
@@ -278,7 +277,7 @@ class CORSRequestHandler(SimpleHTTPRequestHandler):
 
 
 def start_cors_server(
-    root_dir: Union[str, Path],
+    root_dir: str | Path,
     host: str = "localhost",
     port: int = 8000,
 ) -> HTTPServer:
@@ -309,7 +308,7 @@ def start_cors_server(
     return server
 
 
-def stop_cors_server(server: Optional[HTTPServer]) -> None:
+def stop_cors_server(server: HTTPServer | None) -> None:
     """Stop a running CORS server gracefully."""
     if server is None:
         return
@@ -319,7 +318,7 @@ def stop_cors_server(server: Optional[HTTPServer]) -> None:
         server.server_close()
 
 
-def get_zarr_physical_scale(zarr_path: Path) -> Tuple[float, float]:
+def get_zarr_physical_scale(zarr_path: Path) -> tuple[float, float]:
     """Read physical pixel scale from OME-Zarr ``.zattrs`` metadata.
 
     Parameters
@@ -351,7 +350,7 @@ def get_zarr_physical_scale(zarr_path: Path) -> Tuple[float, float]:
     return (1.0, 1.0)
 
 
-def find_zarr_children(root_dir: Path) -> List[Path]:
+def find_zarr_children(root_dir: Path) -> list[Path]:
     """Find all OME-Zarr directories in a root directory."""
     children = []
     for p in sorted(root_dir.iterdir()):
@@ -369,7 +368,7 @@ def _require_neuroglancer():
 
 
 def open_neuroglancer_plate_view(
-    plate_root: Union[str, Path],
+    plate_root: str | Path,
     *,
     mode: str = "remote",
     http_host: str = "localhost",
@@ -378,7 +377,7 @@ def open_neuroglancer_plate_view(
     ng_port: int = 9999,
     shader: str = RGB_SHADER_PLAIN,
     visible_first_only: bool = False,
-) -> Tuple:
+) -> tuple:
     """Launch Neuroglancer with one layer per child ``.ome.zarr`` in a plate directory.
 
     Parameters
@@ -470,7 +469,7 @@ def open_neuroglancer_precomputed(
     ng_host: str = "localhost",
     ng_port: int = 9999,
     shader: str = RGB_SHADER_PLAIN,
-) -> Tuple:
+) -> tuple:
     """Launch Neuroglancer for a single precomputed volume.
 
     *precomp_url* can use any of these schemes::
@@ -528,7 +527,7 @@ def open_neuroglancer_precomputed(
 
 
 def start_neuroglancer_server(
-    zarr_dir: Union[str, Path],
+    zarr_dir: str | Path,
     ng_host: str = "localhost",
     ng_port: int = 9999,
     http_host: str = "localhost",
@@ -674,7 +673,7 @@ class NeuroglancerViewer:
 
     def __init__(
         self,
-        zarr_dir: Union[str, Path],
+        zarr_dir: str | Path,
         ng_port: int = 9999,
         http_port: int = 8000,
     ):
@@ -700,7 +699,7 @@ class NeuroglancerViewer:
             self._httpd = None
 
     @property
-    def url(self) -> Optional[str]:
+    def url(self) -> str | None:
         """Get the viewer URL."""
         if self._viewer:
             return self._viewer.get_viewer_url()
