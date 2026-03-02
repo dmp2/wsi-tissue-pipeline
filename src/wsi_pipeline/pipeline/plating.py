@@ -50,7 +50,7 @@ def process_slide_with_plating(
     struct_elem_px: int = 9,                         # structuring element radius in pixels
     min_size: int = 2000,
     # Plate options
-    precomputed_plate_path: str | None = None,   # "file:///â€¦/plate_precomp"
+    precomputed_plate_path: str | None = None,   # "file:///.../plate_precomp"
     plate_backend: str = "tensorstore",             # or "cloudvolume"
     plate_chunk_xy: int = 512,
     parallel: bool = False,
@@ -229,7 +229,7 @@ def process_slide_with_plating(
 
             client.wait_for_workers(1) # don't block waiting for all workers
 
-            # Submit in batches so we donâ€™t flood scheduler/RAM
+            # Submit in batches so we do not flood scheduler/RAM
             batch_size = 8
             for start in range(0, n_tiles, batch_size):
                 batch = tiles_yxc[start:start+batch_size]
@@ -316,7 +316,7 @@ def process_slide_with_plating(
 
                 # For big tiles, don't build mips_yxc in memory. Instead, write directly from the base tile with the streaming writer
                 if any_big:
-                    # DO NOT compute() â€“ keep it lazy and (optionally) cast lazily
+                    # DO NOT compute() -- keep it lazy and (optionally) cast lazily
                     # tlazy = tile_dask.astype(np.uint8) if dtype and tile_dask.dtype != np.uint8 else tile_dask
 
                     # write_ngff_from_tile_ts(
@@ -393,7 +393,7 @@ def process_slide_with_plating(
 
                 del tile
 
-    # # Optional: extra cleanup in notebooks so reruns donâ€™t collide
+    # # Optional: extra cleanup in notebooks so reruns do not collide
     # gc.collect()
 
     logger.info("Wrote %d tissue OME-Zarrs to %s", len(out_paths), out_ngff_dir)

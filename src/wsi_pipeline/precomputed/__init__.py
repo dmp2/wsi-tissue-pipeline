@@ -1,7 +1,7 @@
 """
 Neuroglancer Precomputed Format Writers
 
-Writes the "Neuroglancer Precomputed" chunked format — a tiled, multi-resolution
+Writes the "Neuroglancer Precomputed" chunked format -- a tiled, multi-resolution
 format natively supported by the Neuroglancer browser viewer. Use this module
 when you want to serve tissue data directly to Neuroglancer without an
 intermediate conversion step.

@@ -47,12 +47,12 @@ def find_ets_file(vsi_fname: str | Path) -> Path | None:
     VSI file structure typically looks like:
 
     data/
-    ├── specimen.vsi
-    └── _specimen_/
-        ├── stack10001/
-        │   └── frame_t.ets  (thumbnail)
-        └── stack10002/
-            └── frame_t.ets  (full resolution)
+    |-- specimen.vsi
+    `-- _specimen_/
+        |-- stack10001/
+        |   `-- frame_t.ets  (thumbnail)
+        `-- stack10002/
+            `-- frame_t.ets  (full resolution)
 
     This function returns the ETS file in the highest-numbered stack folder.
     """

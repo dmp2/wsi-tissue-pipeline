@@ -4,7 +4,7 @@ Tissue Segmentation Module
 Generates boolean tissue masks from whole-slide image thumbnails using
 multiple algorithm backends. The strategy is to segment at a constant
 low-resolution thumbnail size, then upsample the mask to the working
-resolution — keeping memory use predictable regardless of slide size.
+resolution -- keeping memory use predictable regardless of slide size.
 
 Available backends
 ------------------
@@ -16,8 +16,8 @@ pathml-he        H&E-aware masker from PathML (requires pathml)
 
 Public API
 ----------
-WSISegmenter     Class interface — configure once, call on multiple images
-segment_mask     Functional interface — one-shot convenience wrapper
+WSISegmenter     Class interface -- configure once, call on multiple images
+segment_mask     Functional interface -- one-shot convenience wrapper
 make_lowres_mask Dask-native segmentation for pipeline integration
 """
 
@@ -33,7 +33,7 @@ Backend = Literal[
 ]
 
 # Core utilities
-# Deprecated aliases — kept for backward compatibility, will be removed in v1.0
+# Deprecated aliases -- kept for backward compatibility, will be removed in v1.0
 from .core import (  # deprecated
     _thumb,
     _to_gray,
@@ -46,7 +46,7 @@ from .core import (  # deprecated
 # Segmentation algorithms
 from .entropy import _entropy_mask, entropy_mask  # _entropy_mask deprecated
 
-# Deprecated aliases — kept for backward compatibility, will be removed in v1.0
+# Deprecated aliases -- kept for backward compatibility, will be removed in v1.0
 from .morphology import (  # deprecated
     _remove_small_objects,
     _split_touching_components,

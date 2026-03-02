@@ -31,7 +31,7 @@ def write_ngff_from_mips(
     Write multiscale NGFF at out_dir with datasets s0..sN (array layout (C,Y,X)).
 
     Uses manual Zarr array creation with OME-NGFF v0.4 metadata.
-    Multiscales v0.4 with axes [c,y,x] and per-level 'scale' transform (µm).
+    Multiscales v0.4 with axes [c,y,x] and per-level 'scale' transform (um).
 
     Parameters
     ----------

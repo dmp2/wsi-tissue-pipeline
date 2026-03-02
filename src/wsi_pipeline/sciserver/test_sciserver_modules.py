@@ -42,7 +42,7 @@ def test_environment_detection():
     else:
         print("  (Running locally - SciServer features not available)")
 
-    print("  ✓ Environment detection works")
+    print("  [OK] Environment detection works")
     return True
 
 
@@ -72,7 +72,7 @@ def test_storage_config():
         data_path = config.get_data_path("specimen_001.zarr")
         print(f"  Sample data path: {data_path}")
 
-    print("  ✓ Storage configuration works")
+    print("  [OK] Storage configuration works")
     return True
 
 
@@ -105,14 +105,14 @@ def test_lineage_tracking():
 
         # Verify in index
         assert tracker.index["runs"][run_id]["status"] == "COMPLETE"
-        print("    ✓ Run lifecycle works")
+        print("    [OK] Run lifecycle works")
 
         # Test 2: Query lineage
         print("  Testing lineage queries...")
         lineage = tracker.get_dataset_lineage("output.zarr")
         assert len(lineage["runs"]) > 0
         print(f"    Found {len(lineage['runs'])} runs for dataset")
-        print("    ✓ Lineage queries work")
+        print("    [OK] Lineage queries work")
 
         # Test 3: Context manager
         print("  Testing tracked_run context manager...")
@@ -122,7 +122,7 @@ def test_lineage_tracking():
 
         details = tracker.get_run_details(ctx.run_id)
         assert details["status"] == "COMPLETE"
-        print("    ✓ Context manager works")
+        print("    [OK] Context manager works")
 
         # Test 4: Export for Marquez
         print("  Testing OpenLineage export...")
@@ -130,9 +130,9 @@ def test_lineage_tracking():
         assert len(events) >= 4  # At least 2 runs * 2 events each
         assert "schemaURL" in events[0]
         print(f"    Exported {len(events)} events")
-        print("    ✓ OpenLineage export works")
+        print("    [OK] OpenLineage export works")
 
-    print("  ✓ Lineage tracking works")
+    print("  [OK] Lineage tracking works")
     return True
 
 
@@ -145,7 +145,7 @@ def test_mlflow_config():
     try:
         import mlflow
     except ImportError:
-        print("  ⚠ MLFlow not installed - skipping")
+        print("  [WARN] MLFlow not installed - skipping")
         return True
 
     from sciserver_mlflow import SciServerMLFlowConfig, mlflow_run
@@ -164,15 +164,15 @@ def test_mlflow_config():
 
         # Test setup
         config.setup()
-        print("  ✓ MLFlow setup completed")
+        print("  [OK] MLFlow setup completed")
 
         # Test run context
         with mlflow_run("test-run"):
             mlflow.log_param("test_param", "value")
             mlflow.log_metric("test_metric", 42.0)
-        print("  ✓ MLFlow run completed")
+        print("  [OK] MLFlow run completed")
 
-    print("  ✓ MLFlow configuration works")
+    print("  [OK] MLFlow configuration works")
     return True
 
 
@@ -210,7 +210,7 @@ def test_integration():
             exp.log_metric("n_tiles", 100)
             exp.log_output("output.ome.zarr")
 
-        print("    ✓ Tracked experiment completed")
+        print("    [OK] Tracked experiment completed")
 
         # Verify lineage was recorded
         if pipeline.lineage_tracker:
@@ -218,7 +218,7 @@ def test_integration():
             assert len(history) > 0
             print(f"    Lineage recorded: {len(history)} runs")
 
-    print("  ✓ Full integration works")
+    print("  [OK] Full integration works")
     return True
 
 
@@ -242,7 +242,7 @@ def main():
             success = test_func()
             results.append((name, success, None))
         except Exception as e:
-            print(f"\n  ✗ ERROR: {e}")
+            print(f"\n  [ERROR] {e}")
             import traceback
             traceback.print_exc()
             results.append((name, False, str(e)))
@@ -256,7 +256,7 @@ def main():
     total = len(results)
 
     for name, success, error in results:
-        status = "✓ PASS" if success else "✗ FAIL"
+        status = "[PASS]" if success else "[FAIL]"
         print(f"  {status}: {name}")
         if error:
             print(f"         Error: {error}")

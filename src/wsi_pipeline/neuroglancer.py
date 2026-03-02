@@ -83,7 +83,7 @@ B_SHADER = """void main(){ emitRGB( vec3( 0.0, 0.0, toNormalized(getDataValue(2)
 # =============================================================================
 # STATE GENERATION
 # Functions that write Neuroglancer JSON state files (.json). These files
-# describe which layers to display and how — they are file-path references,
+# describe which layers to display and how -- they are file-path references,
 # not data servers. No Neuroglancer Python package is required.
 # =============================================================================
 

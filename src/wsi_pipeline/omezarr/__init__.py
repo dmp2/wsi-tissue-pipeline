@@ -1,7 +1,7 @@
 """
 OME-Zarr / OME-NGFF Module
 
-Writes OME-NGFF (Next Generation File Format) — the open, cloud-friendly
+Writes OME-NGFF (Next Generation File Format) -- the open, cloud-friendly
 multi-resolution image format used throughout the WSI pipeline. Output files
 have the ``.ome.zarr`` extension and can be viewed in Neuroglancer, Napari,
 or any OME-Zarr-compatible tool.
@@ -17,14 +17,14 @@ write_ngff_from_mips(mips_yxc, out_dir, phys_xy_um, ...)
 write_ngff_from_mips_ngffzarr(mips_yxc, out_dir, phys_xy_um, ...)
     Write OME-Zarr using the ngff-zarr library with TensorStore backend.
 write_ngff_from_tile_ts(tile_yxc, out_path, base_px_um_xy, ...)
-    Streaming writer for large tiles — no full in-RAM pyramid required.
+    Streaming writer for large tiles -- no full in-RAM pyramid required.
 write_ngff_from_tile_streaming_ome(tile_yxc_da, out_dir, phys_xy_um, ...)
     Constant-memory block-wise OME-Zarr writer (alternative to TensorStore).
 """
 
 from __future__ import annotations
 
-# Metadata utilities (internal — used by writers and pipeline)
+# Metadata utilities (internal -- used by writers and pipeline)
 from .metadata import (
     _detect_source_ds_factor,
     _get_multiscales_paths,

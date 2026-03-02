@@ -178,6 +178,10 @@ minversion = "7.0"
 addopts = "-ra -q --cov=wsi_pipeline --cov-report=term-missing"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "integration: tests that require external systems or real datasets",
+    "slow: tests that are expected to take noticeably longer than the unit-test baseline",
+]
 
 [tool.coverage.run]
 source = ["src/wsi_pipeline"]

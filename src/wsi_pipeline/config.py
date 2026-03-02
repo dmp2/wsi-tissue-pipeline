@@ -36,7 +36,7 @@ class SegmentationConfig(BaseModel):
         description=(
             "Minimum tissue region area (pixels, at thumbnail scale). "
             "Regions smaller than this are discarded as artifacts. "
-            "Default 3000 ≈ a 55×55 px patch at thumbnail scale."
+            "Default 3000 is roughly a 55x55 px patch at thumbnail scale."
         ),
     )
 
@@ -172,9 +172,9 @@ class PipelineConfig(BaseModel):
         default=1,
         ge=1,
         description=(
-            "Section collection interval — e.g., 10 means every 10th section was collected. "
+            "Section collection interval -- e.g., 10 means every 10th section was collected. "
             "Used to compute the physical Z-spacing between tiles for 3D reconstruction "
-            "(dv = specimen_spacing × section_thickness_um)."
+            "(dv = specimen_spacing x section_thickness_um)."
         ),
     )
 

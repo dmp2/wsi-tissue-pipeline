@@ -1,7 +1,7 @@
 """
 SciServer Integration (optional, deployment-specific)
 
-Utilities for running the WSI pipeline on Johns Hopkins SciServer — a
+Utilities for running the WSI pipeline on Johns Hopkins SciServer -- a
 cloud-based scientific computing platform. Provides environment detection,
 storage path configuration, MLflow integration, and data lineage tracking
 specific to SciServer.

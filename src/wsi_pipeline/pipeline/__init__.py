@@ -1,8 +1,8 @@
 """
-Pipeline Module — High-Level Orchestration
+Pipeline Module -- High-Level Orchestration
 
-Coordinates the full tissue extraction workflow: segmentation → tile extraction
-→ OME-Zarr writing → (optional) Neuroglancer precomputed writing. The term
+Coordinates the full tissue extraction workflow: segmentation -> tile extraction
+-> OME-Zarr writing -> (optional) Neuroglancer precomputed writing. The term
 "plating" refers to the histology practice of laying tissue sections out in a
 grid arrangement for downstream 3D registration.
 
