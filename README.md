@@ -2,36 +2,43 @@
 
 [![CI](https://github.com/dmp2/wsi-tissue-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/dmp2/wsi-tissue-pipeline/actions/workflows/ci.yml)
 
-A reproducible whole-slide image (WSI) processing pipeline for converting VSI/ETS format images to OME-Zarr format and extracting individual tissue sections for downstream analysis including 3D visualization and registration.
+A reproducible whole-slide image (WSI) pipeline for VSI/ETS ingest, tissue extraction, OME-Zarr and Neuroglancer-precomputed export, and notebook-aligned EM-LDDMM registration/reconstruction.
 
 ## Overview
 
-This pipeline processes large whole-slide images (potentially 0.5TB+ per specimen) through the following stages:
+This pipeline processes large whole-slide images (potentially 0.5 TB+ per specimen) through staged preprocessing and reconstruction:
 
-```
-VSI/ETS Files → OME-Zarr Pyramids → Tissue Section Extraction → Downstream Tasks
-                                                                   ├── Neuroglancer Visualization
-                                                                   ├── Quality Control Grids
-                                                                   └── 3D Registration (EM-LDDMM)
-```
+1. Convert VSI/ETS data into flat image assets and metadata.
+2. Segment tissue, extract sections, and plate them for downstream analysis.
+3. Write OME-Zarr pyramids and optional Neuroglancer-precomputed volumes.
+4. Run `step4` to prepare the EM-LDDMM dataset root and manifest.
+5. Run `step5` to execute the reproducible registration workflow.
+
+`step5` supports:
+- atlas-free self-alignment
+- optional atlas registration
+- optional between-slice upsampling/filling
+- QC reports, logs, provenance, and replay artifacts
 
 ## Quick Start
 
 > **System Requirements:** Processing a single specimen (~0.5 TB of VSI/ETS files) requires:
-> - **Storage:** ≥1 TB free disk space (raw input + OME-Zarr outputs)
-> - **RAM:** ≥16 GB recommended (32 GB+ for very large slides)
+> - **Storage:** >=1 TB free disk space (raw input + OME-Zarr outputs)
+> - **RAM:** >=16 GB recommended (32 GB+ for very large slides)
 > - **CPU:** Multi-core recommended; GPU optional (improves segmentation with some backends)
 >
 > For low-resource environments, use Google Colab (free GPU/CPU, Google Drive for storage).
 
 **Which option should I use?**
 
-| I want to… | Use |
+| I want to... | Use |
 |---|---|
 | Try the pipeline with no local setup | Google Colab |
 | Reproduce results in a consistent environment | Docker |
 | Customize the pipeline or integrate into my code | Local installation |
 | Run on JHU SciServer infrastructure | SciServer (see `docs/sciserver_guide.md`) |
+
+**Working on registration?** Use the staged runner in [`scripts/run_pipeline.py`](scripts/run_pipeline.py): `step4` prepares the dataset root and `step5` runs reproducible EM-LDDMM reconstruction. See [`docs/emlddmm_registration.md`](docs/emlddmm_registration.md) for the workflow and [`docs/installation.md`](docs/installation.md) for setup details.
 
 ### Option 1: Google Colab (Recommended for getting started)
 
@@ -77,98 +84,69 @@ mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root ./
 
 ## Project Structure
 
-```
+```text
 wsi-tissue-pipeline/
-├── README.md                    # This file
-├── pyproject.toml              # Package configuration
-├── environment.yml             # Conda environment specification
-├── requirements.txt            # Pip requirements
-├── .gitignore                  # Git ignore patterns
-├── .env.example                # Environment variables template
-│
-├── docker/
-│   ├── Dockerfile              # Main Docker image
-│   ├── Dockerfile.gpu          # GPU-enabled Docker image
-│   └── docker-compose.yml      # Multi-container orchestration
-│
-├── src/
-│   └── wsi_pipeline/
-│       ├── __init__.py         # Main package exports
-│       ├── config.py           # Configuration management (Pydantic)
-│       ├── etsfile.py          # ETS file reader
-│       ├── vsi_converter.py    # VSI to flat file conversion
-│       ├── wsi_processing.py   # Main WSI processing module
-│       ├── qc_grid.py          # Quality control image grids
-│       ├── neuroglancer.py     # Neuroglancer state, server, and viewer
-│       ├── emlddmm_prep.py     # EM-LDDMM registration preparation
-│       ├── mlflow_utils.py     # MLflow experiment tracking helpers
-│       ├── cli.py              # Command-line interface
-│       │
-│       ├── segmentation/       # Tissue segmentation module
-│       │   ├── __init__.py
-│       │   ├── core.py         # Core utilities (grayscale, thumb, upsample)
-│       │   ├── entropy.py      # Entropy-based masking
-│       │   ├── otsu.py         # Otsu threshold masking
-│       │   ├── morphology.py   # Morphological operations
-│       │   └── segmenter.py    # WSISegmenter class
-│       │
-│       ├── tiles/              # Tile generation module
-│       │   ├── __init__.py
-│       │   ├── generator.py    # generate_tissue_tiles()
-│       │   ├── io.py           # Tile I/O utilities
-│       │   └── naming.py       # File naming conventions
-│       │
-│       ├── omezarr/            # OME-Zarr/NGFF writing module
-│       │   ├── __init__.py
-│       │   ├── metadata.py     # NGFF metadata utilities
-│       │   ├── pyramid.py      # MIP pyramid building
-│       │   ├── streaming.py    # Memory-efficient streaming writers
-│       │   └── writers.py      # Standard NGFF writers
-│       │
-│       ├── precomputed/        # Neuroglancer precomputed format
-│       │   ├── __init__.py
-│       │   ├── cloudvolume.py  # CloudVolume backend
-│       │   ├── tensorstore.py  # TensorStore backend
-│       │   └── plate_writer.py # PlatePrecomputedWriter class
-│       │
-│       ├── pipeline/           # High-level pipeline orchestration
-│       │   ├── __init__.py
-│       │   └── plating.py      # process_slide_with_plating()
-│       │
-│       └── sciserver/          # SciServer deployment utilities (optional)
-│           ├── __init__.py
-│           ├── sciserver_integration.py  # SciServerPipeline class
-│           ├── sciserver_mlflow.py       # MLflow config for SciServer
-│           ├── sciserver_lineage.py      # Data lineage tracking
-│           └── environment.py            # Environment detection
-│
-├── notebooks/
-│   ├── 01_wsi_to_tissue_sections.ipynb    # Example pipeline / MWE — step-by-step tutorial
-│   ├── 02_quality_control.ipynb           # QC and validation
-│   ├── 03_neuroglancer_visualization.ipynb # 3D visualization
-│   └── colab_setup.py                      # Colab initialization helper
-│
-├── configs/
-│   ├── default.yaml            # Default pipeline configuration
-│   ├── colab.yaml              # Google Colab optimized config
-│   └── sciserver.yaml          # SciServer deployment config
-│
-├── scripts/
-│   ├── run_pipeline.py         # Production runner — batch processing without notebook overhead
-│   ├── setup_mlflow.sh         # MLflow server setup script
-│   └── download_sample_data.py # Fallback data source when real specimens cannot be shared
-│
-├── tests/
-│   ├── __init__.py
-│   ├── test_etsfile.py
-│   ├── test_processing.py
-│   └── conftest.py             # Pytest fixtures
-│
-└── docs/
-    ├── installation.md         # Detailed installation guide
-    ├── configuration.md        # Configuration options
-    ├── colab_guide.md          # Google Colab usage guide
-    └── sciserver_guide.md      # SciServer deployment guide
+|-- README.md                    # This file
+|-- pyproject.toml              # Package configuration
+|-- environment.yml             # Conda environment specification
+|-- requirements.txt            # Pip requirements
+|-- .gitignore                  # Git ignore patterns
+|-- .env.example                # Environment variables template
+|
+|-- docker/
+|   |-- Dockerfile              # Main Docker image
+|   |-- Dockerfile.gpu          # GPU-enabled Docker image
+|   `-- docker-compose.yml      # Multi-container orchestration
+|
+|-- src/
+|   `-- wsi_pipeline/
+|       |-- __init__.py         # Main package exports
+|       |-- config.py           # Configuration management
+|       |-- etsfile.py          # ETS file reader
+|       |-- vsi_converter.py    # VSI to flat file conversion
+|       |-- wsi_processing.py   # Main WSI processing module
+|       |-- qc_grid.py          # Quality control image grids
+|       |-- neuroglancer.py     # Neuroglancer state, server, and viewer
+|       |-- emlddmm_prep.py     # step4 dataset-root and manifest preparation
+|       |-- mlflow_utils.py     # MLflow experiment tracking helpers
+|       |-- cli.py              # Command-line interface
+|       |-- segmentation/       # Tissue segmentation module
+|       |-- tiles/              # Tile generation module
+|       |-- omezarr/            # OME-Zarr/NGFF writing module
+|       |-- precomputed/        # Neuroglancer precomputed format
+|       |-- pipeline/           # High-level pipeline orchestration
+|       |-- registration/       # step5 workflow orchestration, reports, provenance, orientation, and upsampling
+|       `-- sciserver/          # SciServer deployment utilities
+|
+|-- notebooks/
+|   |-- 01_wsi_to_tissue_sections.ipynb
+|   |-- 02_quality_control.ipynb
+|   |-- 03_neuroglancer_visualization.ipynb
+|   |-- 04_emlddmm_preparation.ipynb
+|   `-- colab_setup.py
+|
+|-- configs/
+|   |-- default.yaml
+|   |-- colab.yaml
+|   `-- sciserver.yaml
+|
+|-- scripts/
+|   |-- run_pipeline.py         # Production runner for staged preprocessing and step5 registration
+|   |-- setup_mlflow.sh
+|   `-- download_sample_data.py
+|
+|-- tests/
+|   |-- test_etsfile.py
+|   |-- test_processing.py
+|   `-- registration/          # step5 workflow, CLI, backend, and report tests
+|
+`-- docs/
+    |-- installation.md
+    |-- configuration.md
+    |-- colab_guide.md
+    |-- emlddmm_registration.md
+    |-- emlddmm_notebook_parity.md
+    `-- sciserver_guide.md
 ```
 
 ## Module Architecture
@@ -182,6 +160,7 @@ The pipeline is organized into focused submodules:
 | `omezarr` | OME-Zarr pyramid building | `build_mips_from_yxc`, `write_ngff_from_mips`, `write_ngff_from_mips_ngffzarr` |
 | `precomputed` | Neuroglancer Precomputed format writing | `PlatePrecomputedWriter` |
 | `pipeline` | End-to-end orchestration | `process_slide_with_plating` |
+| `registration` | Staged EM-LDDMM workflow planning, execution, reporting, and upsampling | `plan_emlddmm_workflow`, `run_emlddmm_workflow`, `emlddmm_multiscale_symmetric_N`, `upsample_between_slices` |
 | `neuroglancer` | Neuroglancer state, server, and viewer | `NeuroglancerViewer`, `emit_ng_state_for_ngff_plate`, `open_neuroglancer_plate_view` |
 | `sciserver` | SciServer deployment (optional) | `SciServerPipeline`, `setup_sciserver_tracking` |
 
@@ -199,6 +178,7 @@ from wsi_pipeline.tiles import generate_tissue_tiles
 from wsi_pipeline.omezarr import build_mips_from_yxc, write_ngff_from_mips
 from wsi_pipeline.precomputed import PlatePrecomputedWriter
 from wsi_pipeline.pipeline import process_slide_with_plating
+from wsi_pipeline.registration import plan_emlddmm_workflow, run_emlddmm_workflow
 from wsi_pipeline.neuroglancer import NeuroglancerViewer, emit_ng_state_for_ngff_plate
 ```
 
@@ -206,14 +186,15 @@ from wsi_pipeline.neuroglancer import NeuroglancerViewer, emit_ng_state_for_ngff
 
 | Term | Meaning |
 |------|---------|
-| **WSI** | Whole-Slide Image — a high-resolution digital scan of an entire microscopy slide |
-| **VSI / ETS** | Olympus file formats for whole-slide images; `.vsi` is the container, `.ets` files hold the pyramid tile data |
-| **OME-Zarr / OME-NGFF** | Open Microscopy Environment — Next Generation File Format. A chunked, cloud-friendly image format built on Zarr. The `omezarr/` module writes this format. |
+| **WSI** | Whole-Slide Image - a high-resolution digital scan of an entire microscopy slide |
+| **VSI / ETS** | Olympus file formats for whole-slide images; `.vsi` is the container and `.ets` files hold the pyramid tile data |
+| **OME-Zarr / OME-NGFF** | Open Microscopy Environment - Next Generation File Format. A chunked, cloud-friendly image format built on Zarr. The `omezarr/` module writes this format. |
 | **Neuroglancer Precomputed** | A chunked format for large volumetric data, natively read by the Neuroglancer browser viewer. The `precomputed/` module writes this format. |
 | **Plating** | Histology term for laying out individual tissue sections in a grid arrangement for downstream processing and registration. Used in `pipeline/plating.py`. |
-| **EM-LDDMM** | Expectation-Maximization Large Deformation Diffeomorphic Metric Mapping — a 3D image registration algorithm. `emlddmm_prep.py` prepares metadata for the external `emlddmm` package. |
-| **MIP** | Multi-resolution Image Pyramid — the downsampled resolution levels written into OME-Zarr for efficient viewing at any zoom level. |
-| **QC** | Quality Control — visual validation grids (contact sheets) showing all extracted tissue tiles. |
+| **Dataset root** | The prepared directory passed to `step5` via `--dataset-root`. `step4` writes `samples.tsv`, per-slice JSON sidecars, and `emlddmm_dataset_manifest.json` into this root. |
+| **EM-LDDMM** | Expectation-Maximization Large Deformation Diffeomorphic Metric Mapping, a 3D image registration algorithm. In this repository, `step4` prepares the dataset root and `step5` runs the reproducible workflow. See [`docs/emlddmm_registration.md`](docs/emlddmm_registration.md) for usage details. |
+| **MIP** | Multi-resolution Image Pyramid - the downsampled resolution levels written into OME-Zarr for efficient viewing at any zoom level |
+| **QC** | Quality Control - visual validation grids, stage images, and reports used to inspect extracted tissue tiles and registration outputs |
 
 ## MLflow Experiment Tracking
 
@@ -259,6 +240,8 @@ mlflow:
   experiment_name: "wsi-tissue-pipeline"
 ```
 
+See [`docs/configuration.md`](docs/configuration.md) for the full pipeline configuration surface, including `step5` workflow overrides passed through `--emlddmm-config`.
+
 ## Command Line Interface
 
 ```bash
@@ -275,25 +258,29 @@ wsi-pipeline qc --input-dir /path/to/tissues --output-dir /path/to/qc
 wsi-pipeline visualize --zarr-dir /path/to/zarr --port 9999
 ```
 
+For the staged EM-LDDMM workflow, use `python scripts/run_pipeline.py step4` and `python scripts/run_pipeline.py step5` as described below.
+
 ## Staged Runner
 
-The staged runner in [`scripts/run_pipeline.py`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/scripts/run_pipeline.py) exposes the notebook-aligned EM-LDDMM workflow as `step5` / `reconstruct`.
+The staged runner in [`scripts/run_pipeline.py`](scripts/run_pipeline.py) operationalizes the notebook-aligned EM-LDDMM workflow as `step4` / `emlddmm-prep` and `step5` / `reconstruct`. It is the supported non-interactive path for reproducible registration runs.
 
-Use the dedicated step-5 docs for the full workflow:
-- [`docs/emlddmm_registration.md`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/docs/emlddmm_registration.md): onboarding, defaults, units, target modes, logging, QC report, and transformation-graph execution.
-- [`docs/emlddmm_notebook_parity.md`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/docs/emlddmm_notebook_parity.md): high-level mapping from `legacy_scripts/tb_macaque_emlddmm.ipynb` to the staged pipeline.
+Use the dedicated docs for full details:
+- [`docs/emlddmm_registration.md`](docs/emlddmm_registration.md): workflow overview, defaults, target modes, logging, QC reports, and optional transformation-graph execution
+- [`docs/emlddmm_notebook_parity.md`](docs/emlddmm_notebook_parity.md): high-level mapping from `legacy_scripts/tb_macaque_emlddmm.ipynb` to the staged pipeline
+- [`docs/installation.md`](docs/installation.md): environment and dependency guidance
+- [`docs/configuration.md`](docs/configuration.md): YAML pipeline config and `--emlddmm-config` overrides
 
-Step 4 writes `samples.tsv`, per-slice JSON sidecars, and `emlddmm_dataset_manifest.json`. Step 5 then loads the target, rescales axes into micrometers, downsamples to the working grid, runs self-alignment, optionally runs atlas registration, and optionally runs between-slice filling.
+`step4` writes `samples.tsv`, per-slice JSON sidecars, and `emlddmm_dataset_manifest.json` into the dataset root. `step5` loads that prepared target, rescales axes into micrometers, downsamples to the working grid, runs atlas-free self-alignment, optionally runs atlas registration, optionally fills between slices, and writes stable run artifacts.
 
-Key step-5 behavior:
+Key `step5` behavior:
 - Use `--dataset-root` for the prepared dataset root. `-o/--output` remains a backward-compatible but deprecated alias.
-- Atlas registration requires `--atlas` plus either `--init-affine` or `--orientation-from/--orientation-to`.
+- Atlas-free mode runs without `--atlas`. Atlas-registration mode requires `--atlas` plus either `--init-affine` or `--orientation-from/--orientation-to`.
 - `--list-orientations` prints the valid backend orientation codes without running a registration.
 - Precomputed targets require `--target-source-format precomputed` plus `--precomputed-manifest`.
 - `--dry-run` resolves the full plan without executing stages.
 - `--write-qc-report` writes `registration_report.html` and `registration_report.json`.
 - Every run writes `run_provenance.json` and `reproduce_step5_command.txt`.
-- `--run-transformation-graph` resolves `transformation_graph_v01.py` from the external `emlddmm` package unless `--transformation-graph-script` is supplied.
+- `--run-transformation-graph` is available for atlas-registration workflows; see the registration guide for setup details.
 
 Example atlas-free run:
 
@@ -335,6 +322,18 @@ python scripts/run_pipeline.py step5 \
   --dry-run
 ```
 
+Typical outputs under `<dataset-root>/emlddmm` include:
+- `self_alignment/`
+- `atlas_registration/`
+- `upsampling/`
+- `registration.log`
+- `resolved_run_plan.json`
+- `registration_summary.json`
+- `run_provenance.json`
+- `reproduce_step5_command.txt`
+- optional `registration_report.html`
+- optional `registration_report.json`
+
 ## Deployment Options
 
 ### Google Colab
@@ -354,17 +353,19 @@ Best for production processing at JHU:
 
 Best for development and reproducible batch runs:
 - Full control over environment and dependencies
-- Use `scripts/run_pipeline.py` for non-interactive batch processing
+- Use `scripts/run_pipeline.py` for non-interactive batch processing and `step4` / `step5` registration runs
 - Use `notebooks/` for step-by-step exploration and experimentation
 
 ## Outputs
 
 The pipeline produces:
 
-1. **OME-Zarr files**: Multi-resolution pyramids for each tissue section
-2. **Metadata**: JSON files with segmentation parameters and provenance
-3. **QC Grids**: Contact sheets for visual quality control
-4. **MLflow artifacts**: Experiment logs, metrics, and model artifacts
+1. **OME-Zarr and image outputs**: multi-resolution pyramids for each tissue section and optional Neuroglancer-precomputed volumes for downstream visualization.
+2. **Section metadata and manifests**: segmentation metadata, per-slice JSON sidecars, `samples.tsv`, and `emlddmm_dataset_manifest.json`.
+3. **QC artifacts**: contact sheets for tissue extraction plus stage PNGs and optional `registration_report.html` / `registration_report.json`.
+4. **Registration outputs and reports**: `self_alignment/`, optional `atlas_registration/`, optional `upsampling/`, `resolved_run_plan.json`, `registration_summary.json`, and `registration.log`.
+5. **Provenance and replay artifacts**: `run_provenance.json` and `reproduce_step5_command.txt` for reproducible step5 reruns.
+6. **MLflow artifacts**: experiment logs, metrics, and tracked run artifacts.
 
 ## Contributing
 
