@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from html import escape
 import json
 import logging
@@ -145,7 +145,7 @@ def build_registration_report_manifest(
     }
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "registration_output": root.name,
         "plan_path": _relative_to_root(plan_path, root),
         "summary_path": _relative_to_root(summary_path, root),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import importlib.util
 import json
 import logging
@@ -1573,7 +1573,7 @@ def run_emlddmm_workflow(
             if loaded.stage_controls["self_alignment"]:
                 logger.info("Starting stage: self_alignment")
                 stage_started = time.perf_counter()
-                stage_started_at = datetime.now(UTC).isoformat()
+                stage_started_at = datetime.now(timezone.utc).isoformat()
                 stage_dir = _stage_dir(registration_output_dir, "self_alignment")
                 self_kwargs = _build_self_alignment_kwargs(loaded.config)
                 stage_payloads["self_alignment"] = self_kwargs
@@ -1618,7 +1618,7 @@ def run_emlddmm_workflow(
                         status="completed",
                         output_dir=stage_dir,
                         started_at=stage_started_at,
-                        ended_at=datetime.now(UTC).isoformat(),
+                        ended_at=datetime.now(timezone.utc).isoformat(),
                         duration_seconds=timings["self_alignment_seconds"],
                     )
                 )
@@ -1651,7 +1651,7 @@ def run_emlddmm_workflow(
             if loaded.stage_controls["atlas_registration"]:
                 logger.info("Starting stage: atlas_registration")
                 stage_started = time.perf_counter()
-                stage_started_at = datetime.now(UTC).isoformat()
+                stage_started_at = datetime.now(timezone.utc).isoformat()
                 stage_dir = _stage_dir(registration_output_dir, "atlas_registration")
                 atlas_inputs = loaded.atlas_inputs
                 assert atlas_inputs is not None
@@ -1756,7 +1756,7 @@ def run_emlddmm_workflow(
                         status="completed",
                         output_dir=stage_dir,
                         started_at=stage_started_at,
-                        ended_at=datetime.now(UTC).isoformat(),
+                        ended_at=datetime.now(timezone.utc).isoformat(),
                         duration_seconds=timings["atlas_registration_seconds"],
                     )
                 )
@@ -1787,7 +1787,7 @@ def run_emlddmm_workflow(
             if loaded.stage_controls["upsampling"]:
                 logger.info("Starting stage: upsampling")
                 stage_started = time.perf_counter()
-                stage_started_at = datetime.now(UTC).isoformat()
+                stage_started_at = datetime.now(timezone.utc).isoformat()
                 stage_dir = _stage_dir(registration_output_dir, "upsampling")
                 upsampling_kwargs = _build_upsampling_kwargs(loaded.config)
                 stage_payloads["upsampling"] = upsampling_kwargs
@@ -1833,7 +1833,7 @@ def run_emlddmm_workflow(
                         status="completed",
                         output_dir=stage_dir,
                         started_at=stage_started_at,
-                        ended_at=datetime.now(UTC).isoformat(),
+                        ended_at=datetime.now(timezone.utc).isoformat(),
                         duration_seconds=timings["upsampling_seconds"],
                     )
                 )
@@ -1910,7 +1910,7 @@ def run_emlddmm_workflow(
             "stage_timeline": [entry.model_dump(mode="python") for entry in stage_timeline],
             "timings": timings,
             "artifacts": artifacts,
-            "generated_at": datetime.now(UTC).isoformat(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
         reproduce_command_content = build_reproduce_command(
             plan=resolved_plan,

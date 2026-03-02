@@ -43,6 +43,9 @@ def test_resolve_backend_falls_back_to_vendored(monkeypatch):
     fake_backend = backend_module.EmlddmmBackend(
         name="vendored:test",
         module=_fake_backend_module(),
+        origin_type="vendored",
+        module_path=None,
+        package_version=None,
         read_data=lambda *args, **kwargs: None,
         atlas_free_reconstruction=lambda *args, **kwargs: None,
         emlddmm_multiscale=lambda *args, **kwargs: None,

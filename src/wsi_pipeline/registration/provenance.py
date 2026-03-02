@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import os
@@ -110,7 +110,7 @@ def file_metadata(
         return payload
     stat = resolved.stat()
     payload["size_bytes"] = stat.st_size
-    payload["mtime_utc"] = datetime.fromtimestamp(stat.st_mtime, UTC).isoformat()
+    payload["mtime_utc"] = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
     if resolved.is_file() and hash_if_small and stat.st_size <= _HASH_LIMIT_BYTES:
         payload["sha256"] = compute_sha256(resolved)
     return payload
@@ -225,7 +225,7 @@ def build_runtime_metadata() -> dict[str, Any]:
         "release": platform.release(),
         "executable": sys.executable,
         "cwd": os.getcwd(),
-        "timestamp_utc": datetime.now(UTC).isoformat(),
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "torch_version": torch_version,
         "cuda_available": cuda_available,
         "selected_device": selected_device,
@@ -319,7 +319,7 @@ def build_run_provenance(
     )
     return EmlddmmRunProvenance(
         schema_version=SCHEMA_VERSION,
-        generated_at=datetime.now(UTC).isoformat(),
+        generated_at=datetime.now(timezone.utc).isoformat(),
         warnings=effective_warnings,
         pipeline={
             "name": "wsi_pipeline.step5",
