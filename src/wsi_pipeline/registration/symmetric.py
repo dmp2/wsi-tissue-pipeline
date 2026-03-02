@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
+"""Symmetric upsampling helpers carried over from the notebook-era EM-LDDMM code.
 
-# This code just copy-and-pastes the codes from 11/18/2025.
-# There are no edits yet as of 02/27/2026
+This module is intentionally close to the 2025 notebook-derived implementation used
+during the `tb_macaque_emlddmm.ipynb` workflow migration. In this cleanup pass, the
+surrounding pipeline gains clearer docs, logging, and report outputs, but the
+underlying numerical behavior here is intentionally left unchanged.
+"""
 
-# Imports
 import torch
 import numpy as np
 from emlddmm import emlddmm 
 
-# Dom: added 11/18/2025
+
 def _integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
     """Integrate v_t -> phi^{-1}_t, storing all time steps."""
     v = torch.as_tensor(v)

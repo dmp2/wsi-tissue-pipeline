@@ -275,6 +275,66 @@ wsi-pipeline qc --input-dir /path/to/tissues --output-dir /path/to/qc
 wsi-pipeline visualize --zarr-dir /path/to/zarr --port 9999
 ```
 
+## Staged Runner
+
+The staged runner in [`scripts/run_pipeline.py`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/scripts/run_pipeline.py) exposes the notebook-aligned EM-LDDMM workflow as `step5` / `reconstruct`.
+
+Use the dedicated step-5 docs for the full workflow:
+- [`docs/emlddmm_registration.md`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/docs/emlddmm_registration.md): onboarding, defaults, units, target modes, logging, QC report, and transformation-graph execution.
+- [`docs/emlddmm_notebook_parity.md`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/docs/emlddmm_notebook_parity.md): high-level mapping from `legacy_scripts/tb_macaque_emlddmm.ipynb` to the staged pipeline.
+
+Step 4 writes `samples.tsv`, per-slice JSON sidecars, and `emlddmm_dataset_manifest.json`. Step 5 then loads the target, rescales axes into micrometers, downsamples to the working grid, runs self-alignment, optionally runs atlas registration, and optionally runs between-slice filling.
+
+Key step-5 behavior:
+- Use `--dataset-root` for the prepared dataset root. `-o/--output` remains a backward-compatible but deprecated alias.
+- Atlas registration requires `--atlas` plus either `--init-affine` or `--orientation-from/--orientation-to`.
+- `--list-orientations` prints the valid backend orientation codes without running a registration.
+- Precomputed targets require `--target-source-format precomputed` plus `--precomputed-manifest`.
+- `--dry-run` resolves the full plan without executing stages.
+- `--write-qc-report` writes `registration_report.html` and `registration_report.json`.
+- Every run writes `run_provenance.json` and `reproduce_step5_command.txt`.
+- `--run-transformation-graph` resolves `transformation_graph_v01.py` from the external `emlddmm` package unless `--transformation-graph-script` is supplied.
+
+Example atlas-free run:
+
+```bash
+python scripts/run_pipeline.py step5 \
+  --dataset-root /data/tiles
+```
+
+Example atlas-registration run from prepared slices:
+
+```bash
+python scripts/run_pipeline.py step5 \
+  --dataset-root /data/tiles \
+  --atlas /data/atlas.vtk \
+  --label /data/atlas_labels.vtk \
+  --orientation-from PIR \
+  --orientation-to RIP
+```
+
+Example atlas-free run from Neuroglancer precomputed data:
+
+```bash
+python scripts/run_pipeline.py step5 \
+  --dataset-root /data/tiles \
+  --target-source /data/precomputed_plate \
+  --target-source-format precomputed \
+  --precomputed-manifest /data/tiles/emlddmm_dataset_manifest.json
+```
+
+Example dry-run plan resolution:
+
+```bash
+python scripts/run_pipeline.py step5 \
+  --dataset-root /data/tiles \
+  --atlas /data/atlas.vtk \
+  --orientation-from PIR \
+  --orientation-to RIP \
+  --write-qc-report \
+  --dry-run
+```
+
 ## Deployment Options
 
 ### Google Colab

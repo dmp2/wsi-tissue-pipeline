@@ -11,7 +11,7 @@ Stages:
     step2 (qc)            Quality-control contact sheets
     step3 (visualize)     Interactive Neuroglancer visualization
     step4 (emlddmm-prep)  EM-LDDMM metadata preparation
-    step5 (reconstruct)   EM-LDDMM reconstruction (placeholder)
+    step5 (reconstruct)   EM-LDDMM registration / reconstruction
     all                   Run steps 1 → 2 → 4 sequentially
 
 Usage:
@@ -19,13 +19,14 @@ Usage:
     python run_pipeline.py step2 -o /data/tiles
     python run_pipeline.py step3 -o /data/zarr_plate
     python run_pipeline.py step4 -o /data/tiles --dv 35.05 35.05 16.0
-    python run_pipeline.py step5 -o /data/tiles
+    python run_pipeline.py step5 --dataset-root /data/tiles
     python run_pipeline.py all   -i /data/wsi -o /data/tiles -c configs/default.yaml
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +43,14 @@ def _banner(title: str) -> None:
     print(f"\n{'=' * 60}")
     print(f"  {title}")
     print(f"{'=' * 60}\n")
+
+
+def _configure_logging(verbose: bool) -> None:
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+        force=True,
+    )
 
 
 def _load_config(args):
@@ -279,27 +288,123 @@ def step4_emlddmm_prep(args, config) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Reconstruct (placeholder)
+# Step 5: Reconstruct
 # ---------------------------------------------------------------------------
 
 def step5_reconstruct(args, config) -> int:
-    """Placeholder for EM-LDDMM reconstruction (not yet implemented)."""
+    """Run the notebook-derived EM-LDDMM workflow."""
+    from wsi_pipeline.registration import run_emlddmm_workflow
+    from wsi_pipeline.registration.orientation import (
+        list_valid_orientation_codes,
+        orientation_validation_rule,
+    )
+
     _banner("Step 5: EM-LDDMM Reconstruction")
 
-    print("This step is not yet implemented in the automated pipeline.\n")
-    print("To run EM-LDDMM reconstruction manually:")
-    print("  1. Ensure steps 1-4 have been completed")
-    print("  2. Verify samples.tsv and JSON sidecars in the output directory")
-    print("  3. Use the emlddmm package for registration:")
-    print("       python -m emlddmm --config <config.json>")
+    if getattr(args, "list_orientations", False):
+        print(orientation_validation_rule())
+        print()
+        print("Valid backend orientation codes:")
+        print(" ".join(list_valid_orientation_codes()))
+        print()
+        print("These codes are passed to emlddmm.orientation_to_orientation.")
+        return 0
+
+    dataset_root = getattr(args, "dataset_root", None)
+    legacy_output = getattr(args, "output", None)
+    if dataset_root is None and legacy_output is None:
+        raise ValueError("step5 requires --dataset-root or legacy --output")
+    if (
+        dataset_root is not None
+        and legacy_output is not None
+        and dataset_root.resolve() != legacy_output.resolve()
+    ):
+        raise ValueError("--dataset-root and --output must match when both are provided")
+    dataset_root = (dataset_root or legacy_output).resolve()
+    used_legacy_output_alias = legacy_output is not None and dataset_root is not None and getattr(args, "dataset_root", None) is None
+    if used_legacy_output_alias:
+        logging.getLogger(__name__).warning(
+            "Deprecated --output alias was used for step5; prefer --dataset-root."
+        )
+
+    target_source = getattr(args, "target_source", None) or dataset_root
+    registration_output = getattr(args, "registration_output", None)
+    if registration_output is None:
+        registration_output = dataset_root / "emlddmm"
+
+    print(f"Prepared dataset:    {dataset_root}")
+    print(f"Target source:       {target_source}")
+    print(f"Target source mode:  {args.target_source_format}")
+    print(f"Registration output: {registration_output}")
+    print(f"Atlas mode:          {'atlas_to_target' if args.atlas else 'atlas_free'}")
+    print(f"Dry run:             {'yes' if args.dry_run else 'no'}")
+    if args.atlas:
+        print(f"Atlas:               {args.atlas}")
+    if args.label:
+        print(f"Labels:              {args.label}")
     print()
-    print("See: https://github.com/tward/emlddmm")
 
-    emlddmm_config = getattr(args, "emlddmm_config", None)
-    if emlddmm_config:
-        print(f"\nNote: --emlddmm-config={emlddmm_config} was provided.")
-        print("      This will be used when reconstruction is implemented.")
+    result = run_emlddmm_workflow(
+        dataset_root=dataset_root,
+        output_dir=args.output,
+        target_source=target_source,
+        target_source_format=args.target_source_format,
+        registration_output=registration_output,
+        atlas=args.atlas,
+        label=args.label,
+        emlddmm_config=args.emlddmm_config,
+        preset=args.preset,
+        init_affine=args.init_affine,
+        orientation_from=args.orientation_from,
+        orientation_to=args.orientation_to,
+        atlas_unit_scale=args.atlas_unit_scale,
+        target_unit_scale=args.target_unit_scale,
+        device=args.device,
+        precomputed_manifest=args.precomputed_manifest,
+        upsample_between_slices=args.upsample_between_slices,
+        upsample_mode=args.upsample_mode,
+        skip_self_alignment=args.skip_self_alignment,
+        run_transformation_graph=args.run_transformation_graph,
+        transformation_graph_script=args.transformation_graph_script,
+        write_notebook_bundle=args.write_notebook_bundle,
+        write_qc_report=args.write_qc_report,
+        used_legacy_output_alias=used_legacy_output_alias,
+        original_cli_argv=list(sys.argv[1:]),
+        dry_run=args.dry_run,
+        verbose=args.verbose,
+    )
 
+    resolved_plan = getattr(result, "resolved_plan", None)
+    print(f"Mode:         {result.mode}")
+    if resolved_plan is not None:
+        print(f"Backend:      {resolved_plan.backend_name}")
+        print(f"Resolution:   {resolved_plan.working_resolution_um} um")
+        print(
+            f"Unit scales:  atlas={resolved_plan.atlas_unit_scale} "
+            f"target={resolved_plan.target_unit_scale}"
+        )
+        print(f"Atlas init:   {resolved_plan.atlas_init_mode}")
+        enabled = ", ".join(resolved_plan.enabled_stages) or "none"
+        skipped = ", ".join(
+            f"{name} ({reason})" for name, reason in resolved_plan.skipped_stages.items()
+        ) or "none"
+        print(f"Enabled:      {enabled}")
+        print(f"Skipped:      {skipped}")
+    print(f"Plan JSON:    {result.plan_path}")
+    print(f"Output root:  {result.registration_output}")
+    print(f"Summary JSON: {result.summary_path}")
+    log_path = getattr(result, "log_path", None)
+    if log_path is not None:
+        print(f"Log file:     {log_path}")
+    provenance_path = getattr(result, "provenance_path", None)
+    if provenance_path is not None:
+        print(f"Provenance:   {provenance_path}")
+    replay_path = getattr(result, "reproduce_command_path", None)
+    if replay_path is not None:
+        print(f"Replay cmd:   {replay_path}")
+    report_path = getattr(result, "report_path", None)
+    if report_path is not None:
+        print(f"QC report:    {report_path}")
     return 0
 
 
@@ -335,7 +440,7 @@ def run_all(args, config) -> int:
     print(f"{'=' * 60}")
     print("\nNext steps:")
     print("  - Run 'step3' separately for interactive Neuroglancer visualization")
-    print("  - Run 'step5' when EM-LDDMM reconstruction is available")
+    print("  - Run 'step5' for atlas-free reconstruction or atlas registration")
     return 0
 
 
@@ -435,10 +540,63 @@ def build_parser() -> argparse.ArgumentParser:
 
     # --- step5 / reconstruct ---
     p5 = sub.add_parser("step5", aliases=["reconstruct"],
-                         help="EM-LDDMM reconstruction (placeholder)")
-    _add_common_io(p5, input_required=False)
+                         help="EM-LDDMM registration / reconstruction")
+    p5.add_argument(
+        "--dataset-root", type=Path, default=None,
+        help="Prepared dataset root generated by earlier pipeline steps",
+    )
+    p5.add_argument(
+        "-o", "--output", type=Path, default=None,
+        help="Deprecated alias for --dataset-root",
+    )
     p5.add_argument("--emlddmm-config", type=Path, default=None,
-                     help="Path to EM-LDDMM JSON config file (future use)")
+                     help="Path to EM-LDDMM workflow JSON override")
+    p5.add_argument("--atlas", type=Path, default=None,
+                     help="Optional atlas image path; omit for atlas-free reconstruction")
+    p5.add_argument("--label", type=Path, default=None,
+                     help="Optional atlas label path (valid only with --atlas)")
+    p5.add_argument("--target-source", type=Path, default=None,
+                      help="Prepared-dir or precomputed target source (default: --dataset-root)")
+    p5.add_argument("--target-source-format", type=str, default="auto",
+                     choices=["auto", "prepared-dir", "precomputed"],
+                     help="Target source format (default: auto)")
+    p5.add_argument("--registration-output", type=Path, default=None,
+                       help="Registration output root (default: <dataset-root>/emlddmm)")
+    p5.add_argument("--preset", type=str, default="macaque-notebook",
+                      help="Notebook-aligned workflow defaults (default: macaque-notebook)")
+    p5.add_argument("--init-affine", type=Path, default=None,
+                      help="Initial 4x4 affine for atlas registration")
+    p5.add_argument("--orientation-from", type=str, default=None,
+                      help="Backend orientation code for the atlas volume when deriving the init affine")
+    p5.add_argument("--orientation-to", type=str, default=None,
+                       help="Backend orientation code for the target volume when deriving the init affine")
+    p5.add_argument("--list-orientations", action="store_true",
+                      help="Print the valid backend orientation codes and exit")
+    p5.add_argument("--atlas-unit-scale", type=float, default=None,
+                      help="Scale atlas axes into micrometers (default preset assumes atlas coordinates are in mm)")
+    p5.add_argument("--target-unit-scale", type=float, default=None,
+                      help="Scale target axes into micrometers (default preset assumes the target is already in um)")
+    p5.add_argument("--device", type=str, default=None,
+                      help="Execution device override: auto, cpu, cuda, or cuda:N")
+    p5.add_argument("--precomputed-manifest", type=Path, default=None,
+                      help="Manifest required for precomputed target input")
+    p5.add_argument("--upsample-between-slices", action="store_true", default=None,
+                     help="Enable optional between-slice filling on the self-aligned target")
+    p5.add_argument("--upsample-mode", type=str, default=None,
+                     choices=["seg", "img"],
+                     help="Between-slice filling mode (default: preset or seg)")
+    p5.add_argument("--skip-self-alignment", action="store_true",
+                      help="Skip atlas-free self-alignment and use identity slice transforms")
+    p5.add_argument("--run-transformation-graph", action="store_true",
+                      help="Execute transformation_graph_v01.py from the external emlddmm package after atlas registration")
+    p5.add_argument("--transformation-graph-script", type=Path, default=None,
+                      help="Explicit path to transformation_graph_v01.py; overrides external emlddmm package discovery")
+    p5.add_argument("--write-notebook-bundle", action="store_true",
+                      help="Write a debug notebook-style bundle summarizing stage payloads")
+    p5.add_argument("--write-qc-report", action="store_true",
+                      help="Write registration_report.html and registration_report.json with QC images when present")
+    p5.add_argument("--dry-run", action="store_true",
+                      help="Resolve and validate the run plan without executing stages")
 
     # --- all ---
     pa = sub.add_parser("all", help="Run steps 1 -> 2 -> 4 sequentially")
@@ -508,6 +666,7 @@ def main() -> int:
     if hasattr(args, "no_clean_sidecars"):
         args.clean_sidecars = not args.no_clean_sidecars
 
+    _configure_logging(getattr(args, "verbose", False))
     config = _load_config(args)
 
     handler = DISPATCH.get(args.step)

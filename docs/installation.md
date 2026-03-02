@@ -98,6 +98,23 @@ rich>=12.0.0
 - `mypy`: Type checking
 - `pre-commit`: Git hooks
 
+### Step-5 EM-LDDMM Dependencies
+
+`step5` uses a hybrid backend resolver for registration:
+- First choice: the installed external `emlddmm` package.
+- Fallback: the vendored legacy compatibility code in this repository.
+
+Important step-5 extras:
+- `tensorstore` is required when `--target-source-format precomputed` is used.
+- `transformation_graph_v01.py` is treated as part of the external `emlddmm` package, not this repository.
+- `--run-transformation-graph` will fail early unless that external script can be resolved or `--transformation-graph-script` points to it explicitly.
+
+Recommended install when you plan to use step 5 with precomputed targets and transformation-graph execution:
+
+```bash
+pip install tensorstore emlddmm
+```
+
 ### Platform-Specific Instructions
 
 #### Linux (Ubuntu/Debian)

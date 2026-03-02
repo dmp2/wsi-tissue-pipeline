@@ -8,6 +8,7 @@ registration pipeline.
 
 Provides:
 - ``make_samples_tsv`` -- write a ``samples.tsv`` inventory with missing-slice detection
+- ``write_emlddmm_dataset_manifest`` -- write a manifest for prepared-dir and precomputed step-5 inputs
 - ``set_up_hist_for_emlddmm`` -- orchestrate downsampling, TSV generation, and JSON sidecars
 - ``remove_json_sidecars`` -- delete all ``.json`` files in a directory (for re-generation)
 
@@ -17,12 +18,14 @@ Functions that require it will raise a clear error if it is not installed.
 
 from __future__ import annotations
 
+import csv
+import json
 import logging
 import os
 import re
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +148,194 @@ def _format_missing_like(
 
     tokens[fnumidx] = f"{prefix}{new_num:0{width}d}"
     return sep.join(tokens) + ext_with_dot
+
+
+def _load_samples_rows(samples_tsv: str | Path) -> list[dict[str, str]]:
+    """Load rows from a samples.tsv file."""
+
+    with open(samples_tsv, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        return list(reader)
+
+
+def _load_sidecar(path: Path) -> dict[str, Any] | None:
+    """Load a JSON sidecar when it exists."""
+
+    if not path.exists():
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _sidecar_shape_yx(sidecar: dict[str, Any] | None) -> list[int] | None:
+    """Extract [Y, X] image shape from a sidecar payload."""
+
+    if sidecar is None:
+        return None
+    sizes = sidecar.get("Sizes")
+    if not isinstance(sizes, list) or len(sizes) < 3:
+        return None
+    return [int(sizes[2]), int(sizes[1])]
+
+
+def _sidecar_space_directions(sidecar: dict[str, Any] | None) -> list[list[float]] | None:
+    """Extract the 3x3 space-directions matrix from a sidecar payload."""
+
+    if sidecar is None:
+        return None
+    directions = sidecar.get("SpaceDirections")
+    if not isinstance(directions, list) or len(directions) < 4:
+        return None
+    return [[float(value) for value in axis] for axis in directions[1:4]]
+
+
+def _sidecar_origin(sidecar: dict[str, Any] | None) -> list[float] | None:
+    """Extract the space origin from a sidecar payload."""
+
+    if sidecar is None:
+        return None
+    origin = sidecar.get("SpaceOrigin")
+    if not isinstance(origin, list) or len(origin) < 3:
+        return None
+    return [float(value) for value in origin[:3]]
+
+
+def _infer_manifest_z_step(
+    present_rows: list[dict[str, Any]],
+    default_step: float,
+) -> float:
+    """Infer the per-grid-step z spacing from present sidecars."""
+
+    if len(present_rows) < 2:
+        return float(default_step)
+
+    candidates: list[float] = []
+    previous = None
+    for row in present_rows:
+        if row["z_position_um"] is None:
+            continue
+        if previous is not None:
+            delta_index = int(row["overall_index"]) - int(previous["overall_index"])
+            if delta_index > 0:
+                delta_z = float(row["z_position_um"]) - float(previous["z_position_um"])
+                candidates.append(delta_z / delta_index)
+        previous = row
+
+    if not candidates:
+        return float(default_step)
+    return float(np.median(np.asarray(candidates, dtype=np.float64)))
+
+
+def write_emlddmm_dataset_manifest(
+    subject_dir: str | Path,
+    *,
+    ext: str = "",
+    dv_um: list[float] | tuple[float, float, float] | None = None,
+    space: str | None = None,
+    sep: str = "_",
+    fnumidx: int = -1,
+) -> Path:
+    """Write ``emlddmm_dataset_manifest.json`` for a prepared EM-LDDMM dataset."""
+
+    subject_dir = Path(subject_dir)
+    samples_tsv = subject_dir / "samples.tsv"
+    if not samples_tsv.exists():
+        raise FileNotFoundError(f"Could not find samples.tsv in {subject_dir}")
+
+    rows = _load_samples_rows(samples_tsv)
+    if not rows:
+        raise ValueError(f"samples.tsv in {subject_dir} does not contain any slice rows")
+
+    ext_with_dot = ext if ext else _detect_img_ext([row["sample_id"] for row in rows])
+    if not ext_with_dot.startswith("."):
+        ext_with_dot = f".{ext_with_dot}"
+
+    manifest_rows: list[dict[str, Any]] = []
+    present_rows: list[dict[str, Any]] = []
+    overall_indices: list[int] = []
+
+    for row in rows:
+        sample_id = row["sample_id"]
+        overall_index = _extract_frame_number(sample_id, sep=sep, fnumidx=fnumidx)
+        overall_indices.append(overall_index)
+
+        sidecar_name = f"{Path(sample_id).stem}.json"
+        sidecar = _load_sidecar(subject_dir / sidecar_name)
+        entry_space = space
+        if entry_space is None and sidecar is not None:
+            entry_space = str(sidecar.get("Space", ""))
+
+        entry = {
+            "sample_id": sample_id,
+            "status": row["status"],
+            "grid_index": 0,
+            "present_rank": None,
+            "overall_index": overall_index,
+            "image_filename": sample_id,
+            "sidecar_filename": sidecar_name if sidecar is not None else None,
+            "z_position_um": None,
+            "shape_yx": _sidecar_shape_yx(sidecar),
+            "space_origin_um": _sidecar_origin(sidecar),
+            "space_directions_um": _sidecar_space_directions(sidecar),
+        }
+        if entry["space_origin_um"] is not None:
+            entry["z_position_um"] = float(entry["space_origin_um"][2])
+        if str(row["status"]).strip().lower() == "present":
+            present_rows.append(entry)
+        if space is None and entry_space:
+            space = entry_space
+        manifest_rows.append(entry)
+
+    min_overall = min(overall_indices)
+    max_overall = max(overall_indices)
+    full_grid_count = int(max_overall - min_overall + 1)
+
+    for entry in manifest_rows:
+        entry["grid_index"] = int(entry["overall_index"] - min_overall)
+
+    present_rows.sort(key=lambda item: int(item["overall_index"]))
+    for present_rank, entry in enumerate(present_rows):
+        entry["present_rank"] = int(present_rank)
+
+    default_dv = [0.27385655, 0.27385655, 10.0] if dv_um is None else [float(v) for v in dv_um]
+    first_present = present_rows[0] if present_rows else None
+    directions = first_present["space_directions_um"] if first_present is not None else None
+    if directions is not None:
+        default_dv = [
+            float(directions[0][0]),
+            float(directions[1][1]),
+            float(directions[2][2]),
+        ]
+
+    z_step_um = _infer_manifest_z_step(present_rows, default_dv[2])
+    if first_present is not None and first_present["z_position_um"] is not None:
+        z0 = float(first_present["z_position_um"]) - (
+            int(first_present["grid_index"]) * float(z_step_um)
+        )
+    else:
+        z0 = 0.0
+    z_axis_um = [float(z0 + (idx * z_step_um)) for idx in range(full_grid_count)]
+
+    for entry in manifest_rows:
+        if entry["z_position_um"] is None:
+            entry["z_position_um"] = float(z_axis_um[int(entry["grid_index"])])
+
+    manifest = {
+        "version": 1,
+        "space": space or "unknown",
+        "dv_um": [float(value) for value in default_dv],
+        "z_axis_um": z_axis_um,
+        "full_grid_count": full_grid_count,
+        "dense_present_count": len(present_rows),
+        "target_ext": ext_with_dot,
+        "subject_dir": str(subject_dir.resolve()),
+        "entries": manifest_rows,
+    }
+
+    out_path = subject_dir / "emlddmm_dataset_manifest.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    return out_path
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +594,14 @@ def set_up_hist_for_emlddmm(config: dict) -> None:
         max_slice=max_slice,
         dv=dv,
         slice_downfactor=slice_down,
+        space=space,
+    )
+
+    # 4) Manifest for prepared-dir and precomputed-backed step-5 inputs
+    write_emlddmm_dataset_manifest(
+        output_dir,
+        ext=ext,
+        dv_um=dv,
         space=space,
     )
 

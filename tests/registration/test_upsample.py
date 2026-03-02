@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
+
+torch = pytest.importorskip("torch")
 
 import wsi_pipeline.registration.symmetric as symmetric_module
 import wsi_pipeline.registration.upsample as upsample_module

@@ -230,6 +230,58 @@ overrides = {"segmentation": {"backend": "tiatoolbox"}}
 final_config = merge_configs(base_config, overrides)
 ```
 
+## Step-5 EM-LDDMM Overrides
+
+`step5` also accepts a JSON workflow override via `--emlddmm-config`. This is separate from the YAML pipeline config used for the earlier stages.
+
+Minimal example:
+
+```json
+{
+  "units": {
+    "atlas_unit_scale": 1000.0,
+    "target_unit_scale": 1.0,
+    "desired_resolution_um": 200.0
+  },
+  "stage_controls": {
+    "self_alignment_enabled": true,
+    "atlas_registration_enabled": true,
+    "upsampling_enabled": false
+  },
+  "atlas_registration": {
+    "enabled": true
+  },
+  "upsampling": {
+    "enabled": false,
+    "mode": "seg"
+  },
+  "transformation_graph": {
+    "write_config": true,
+    "execute": false,
+    "script_path": "C:/path/to/transformation_graph_v01.py"
+  },
+  "outputs": {
+    "write_qc_report": true
+  }
+}
+```
+
+Important fields:
+- `units.atlas_unit_scale`: scales atlas axes into micrometers. The notebook-aligned preset assumes the atlas is stored in millimeters, so the default is `1000.0`.
+- `units.target_unit_scale`: scales target axes into micrometers. The notebook-aligned preset assumes the prepared target already uses micrometers, so the default is `1.0`.
+- `units.desired_resolution_um`: working-grid resolution. The default notebook-aligned value is `200.0`.
+- `orientation_from` and `orientation_to`: backend orientation codes used to derive the initial affine when `init_affine_path` is not supplied. These are validated before registration starts and must use one axis from each pair `{R/L}`, `{A/P}`, and `{S/I}`.
+- `transformation_graph.script_path`: explicit path to the external `emlddmm` package's `transformation_graph_v01.py`. If omitted, step 5 tries to resolve it automatically from the installed package and only falls back to workspace-local development copies.
+- `outputs.write_qc_report`: writes `registration_report.html` and `registration_report.json` in the step-5 output directory.
+
+Step-5 output metadata now also includes:
+- `resolved_run_plan.json.schema_version`
+- `registration_summary.json.schema_version`
+- `registration_summary.json.orientation_resolution`
+- `registration_summary.json.stage_timeline`
+- always-on `run_provenance.json`
+- always-on `reproduce_step5_command.txt`
+
 ## Creating Custom Configurations
 
 ### Project-Specific Config
