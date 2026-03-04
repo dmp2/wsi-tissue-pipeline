@@ -17,16 +17,7 @@ import zarr
 from ngff_zarr import to_multiscales, to_ngff_image, to_ngff_zarr
 
 from .metadata import _prepare_ngff_writer_metadata
-
-# Handle zarr v2/v3 compatibility for NestedDirectoryStore
-try:
-    from zarr.storage import NestedDirectoryStore
-except ImportError:
-    # zarr v3 - use DirectoryStore or LocalStore instead
-    try:
-        from zarr.storage import DirectoryStore as NestedDirectoryStore
-    except ImportError:
-        from zarr.storage import LocalStore as NestedDirectoryStore
+from .zarr_compat import create_group_array
 
 
 def _omero_version(root_attrs: dict[str, Any], schema: str) -> str:
@@ -74,10 +65,12 @@ def _build_omero_block(
 
 def _create_group_array(group: Any, name: str, **kwargs: Any):
     """Create an array on a Zarr group across v2/v3 API differences."""
-    create_array = getattr(group, "create_array", None)
-    if callable(create_array):
-        return create_array(name, **kwargs)
-    return group.create_dataset(name, **kwargs)
+    if "chunks" not in kwargs:
+        create_array = getattr(group, "create_array", None)
+        if callable(create_array):
+            return create_array(name, **kwargs)
+        return group.create_dataset(name, **kwargs)
+    return create_group_array(group, name, **kwargs)
 
 
 def write_ngff_from_tile_ts(
@@ -238,9 +231,7 @@ def write_ngff_from_tile_streaming_ome(
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Use NestedDirectoryStore to avoid huge flat dirs
-    store = NestedDirectoryStore(str(out_dir))
-    root = zarr.group(store=store, overwrite=True)
+    root = zarr.open_group(str(out_dir), mode="w")
 
     # Shapes / scales
     if tile_yxc_da.ndim != 3:

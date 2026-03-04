@@ -119,6 +119,28 @@ write_ngff_from_mips(
 
 Use `metadata_schema="latest"` when you want the richer latest-NGFF root attrs instead of the default v0.4-compatible writer metadata. See [`docs/installation.md`](docs/installation.md) for cache overrides, offline mode, and troubleshooting.
 
+When using plating, pass the same metadata payload via `source_context` so per-tile OME-Zarr outputs inherit source spacing/channel metadata:
+
+```python
+from wsi_pipeline.pipeline import process_slide_with_plating
+from wsi_pipeline.vsi_converter import get_vsi_metadata
+
+vsi_path = "data/specimen.vsi"
+metadata = get_vsi_metadata(vsi_path, metadata_backend="auto")
+
+process_slide_with_plating(
+    zarr_root_path="output/specimen_source.ome.zarr",
+    out_ngff_dir="output/tissues",
+    segment_fn=my_segment_fn,
+    source_context={
+        "source_kind": "vsi",
+        "source_path": vsi_path,
+        "ngff_metadata": metadata,
+        "metadata_schema": "v0.4",  # use "latest" to emit latest-style root attrs
+    },
+)
+```
+
 ## Project Structure
 
 ```text

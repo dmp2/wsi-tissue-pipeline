@@ -116,10 +116,11 @@ def emit_ng_state_for_ngff_plate(
     """
     plate_root = Path(plate_root)
     children = sorted(p for p in plate_root.iterdir() if p.is_dir() and p.name.endswith(".ome.zarr"))
+    from .omezarr.metadata import _is_ngff_image_group
 
     layers = []
     for idx, child in enumerate(children):
-        if not (child / ".zgroup").exists() or not (child / ".zattrs").exists():
+        if not _is_ngff_image_group(child):
             continue
         name = f"{layer_prefix}{child.stem}"
         source = f"zarr://{base_http_url.rstrip('/')}/{child.name}"
@@ -319,7 +320,7 @@ def stop_cors_server(server: HTTPServer | None) -> None:
 
 
 def get_zarr_physical_scale(zarr_path: Path) -> tuple[float, float]:
-    """Read physical pixel scale from OME-Zarr ``.zattrs`` metadata.
+    """Read physical pixel scale from OME-Zarr root attrs.
 
     Parameters
     ----------
@@ -331,12 +332,11 @@ def get_zarr_physical_scale(zarr_path: Path) -> tuple[float, float]:
     tuple
         ``(phys_x, phys_y)`` in micrometers.
     """
-    attrs_path = zarr_path / ".zattrs"
-    if not attrs_path.exists():
-        return (1.0, 1.0)
-
     try:
-        attrs = json.loads(attrs_path.read_text())
+        import zarr
+
+        root = zarr.open_group(str(zarr_path), mode="r")
+        attrs = dict(root.attrs)
         ms = attrs.get("multiscales", [{}])[0]
         datasets = ms.get("datasets", [{}])
         if datasets:
@@ -352,9 +352,11 @@ def get_zarr_physical_scale(zarr_path: Path) -> tuple[float, float]:
 
 def find_zarr_children(root_dir: Path) -> list[Path]:
     """Find all OME-Zarr directories in a root directory."""
+    from .omezarr.metadata import _is_ngff_image_group
+
     children = []
     for p in sorted(root_dir.iterdir()):
-        if p.is_dir() and (p.suffix == ".zarr" or (p / ".zattrs").exists()):
+        if p.is_dir() and _is_ngff_image_group(p):
             children.append(p)
     return children
 

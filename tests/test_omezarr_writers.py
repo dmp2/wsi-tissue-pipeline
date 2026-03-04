@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import dask.array as da
 import numpy as np
 import pytest
@@ -163,6 +165,18 @@ def test_write_ngff_from_mips_preserves_default_v04_root_attrs(tmp_path):
     assert attrs["omero"]["channels"][0]["label"] == "ch0"
 
 
+def test_write_ngff_from_mips_emits_no_zarr_format_warning(tmp_path):
+    mips = _make_mips(levels=2)
+    out_dir = tmp_path / "default-no-zarr-format-warning.ome.zarr"
+
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        write_ngff_from_mips(mips, out_dir, phys_xy_um=(0.25, 0.5))
+
+    messages = [str(w.message) for w in captured]
+    assert not any("zarr_format" in message for message in messages)
+
+
 def test_write_ngff_from_mips_uses_materialized_v04_root_attrs(tmp_path):
     mips = _make_mips(levels=3)
     payload = _make_metadata_payload(dataset_count=3, name="payload_v04")
@@ -315,20 +329,23 @@ def test_write_ngff_from_tile_streaming_ome_uses_shared_metadata_path(tmp_path):
     payload = _make_metadata_payload(dataset_count=3, name="tile-stream")
     out_dir = tmp_path / "tile-stream.ome.zarr"
 
-    write_ngff_from_tile_streaming_ome(
-        tile,
-        out_dir,
-        phys_xy_um=(1.0, 1.0),
-        num_mips=3,
-        ngff_metadata=payload,
-        metadata_schema="latest",
-    )
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        write_ngff_from_tile_streaming_ome(
+            tile,
+            out_dir,
+            phys_xy_um=(1.0, 1.0),
+            num_mips=3,
+            ngff_metadata=payload,
+            metadata_schema="latest",
+        )
 
     attrs = _root_attrs(out_dir)
     expected = materialize_ngff_root_attrs(payload, "latest")
     for key, value in expected.items():
         assert attrs[key] == value
     assert zarr.open_group(str(out_dir), mode="r")["s0"].shape == (3, 16, 12)
+    assert not any("compressor" in str(w.message).lower() for w in captured)
 
 
 def test_phys_xy_reader_handles_latest_writer_output(tmp_path):

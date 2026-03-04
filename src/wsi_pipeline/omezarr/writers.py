@@ -6,7 +6,6 @@ Write multiscale OME-Zarr files from mip pyramids with proper metadata.
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 from pathlib import Path
@@ -21,6 +20,7 @@ from ngff_zarr.v04.zarr_metadata import Metadata as V04Metadata
 from numcodecs import Blosc
 
 from .metadata import _prepare_ngff_writer_metadata
+from .zarr_compat import create_group_array
 
 
 def _omero_version(root_attrs: dict[str, Any], schema: str) -> str:
@@ -140,8 +140,7 @@ def write_ngff_from_mips(
     resolved_channel_labels = prepared["resolved_channel_labels"]
     omero_version = _omero_version(root_attrs, prepared["schema"])
 
-    # Root markers
-    (out_dir / ".zgroup").write_text(json.dumps({"zarr_format": 2}))
+    root = zarr.open_group(str(out_dir), mode="w")
 
     for lvl, img in enumerate(mips_yxc):
         if img.ndim != 3:
@@ -151,32 +150,19 @@ def write_ngff_from_mips(
                 f"mips[{lvl}] has {img.shape[-1]} channels, expected {C}."
             )
 
-        # Preallocate the current image shape
         H, W, _ = img.shape
 
-        # Create the output directory for the current level
-        g = out_dir / f"s{lvl}"
-        g.mkdir(parents=True, exist_ok=True)
-
-        # Mark each scale as a Zarr group
-        (g / ".zgroup").write_text(json.dumps({"zarr_format": 2}))
-
-        # Create the array with the channel first (c,y,x)
-        arr = zarr.open_array(
-            store=str(g),
-            path="",
-            mode="w",
-            zarr_format=2,
+        arr = create_group_array(
+            root,
+            f"s{lvl}",
             shape=(C, H, W),
             chunks=(C, min(chunks_xy, H), min(chunks_xy, W)),
             dtype=dtype,
-            compressor=compressor
+            compressor=compressor,
+            overwrite=True,
         )
-        # Write the data channel-first
-        arr[...] = np.moveaxis(img, -1, 0)  # (h, w, c) -> (c, h, w)
-
-        # Mark per-array axis names; use c^ so NG treats it as vector (RGB)
-        (g / ".zattrs").write_text(json.dumps({"_ARRAY_DIMENSIONS": ["c^", "y", "x"]}))
+        arr[...] = np.moveaxis(img, -1, 0)
+        arr.attrs["_ARRAY_DIMENSIONS"] = ["c^", "y", "x"]
 
     root_attrs["omero"] = _build_omero_block(
         name=resolved_name,
@@ -184,7 +170,7 @@ def write_ngff_from_mips(
         channel_labels=resolved_channel_labels,
         channel_colors=channel_colors,
     )
-    (out_dir / ".zattrs").write_text(json.dumps(root_attrs, indent=2))
+    root.attrs.put(root_attrs)
 
 
 def write_ngff_from_mips_ngffzarr(

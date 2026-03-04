@@ -7,14 +7,20 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import dask.array as da
 import dask.config
 import numpy as np
 import zarr
 
-from ..omezarr.metadata import _get_multiscales_paths, _phys_xy_um
+from ..omezarr.metadata import (
+    _get_multiscales_paths,
+    _phys_xy_um,
+    _project_source_metadata_for_tile_writes,
+)
 from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
 from ..omezarr.streaming import write_ngff_from_tile_streaming_ome, write_ngff_from_tile_ts
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
@@ -41,6 +47,78 @@ def _safe_close_existing_client():
     except ValueError:
         pass  # no existing client
 
+
+def _resolve_source_ngff_metadata(
+    source_context: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """
+    Resolve optional source metadata context for plating writes.
+
+    Returns
+    -------
+    tuple
+        ``(metadata_payload, metadata_schema)`` where payload is either a rich
+        NGFF metadata dict or ``None``.
+    """
+    metadata_schema = "v0.4"
+    if source_context is None:
+        return None, metadata_schema
+
+    metadata_schema = str(source_context.get("metadata_schema") or "v0.4")
+    supplied_metadata = source_context.get("ngff_metadata")
+    if isinstance(supplied_metadata, dict):
+        return supplied_metadata, metadata_schema
+
+    source_kind = str(source_context.get("source_kind") or "unknown").strip().lower()
+    source_path = source_context.get("source_path")
+    if source_kind == "vsi" and source_path:
+        metadata_backend = str(source_context.get("metadata_backend") or "auto")
+        try:
+            from ..vsi_converter import get_vsi_metadata
+
+            metadata = get_vsi_metadata(
+                source_path,
+                metadata_backend=metadata_backend,
+                target_schema="latest",
+            )
+            if isinstance(metadata, dict) and metadata:
+                return metadata, metadata_schema
+            logger.warning(
+                "VSI metadata extraction returned empty metadata for %s; continuing with phys_xy_um fallback.",
+                source_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Unable to resolve VSI metadata for %s (%s); continuing with phys_xy_um fallback.",
+                source_path,
+                exc,
+            )
+    return None, metadata_schema
+
+
+def _tile_ngff_metadata_or_none(
+    source_metadata: dict[str, Any] | None,
+    *,
+    dataset_count: int,
+    name: str,
+) -> dict[str, Any] | None:
+    """Project resolved source metadata to tile-compatible NGFF payloads."""
+    if source_metadata is None:
+        return None
+    try:
+        return _project_source_metadata_for_tile_writes(
+            source_metadata,
+            dataset_count=dataset_count,
+            name=name,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to project source metadata for tile '%s' (%s); continuing with phys_xy_um fallback.",
+            name,
+            exc,
+        )
+        return None
+
 def process_slide_with_plating(
     zarr_root_path: os.PathLike,
     out_ngff_dir: os.PathLike,                      # where to write tissue_region_*.zarr
@@ -59,7 +137,8 @@ def process_slide_with_plating(
     min_side_for_mips: int | None = None,        # default to chunk size in writers
     downscale: int = 2,                             # default downsampling rate for mips (not used yet)
     # dtype policy
-    dtype: np.dtype | None = "uint8"            # cast ROI to uint8 before mip (recommended for imagery)
+    dtype: np.dtype | None = "uint8",            # cast ROI to uint8 before mip (recommended for imagery)
+    source_context: Mapping[str, Any] | None = None,
     ) -> list[Path]:
     """
     Pipeline for ONE slide root (OME-Zarr):
@@ -81,6 +160,10 @@ def process_slide_with_plating(
     - zarr_path: Path to the highest-resolution OME-Zarr image.
     - low_res_mask: Binary mask of tissue regions, assumed to be the lowest resolution. If None, generate the mask.
     - target_dim: Target square dimensions for each tissue region at the highest resolution.
+    - source_context: Optional source metadata hints. Supported keys:
+      ``source_kind`` (``"vsi"``, ``"ome-tiff"``, ``"ome-zarr"``, ``"unknown"``),
+      ``source_path``, ``ngff_metadata``, ``metadata_backend`` (``"auto"``, ``"bioformats"``, ``"ets_only"``),
+      and ``metadata_schema`` (``"latest"``, ``"v0.4"``, ``"0.4"``).
 
     Returns
     -------
@@ -132,6 +215,12 @@ def process_slide_with_plating(
     # Precompute shapes and physical pixel sizes at the highest resolution
     C, H0, W0 = base_cyx.shape
     px_um, py_um = _phys_xy_um(root, L_idx) # this is the base s0 scale now
+    source_ngff_metadata, source_metadata_schema = _resolve_source_ngff_metadata(source_context)
+    if source_ngff_metadata is not None:
+        logger.info(
+            "Resolved source metadata context for plating writes (schema=%s).",
+            source_metadata_schema,
+        )
 
     # Step 2: Segment at the coarsest level using the segment_fn to get a tissue region mask
     logger.info("Generating tissue masks at the coarsest resolution.")
@@ -252,14 +341,27 @@ def process_slide_with_plating(
                     ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
                     if any_big:
                         # STREAM the NGFF pyramid from base tile via TensorStore
+                        num_mips = compute_num_mips_min_side(
+                            tile.shape[1],
+                            tile.shape[0],
+                            min_side_for_mips or plate_chunk_xy,
+                        )
+                        tile_ngff_metadata = _tile_ngff_metadata_or_none(
+                            source_ngff_metadata,
+                            dataset_count=num_mips,
+                            name=name,
+                        )
                         write_ngff_from_tile_ts(
-                            tile, ngff_dir, (px_um, py_um),
+                            tile,
+                            ngff_dir,
+                            (px_um, py_um),
                             chunks_xy=plate_chunk_xy,
-                            num_mips=compute_num_mips_min_side(tile.shape[1], tile.shape[0],
-                                                            min_side_for_mips or plate_chunk_xy),
+                            num_mips=num_mips,
                             name=name, version="0.4",
                             channel_labels=[f"ch{i}" for i in range(tile.shape[2])],
                             channel_colors=["FFFFFF"] * tile.shape[2],
+                            ngff_metadata=tile_ngff_metadata,
+                            metadata_schema=source_metadata_schema,
                         )
                         # Plate: let your writer auto-stream based on its own gate
                         if plate is not None:
@@ -268,6 +370,11 @@ def process_slide_with_plating(
                         # Small/medium: keep your fast path (build mips once in RAM)
                         ms = compute_num_mips_min_side(tile.shape[1], tile.shape[0],
                                                     min_side_for_mips or plate_chunk_xy)
+                        tile_ngff_metadata = _tile_ngff_metadata_or_none(
+                            source_ngff_metadata,
+                            dataset_count=ms,
+                            name=name,
+                        )
                         mips = build_mips_from_yxc(tile, ms)
                         write_ngff_from_mips_ngffzarr(
                             mips_yxc=mips,
@@ -279,7 +386,9 @@ def process_slide_with_plating(
                             overwrite=True,
                             channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
                             channel_colors=["FFFFFF"] * mips[0].shape[2],
-                            add_omero=True
+                            add_omero=True,
+                            ngff_metadata=tile_ngff_metadata,
+                            metadata_schema=source_metadata_schema,
                         )
                         # # This function uses zarr and manually specifies the metadata
                         # write_ngff_from_mips(mips,
@@ -313,11 +422,22 @@ def process_slide_with_plating(
                 name = f"{zarr_root_path.stem}_tissue_{z_idx+1:02d}"
                 ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
                 logger.debug("tile %d: %s, big=%s", z_idx, tuple(map(int, tile_dask.shape)), _is_big_tile(tile_dask, bytes_per_px))
+                tile = None
 
                 # For big tiles, don't build mips_yxc in memory. Instead, write directly from the base tile with the streaming writer
                 if any_big:
                     # DO NOT compute() -- keep it lazy and (optionally) cast lazily
                     # tlazy = tile_dask.astype(np.uint8) if dtype and tile_dask.dtype != np.uint8 else tile_dask
+                    num_mips = compute_num_mips_min_side(
+                        tile_dask.shape[1],
+                        tile_dask.shape[0],
+                        min_side_for_mips or plate_chunk_xy,
+                    )
+                    tile_ngff_metadata = _tile_ngff_metadata_or_none(
+                        source_ngff_metadata,
+                        dataset_count=num_mips,
+                        name=name,
+                    )
 
                     # write_ngff_from_tile_ts(
                     #     tlazy,
@@ -335,12 +455,13 @@ def process_slide_with_plating(
                         out_dir=ngff_dir,
                         phys_xy_um=(px_um, py_um),
                         block_xy=plate_chunk_xy,
-                        num_mips=compute_num_mips_min_side(tile_dask.shape[1], tile_dask.shape[0],
-                                                        min_side_for_mips or plate_chunk_xy),
+                        num_mips=num_mips,
                         name=name,
                         compressor=None,  # or zarr.Blosc(cname="zstd", clevel=5, shuffle=2)
                         channel_labels=[f"ch{i}" for i in range(int(tile_dask.shape[2]))],
                         channel_colors=["FFFFFF"] * int(tile_dask.shape[2]),
+                        ngff_metadata=tile_ngff_metadata,
+                        metadata_schema=source_metadata_schema,
                     )
 
                     # Append to precomputed plate (optional)
@@ -363,6 +484,11 @@ def process_slide_with_plating(
                     ms = compute_num_mips_min_side(tile.shape[1],
                                                 tile.shape[0],
                                                 min_side_for_mips or plate_chunk_xy)
+                    tile_ngff_metadata = _tile_ngff_metadata_or_none(
+                        source_ngff_metadata,
+                        dataset_count=ms,
+                        name=name,
+                    )
                     mips = build_mips_from_yxc(tile, ms)
                     # print(f"mips[0].dtype: {mips[0].dtype}")
 
@@ -376,7 +502,9 @@ def process_slide_with_plating(
                         overwrite=True,
                         channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
                         channel_colors=["FFFFFF"] * mips[0].shape[2],
-                        add_omero=True
+                        add_omero=True,
+                        ngff_metadata=tile_ngff_metadata,
+                        metadata_schema=source_metadata_schema,
                     )
                     # This function uses zarr and manually specifies the metadata
                     # write_ngff_from_mips(mips,
@@ -391,7 +519,8 @@ def process_slide_with_plating(
                     if plate is not None:
                         plate.write_slice(z_idx, mips)
 
-                del tile
+                if tile is not None:
+                    del tile
 
     # # Optional: extra cleanup in notebooks so reruns do not collide
     # gc.collect()

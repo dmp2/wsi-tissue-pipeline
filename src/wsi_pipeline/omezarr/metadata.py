@@ -8,7 +8,6 @@ including multiscales, physical pixel sizes, and coordinate transformations.
 from __future__ import annotations
 
 import copy
-import json
 from pathlib import Path
 from typing import Any
 
@@ -16,15 +15,11 @@ import zarr
 
 
 def _is_ngff_image_group(path: Path) -> bool:
-    """Basic NGFF image check: requires .zgroup, .zattrs with 'multiscales'."""
+    """Basic NGFF image check based on readable root attrs."""
     try:
-        if not (path / ".zgroup").exists():
-            return False
-        attrs_p = path / ".zattrs"
-        if not attrs_p.exists():
-            return False
-        attrs = json.loads(attrs_p.read_text())
-        return "multiscales" in attrs
+        root = zarr.open_group(str(path), mode="r")
+        multiscales = root.attrs.get("multiscales")
+        return isinstance(multiscales, list) and len(multiscales) > 0
     except Exception:
         return False
 
@@ -400,6 +395,134 @@ def _inject_fallback_scales(
                 "scale": [1.0, py_um, px_um],
             }
         ]
+
+
+def _extract_phys_xy_from_metadata_payload(metadata: dict[str, Any]) -> tuple[float, float] | None:
+    """Best-effort extraction of base physical spacing from rich metadata payloads."""
+    for schema in ("latest", "v0.4"):
+        try:
+            root_attrs = materialize_ngff_root_attrs(metadata, schema)
+        except Exception:
+            continue
+        phys_xy_um = _extract_phys_xy_from_root_attrs(root_attrs)
+        if phys_xy_um is not None:
+            return phys_xy_um
+
+    physical = metadata.get("physical_pixel_size_um")
+    if isinstance(physical, dict):
+        x_um = physical.get("x")
+        y_um = physical.get("y")
+        if x_um is not None and y_um is not None:
+            return float(x_um), float(y_um)
+
+    canonical = metadata.get("canonical_metadata")
+    if isinstance(canonical, dict):
+        canonical_phys = canonical.get("physical_pixel_size_um")
+        if isinstance(canonical_phys, dict):
+            x_um = canonical_phys.get("x")
+            y_um = canonical_phys.get("y")
+            if x_um is not None and y_um is not None:
+                return float(x_um), float(y_um)
+    return None
+
+
+def _has_slide_coordinate_semantics(metadata: dict[str, Any]) -> bool:
+    """Detect whether metadata includes absolute slide coordinate semantics."""
+    canonical = metadata.get("canonical_metadata")
+    if isinstance(canonical, dict) and canonical.get("stage_origin_um"):
+        return True
+
+    latest = metadata.get("ngff_latest")
+    if isinstance(latest, dict):
+        for system in latest.get("coordinateSystems", []):
+            if isinstance(system, dict) and system.get("name") == "slide":
+                return True
+        for transform in latest.get("arrayToPhysicalTransformations", []):
+            if (
+                isinstance(transform, dict)
+                and transform.get("type") == "translation"
+                and transform.get("output") == "slide"
+            ):
+                return True
+        multiscales = latest.get("multiscales", [])
+        if isinstance(multiscales, list) and multiscales:
+            datasets = multiscales[0].get("datasets", [])
+            for dataset in datasets:
+                if not isinstance(dataset, dict):
+                    continue
+                for transform in dataset.get("coordinateTransformations", []):
+                    if (
+                        isinstance(transform, dict)
+                        and transform.get("type") == "translation"
+                        and transform.get("output") == "slide"
+                    ):
+                        return True
+    return False
+
+
+def _project_source_metadata_for_tile_writes(
+    source_metadata: dict[str, Any],
+    *,
+    dataset_count: int,
+    name: str,
+) -> dict[str, Any]:
+    """
+    Re-project source metadata into tile-compatible dual NGFF payloads.
+
+    The emitted payload keeps source channel metadata and physical spacing but
+    rewrites pyramid datasets to ``s0..sN`` for the target tile write.
+    """
+    if dataset_count < 1:
+        raise ValueError("dataset_count must be >= 1 for tile metadata projection.")
+
+    channel_count = _metadata_channel_count(source_metadata) or 3
+    metadata_labels = _metadata_channel_labels(source_metadata) or []
+    channel_labels = [str(label) for label in metadata_labels[:channel_count]]
+    if len(channel_labels) < channel_count:
+        channel_labels.extend(f"ch{idx}" for idx in range(len(channel_labels), channel_count))
+
+    phys_xy_um = _extract_phys_xy_from_metadata_payload(source_metadata)
+    latest_root = _build_default_ngff_root_attrs(
+        name=name,
+        dataset_count=dataset_count,
+        phys_xy_um=phys_xy_um,
+        schema="latest",
+        channel_axis_name="c",
+    )
+    v04_root = _build_default_ngff_root_attrs(
+        name=name,
+        dataset_count=dataset_count,
+        phys_xy_um=phys_xy_um,
+        schema="v0.4",
+        channel_axis_name="c",
+    )
+
+    compatibility = source_metadata.get("compatibility", {})
+    selected_schema = _normalize_ngff_schema(compatibility.get("selected_schema", "v0.4"))
+    lossy_fields_for_v04: list[str] = []
+    compatibility_warnings: list[str] = []
+    if _has_slide_coordinate_semantics(source_metadata):
+        lossy_fields_for_v04.extend(["named_coordinate_systems", "absolute_origin_translation"])
+        compatibility_warnings.append(
+            "Tile metadata projection omits absolute slide translation without explicit tile origins."
+        )
+
+    payload = {
+        "channel_count": channel_count,
+        "channel_labels": channel_labels,
+        "ngff_latest": latest_root,
+        "ngff_v04": v04_root,
+        "compatibility": {
+            "selected_schema": selected_schema,
+            "automatic_v04_projection": True,
+            "lossy_fields_for_v04": lossy_fields_for_v04,
+            "warnings": compatibility_warnings,
+        },
+    }
+    payload["ngff"] = (
+        payload["ngff_latest"] if selected_schema == "latest" else payload["ngff_v04"]
+    )
+    return payload
 
 
 def _prepare_ngff_writer_metadata(
