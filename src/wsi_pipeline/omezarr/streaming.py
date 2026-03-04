@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any, Literal
 
 import dask.array as da
 import numpy as np
 import zarr
 from ngff_zarr import to_multiscales, to_ngff_image, to_ngff_zarr
+
+from .metadata import _prepare_ngff_writer_metadata
 
 # Handle zarr v2/v3 compatibility for NestedDirectoryStore
 try:
@@ -26,10 +29,53 @@ except ImportError:
         from zarr.storage import LocalStore as NestedDirectoryStore
 
 
+def _omero_version(root_attrs: dict[str, Any], schema: str) -> str:
+    """Choose an OMERO version string consistent with the emitted root attrs."""
+    try:
+        version = root_attrs["multiscales"][0].get("version")
+    except (KeyError, IndexError, TypeError):
+        version = None
+    if version is not None:
+        return str(version)
+    return "latest" if schema == "latest" else "0.4"
+
+
+def _build_omero_block(
+    *,
+    name: str,
+    version: str,
+    channel_labels: list[str],
+    channel_colors: list[str] | None,
+) -> dict[str, Any]:
+    """Build the standard OMERO display block used by the streaming writers."""
+    colors = channel_colors or ["FFFFFF"] * len(channel_labels)
+    if len(colors) != len(channel_labels):
+        raise ValueError(
+            f"Writer received {len(colors)} channel colors for {len(channel_labels)} channels."
+        )
+    return {
+        "name": name,
+        "version": version,
+        "rdefs": {"model": "color", "defaultZ": 0, "defaultT": 0},
+        "channels": [
+            {
+                "label": channel_labels[idx],
+                "color": colors[idx],
+                "window": {"start": 0.0, "end": 255.0, "min": 0.0, "max": 255.0},
+                "active": True,
+                "inverted": False,
+                "coefficient": 1.0,
+                "family": "linear",
+            }
+            for idx in range(len(channel_labels))
+        ],
+    }
+
+
 def write_ngff_from_tile_ts(
     tile_yxc: np.ndarray | da.Array,
     out_path: str | Path,
-    base_px_um_xy: tuple[float, float],
+    base_px_um_xy: tuple[float, float] | None = None,
     *,
     chunks_xy: int = 512,
     num_mips: int = 8,
@@ -37,6 +83,8 @@ def write_ngff_from_tile_ts(
     version: str = "0.4",
     channel_labels: list[str] | None = None,
     channel_colors: list[str] | None = None,
+    ngff_metadata: dict[str, Any] | None = None,
+    metadata_schema: Literal["latest", "v0.4", "0.4"] | None = None,
 ) -> None:
     """
     Stream a large (Y,X,C) tile to an OME-Zarr multiscale using ngff-zarr
@@ -48,7 +96,7 @@ def write_ngff_from_tile_ts(
         Input tile (Y, X, C).
     out_path : str or Path
         Output path for OME-Zarr.
-    base_px_um_xy : tuple
+    base_px_um_xy : tuple, optional
         Physical pixel size (px_um, py_um) in micrometers.
     chunks_xy : int
         Chunk size in X and Y dimensions.
@@ -62,21 +110,43 @@ def write_ngff_from_tile_ts(
         Labels for each channel.
     channel_colors : list of str, optional
         Colors for each channel (hex strings).
+    ngff_metadata : dict, optional
+        Full ``get_vsi_metadata()`` payload or a direct NGFF root-attrs payload.
+    metadata_schema : {"latest", "v0.4", "0.4"}, optional
+        Schema alias used when ``ngff_metadata`` provides dual projections.
     """
     out_path = str(Path(out_path))
+    if len(tile_yxc.shape) != 3:
+        raise ValueError(f"tile_yxc must be (Y,X,C), got shape {tile_yxc.shape}")
     Y, X, C = map(int, tile_yxc.shape)
-    px_um, py_um = base_px_um_xy
+    dataset_count = max(1, num_mips)
+    prepared = _prepare_ngff_writer_metadata(
+        dataset_count=dataset_count,
+        channel_count=C,
+        name=name,
+        fallback_phys_xy_um=base_px_um_xy,
+        ngff_metadata=ngff_metadata,
+        metadata_schema=metadata_schema,
+        channel_labels=channel_labels,
+    )
+    root_attrs = prepared["root_attrs"]
+    resolved_name = prepared["resolved_name"]
+    resolved_labels = prepared["resolved_channel_labels"]
+    resolved_phys_xy_um = prepared["resolved_phys_xy_um"] or (1.0, 1.0)
+    omero_version = _omero_version(root_attrs, prepared["schema"])
+    px_um, py_um = resolved_phys_xy_um
 
     # Ensure Dask with reasonable chunking
     if not isinstance(tile_yxc, da.Array):
         tile_yxc = da.from_array(tile_yxc, chunks=(chunks_xy, chunks_xy, C))
+    tile_cyx = da.moveaxis(tile_yxc, -1, 0).rechunk((C, chunks_xy, chunks_xy))
 
-    # Base image (dims y,x,c with micrometer units)
+    # Base image (dims c,y,x with micrometer units)
     img = to_ngff_image(
-        data=tile_yxc,
-        dims=("y", "x", "c"),
-        scale={"y": float(py_um), "x": float(px_um), "c": 1.0},
-        name=name,
+        data=tile_cyx,
+        dims=("c", "y", "x"),
+        scale={"c": 1.0, "y": float(py_um), "x": float(px_um)},
+        name=resolved_name,
         axes_units={"y": "micrometer", "x": "micrometer"},
     )
 
@@ -85,7 +155,7 @@ def write_ngff_from_tile_ts(
     ms = to_multiscales(
         img,
         scale_factors=levels,
-        chunks={"y": chunks_xy, "x": chunks_xy, "c": C},
+        chunks={"c": C, "y": chunks_xy, "x": chunks_xy},
     )
 
     # Write via TensorStore for out-of-core, chunked IO
@@ -97,35 +167,21 @@ def write_ngff_from_tile_ts(
         use_tensorstore=True,
     )
 
-    # Optional OMERO channels block (napari etc.)
-    labels = channel_labels or [f"ch{i}" for i in range(C)]
-    colors = channel_colors or ["FFFFFF"] * C
     root = zarr.open_group(out_path, mode="r+")
-    attrs = dict(root.attrs)
-    attrs["omero"] = {
-        "name": name,
-        "version": version,
-        "rdefs": {"model": "color", "defaultZ": 0, "defaultT": 0},
-        "channels": [
-            {
-                "label": labels[i],
-                "color": colors[i],
-                "window": {"start": 0.0, "end": 255.0, "min": 0.0, "max": 255.0},
-                "active": True,
-                "inverted": False,
-                "coefficient": 1.0,
-                "family": "linear",
-            }
-            for i in range(C)
-        ],
-    }
+    attrs = dict(root_attrs)
+    attrs["omero"] = _build_omero_block(
+        name=resolved_name,
+        version=omero_version,
+        channel_labels=resolved_labels,
+        channel_colors=channel_colors,
+    )
     root.attrs.put(attrs)
 
 
 def write_ngff_from_tile_streaming_ome(
     tile_yxc_da: da.Array,
     out_dir: Path | str,
-    phys_xy_um: tuple[float, float],
+    phys_xy_um: tuple[float, float] | None = None,
     *,
     block_xy: int = 512,
     num_mips: int,
@@ -134,6 +190,8 @@ def write_ngff_from_tile_streaming_ome(
     dtype: str = "uint8",
     channel_labels: list[str] | None = None,
     channel_colors: list[str] | None = None,
+    ngff_metadata: dict[str, Any] | None = None,
+    metadata_schema: Literal["latest", "v0.4", "0.4"] | None = None,
 ) -> None:
     """
     Constant-memory, blockwise OME-Zarr writer (v0.4), no ngff-zarr.
@@ -146,7 +204,7 @@ def write_ngff_from_tile_streaming_ome(
         Lazy Dask array (Y, X, C).
     out_dir : Path or str
         Output directory for OME-Zarr.
-    phys_xy_um : tuple
+    phys_xy_um : tuple, optional
         Physical pixel size (px_um, py_um) in micrometers.
     block_xy : int
         Block size for streaming.
@@ -162,6 +220,10 @@ def write_ngff_from_tile_streaming_ome(
         Labels for each channel.
     channel_colors : list of str, optional
         Colors for each channel (hex strings).
+    ngff_metadata : dict, optional
+        Full ``get_vsi_metadata()`` payload or a direct NGFF root-attrs payload.
+    metadata_schema : {"latest", "v0.4", "0.4"}, optional
+        Schema alias used when ``ngff_metadata`` provides dual projections.
     """
     out_dir = Path(out_dir)
     if out_dir.exists():
@@ -173,18 +235,32 @@ def write_ngff_from_tile_streaming_ome(
     root = zarr.group(store=store, overwrite=True)
 
     # Shapes / scales
+    if tile_yxc_da.ndim != 3:
+        raise ValueError(f"tile_yxc_da must be (Y,X,C), got shape {tile_yxc_da.shape}")
     Y, X, C = map(int, tile_yxc_da.shape)
-    px_um, py_um = phys_xy_um
-    shapes = [(max(1, Y >> m), max(1, X >> m), C) for m in range(num_mips)]
-    chunks = [(min(block_xy, s0), min(block_xy, s1), C) for (s0, s1, _) in shapes]
+    prepared = _prepare_ngff_writer_metadata(
+        dataset_count=num_mips,
+        channel_count=C,
+        name=name,
+        fallback_phys_xy_um=phys_xy_um,
+        ngff_metadata=ngff_metadata,
+        metadata_schema=metadata_schema,
+        channel_labels=channel_labels,
+    )
+    root_attrs = prepared["root_attrs"]
+    resolved_name = prepared["resolved_name"]
+    resolved_labels = prepared["resolved_channel_labels"]
+    omero_version = _omero_version(root_attrs, prepared["schema"])
 
-    # Create per-scale arrays (Y,X,C) with the same chunking
+    shapes = [(C, max(1, Y >> m), max(1, X >> m)) for m in range(num_mips)]
+    chunks = [(C, min(block_xy, sy), min(block_xy, sx)) for (_c, sy, sx) in shapes]
+
+    # Create per-scale arrays (C,Y,X) with the same chunking
     arrays = []
-    for m, (sy, sx, sc) in enumerate(shapes):
-        g = root.create_group(f"s{m}")
-        arr = g.create_dataset(
-            "0",
-            shape=(sy, sx, sc),
+    for m, (sc, sy, sx) in enumerate(shapes):
+        arr = root.create_array(
+            f"s{m}",
+            shape=(sc, sy, sx),
             chunks=chunks[m],
             dtype=dtype,
             compressor=compressor,
@@ -201,7 +277,7 @@ def write_ngff_from_tile_streaming_ome(
             blk = tile_yxc_da[y0:y1, x0:x1, :].astype(dtype).compute()
 
             # Write mip 0
-            arrays[0][y0:y1, x0:x1, :] = blk
+            arrays[0][:, y0:y1, x0:x1] = np.moveaxis(blk, -1, 0)
 
             # Downsample and write higher mips by stride slicing
             src = blk
@@ -214,47 +290,14 @@ def write_ngff_from_tile_streaming_ome(
                 xm0 = x0 >> m
                 ym1 = ym0 + src.shape[0]
                 xm1 = xm0 + src.shape[1]
-                arrays[m][ym0:ym1, xm0:xm1, :] = src
+                arrays[m][:, ym0:ym1, xm0:xm1] = np.moveaxis(src, -1, 0)
 
-    # Attach OME-NGFF v0.4 metadata (axes + datasets with scale transforms)
-    datasets = []
-    for m, (_sy, _sx, _sc) in enumerate(shapes):
-        scale = [1.0, py_um * (2**m), px_um * (2**m)]
-        datasets.append({
-            "path": f"s{m}",
-            "coordinateTransformations": [{"type": "scale", "scale": scale}],
-        })
-
-    root.attrs.update({
-        "multiscales": [{
-            "name": name,
-            "version": "0.4",
-            "axes": [
-                {"name": "c", "type": "channel"},
-                {"name": "y", "type": "space", "unit": "micrometer"},
-                {"name": "x", "type": "space", "unit": "micrometer"},
-            ],
-            "datasets": datasets,
-        }]
-    })
+    root.attrs.update(root_attrs)
 
     # Optional OMERO display metadata (napari will use it)
-    labels = channel_labels or [f"ch{i}" for i in range(C)]
-    colors = channel_colors or ["FFFFFF"] * C
-    root.attrs["omero"] = {
-        "name": name,
-        "version": "0.4",
-        "rdefs": {"model": "color", "defaultZ": 0, "defaultT": 0},
-        "channels": [
-            {
-                "label": labels[i],
-                "color": colors[i],
-                "window": {"start": 0.0, "end": 255.0, "min": 0.0, "max": 255.0},
-                "active": True,
-                "inverted": False,
-                "coefficient": 1.0,
-                "family": "linear",
-            }
-            for i in range(C)
-        ],
-    }
+    root.attrs["omero"] = _build_omero_block(
+        name=resolved_name,
+        version=omero_version,
+        channel_labels=resolved_labels,
+        channel_colors=channel_colors,
+    )

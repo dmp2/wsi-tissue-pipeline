@@ -94,6 +94,12 @@ cloudvolume = [
     "cloud-volume>=8.0.0",
 ]
 
+bioformats = [
+    "pyjnius>=1.6.1",
+    "platformdirs>=4.2.0",
+    "filelock>=3.16.0",
+]
+
 torch = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
@@ -106,7 +112,7 @@ pathology = [
 ]
 
 all = [
-    "wsi-tissue-pipeline[dev,mlflow,visualization,torch,cloudvolume]",
+    "wsi-tissue-pipeline[dev,mlflow,visualization,torch,cloudvolume,bioformats]",
 ]
 
 [project.scripts]

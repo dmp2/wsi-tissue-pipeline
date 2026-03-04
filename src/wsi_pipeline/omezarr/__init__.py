@@ -33,6 +33,7 @@ from .metadata import (
     _safe_name,
     _sizes_for_mips_xy,
     _voxel_sizes_for_mips_xy,
+    materialize_ngff_root_attrs,
 )
 
 # Pyramid building
@@ -63,4 +64,5 @@ __all__ = [
     # Standard writers
     "write_ngff_from_mips",
     "write_ngff_from_mips_ngffzarr",
+    "materialize_ngff_root_attrs",
 ]

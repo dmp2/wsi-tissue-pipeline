@@ -30,6 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libhdf5-dev \
     # OpenSlide for WSI formats
     libopenslide-dev \
+    openjdk-17-jre-headless \
     # Networking
     curl \
     wget \

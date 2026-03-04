@@ -27,6 +27,8 @@ dependencies:
   # OME-Zarr ecosystem
   - zarr>=2.16
   - numcodecs>=0.12
+  - openjdk>=17
+  - pyjnius>=1.6
   
   # Visualization
   - matplotlib>=3.7
@@ -68,6 +70,8 @@ dependencies:
       - mlflow>=2.10.0
       
       # Configuration management
+      - filelock>=3.16.0
+      - platformdirs>=4.2.0
       - python-dotenv>=1.0.0
       - pydantic>=2.0.0
       - pydantic-settings>=2.0.0

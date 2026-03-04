@@ -21,8 +21,11 @@ cd wsi-tissue-pipeline
 # Install in development mode
 pip install -e .
 
+# Install with Bio-Formats-backed VSI metadata support
+pip install -e ".[bioformats]"
+
 # Or install with all optional dependencies
-pip install -e ".[dev,visualization,torch,pathology]"
+pip install -e ".[all]"
 ```
 
 ### Option 2: Conda environment
@@ -98,6 +101,13 @@ rich>=12.0.0
 - `mypy`: Type checking
 - `pre-commit`: Git hooks
 
+#### Bio-Formats VSI Metadata (`pip install -e ".[bioformats]"`)
+- `pyjnius`: Python-to-Java bridge used to call Bio-Formats
+- `platformdirs`: Managed cache location for the pinned Bio-Formats jar
+- `filelock`: First-use download locking for concurrent processes
+
+This extra enables `get_vsi_metadata(..., metadata_backend="auto")` to pull physical pixel sizes and related VSI metadata through Bio-Formats.
+
 ### Step-5 EM-LDDMM Dependencies
 
 `step5` uses a hybrid backend resolver for registration:
@@ -156,6 +166,66 @@ conda install -c conda-forge openslide-python numpy scipy scikit-image
 
 # Install the package
 pip install -e .
+```
+
+### VSI Metadata / Bio-Formats
+
+Use the Bio-Formats extra when you want physical VSI metadata populated automatically:
+
+```bash
+pip install -e ".[bioformats]"
+```
+
+#### What happens on first use
+
+- The pipeline validates that Java is available.
+- If you did not provide a custom jar, it auto-downloads the pinned official `bioformats_package.jar`.
+- The jar is cached at `platformdirs.user_cache_dir("wsi-pipeline")/bioformats/8.4.0/bioformats_package.jar` by default.
+- The cache download is guarded by a file lock so concurrent first-use calls do not clobber the jar.
+
+#### Supported setup paths
+
+##### Pip
+
+- `pip install -e ".[bioformats]"` installs the Python-side dependencies.
+- You still need a working JVM on the machine. `JAVA_HOME` is honored if set.
+- The managed jar is downloaded automatically unless you disable downloads.
+
+##### Conda
+
+- `environment.yml` includes `openjdk` and `pyjnius`.
+- After `conda env create -f environment.yml`, VSI metadata works without separate Java setup.
+
+##### Docker
+
+- `docker/Dockerfile` installs `openjdk-17-jre-headless`.
+- The image also installs `.[all]`, which now includes the Bio-Formats extra.
+- This is the recommended fully managed local runtime when you want the pipeline environment curated end to end.
+
+#### Environment overrides
+
+- `WSI_PIPELINE_BIOFORMATS_JAR`: use an explicit local jar instead of the managed cache.
+- `WSI_PIPELINE_BIOFORMATS_CACHE_DIR`: override the cache root for the managed jar.
+- `WSI_PIPELINE_BIOFORMATS_DOWNLOAD=0`: disable automatic jar download for offline or locked-down environments.
+- `JAVA_HOME`: point Pyjnius at a specific Java runtime.
+
+#### Example
+
+```python
+from wsi_pipeline.omezarr import build_mips_from_yxc, write_ngff_from_mips
+from wsi_pipeline.vsi_converter import get_vsi_metadata, vsi_to_flat_image
+
+slide = "data/specimen.vsi"
+image = vsi_to_flat_image(slide, level=2)
+mips = build_mips_from_yxc(image, num_mips=4)
+metadata = get_vsi_metadata(slide, metadata_backend="auto")
+
+write_ngff_from_mips(
+    mips,
+    "output/specimen.ome.zarr",
+    ngff_metadata=metadata,
+    metadata_schema="v0.4",
+)
 ```
 
 ### GPU Support
@@ -231,6 +301,25 @@ tile:
 # Fix permissions
 sudo chown -R $USER:$USER ./data ./output
 ```
+
+#### Java runtime not found
+
+Install Java or set `JAVA_HOME`. The curated Conda environment and Docker image already include Java.
+
+#### Bio-Formats auto-download blocked
+
+If your environment blocks network access, either:
+
+- set `WSI_PIPELINE_BIOFORMATS_JAR` to a local `bioformats_package.jar`, or
+- pre-populate the managed cache directory and set `WSI_PIPELINE_BIOFORMATS_DOWNLOAD=0`.
+
+#### `jnius` imported before classpath setup
+
+Do not import `jnius` yourself before calling `get_vsi_metadata()` or the runtime bootstrap helper. Pyjnius requires the classpath to be configured before the JVM bridge is imported.
+
+#### Custom Bio-Formats jar
+
+Set `WSI_PIPELINE_BIOFORMATS_JAR=/path/to/bioformats_package.jar` when you need to pin a local artifact explicitly.
 
 ### Getting Help
 

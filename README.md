@@ -78,9 +78,46 @@ conda activate wsi-pipeline
 # Install package in development mode
 pip install -e .
 
+# Optional: enable Bio-Formats-backed VSI physical metadata
+pip install -e ".[bioformats]"
+
 # Start MLflow tracking server (optional)
 mlflow server --backend-store-uri sqlite:///mlflow.db --default-artifact-root ./mlruns --host 0.0.0.0 --port 5000
 ```
+
+Optional install extras:
+
+| Feature | Command |
+|---|---|
+| VSI metadata via Bio-Formats | `pip install -e ".[bioformats]"` |
+| Visualization tools | `pip install -e ".[visualization]"` |
+| Development tools | `pip install -e ".[dev]"` |
+| Full optional stack | `pip install -e ".[all]"` |
+
+## VSI Metadata via Bio-Formats
+
+Use `pip install -e ".[bioformats]"` when you want `get_vsi_metadata(..., metadata_backend="auto")` to populate physical pixel sizes and NGFF transforms from Bio-Formats. On first use, the pipeline auto-downloads a pinned `bioformats_package.jar` into the user cache. The managed jar location defaults to `platformdirs.user_cache_dir("wsi-pipeline")/bioformats/8.4.0/bioformats_package.jar`.
+
+The curated Conda and Docker environments are the zero-manual path because they include Java already. Plain pip installs cover the Python side and the managed Bio-Formats jar, but still require a working JVM on the machine.
+
+```python
+from wsi_pipeline.omezarr import build_mips_from_yxc, write_ngff_from_mips
+from wsi_pipeline.vsi_converter import get_vsi_metadata, vsi_to_flat_image
+
+slide = "data/specimen.vsi"
+image = vsi_to_flat_image(slide, level=2)
+mips = build_mips_from_yxc(image, num_mips=4)
+metadata = get_vsi_metadata(slide, metadata_backend="auto")
+
+write_ngff_from_mips(
+    mips,
+    "output/specimen.ome.zarr",
+    ngff_metadata=metadata,
+    metadata_schema="v0.4",
+)
+```
+
+Use `metadata_schema="latest"` when you want the richer latest-NGFF root attrs instead of the default v0.4-compatible writer metadata. See [`docs/installation.md`](docs/installation.md) for cache overrides, offline mode, and troubleshooting.
 
 ## Project Structure
 
