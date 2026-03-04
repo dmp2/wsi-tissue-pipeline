@@ -13,6 +13,7 @@ from wsi_pipeline.omezarr import (
     write_ngff_from_tile_ts,
 )
 from wsi_pipeline.omezarr.metadata import _phys_xy_um
+from wsi_pipeline.omezarr.streaming import _create_group_array
 
 
 def _make_mips(levels: int = 3, channels: int = 3) -> list[np.ndarray]:
@@ -129,6 +130,20 @@ def _make_metadata_payload(
 def _root_attrs(path) -> dict:
     """Read root attrs from a written OME-Zarr group."""
     return dict(zarr.open_group(str(path), mode="r").attrs)
+
+
+def test_create_group_array_falls_back_to_create_dataset():
+    calls: list[tuple[str, tuple, dict]] = []
+
+    class FakeGroup:
+        def create_dataset(self, name, **kwargs):
+            calls.append(("create_dataset", (name,), kwargs))
+            return {"name": name, "kwargs": kwargs}
+
+    result = _create_group_array(FakeGroup(), "s0", shape=(3, 4, 5), dtype="uint8")
+
+    assert calls == [("create_dataset", ("s0",), {"shape": (3, 4, 5), "dtype": "uint8"})]
+    assert result["name"] == "s0"
 
 
 def test_write_ngff_from_mips_preserves_default_v04_root_attrs(tmp_path):

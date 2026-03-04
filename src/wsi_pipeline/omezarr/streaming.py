@@ -72,6 +72,14 @@ def _build_omero_block(
     }
 
 
+def _create_group_array(group: Any, name: str, **kwargs: Any):
+    """Create an array on a Zarr group across v2/v3 API differences."""
+    create_array = getattr(group, "create_array", None)
+    if callable(create_array):
+        return create_array(name, **kwargs)
+    return group.create_dataset(name, **kwargs)
+
+
 def write_ngff_from_tile_ts(
     tile_yxc: np.ndarray | da.Array,
     out_path: str | Path,
@@ -258,7 +266,8 @@ def write_ngff_from_tile_streaming_ome(
     # Create per-scale arrays (C,Y,X) with the same chunking
     arrays = []
     for m, (sc, sy, sx) in enumerate(shapes):
-        arr = root.create_array(
+        arr = _create_group_array(
+            root,
             f"s{m}",
             shape=(sc, sy, sx),
             chunks=chunks[m],
