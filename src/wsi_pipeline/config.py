@@ -92,7 +92,7 @@ class TileConfig(BaseModel):
 class OutputConfig(BaseModel):
     """Configuration for output format and storage."""
 
-    format: Literal["ome-zarr", "tiff", "both"] = Field(
+    format: Literal["ome-zarr", "tiff", "ome-tiff", "both"] = Field(
         default="ome-zarr", description="Output format for tissue sections"
     )
 

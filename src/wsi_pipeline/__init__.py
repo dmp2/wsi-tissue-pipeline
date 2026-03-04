@@ -51,7 +51,12 @@ from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids
 
 # Segmentation (high-level)
 from wsi_pipeline.segmentation import WSISegmenter, segment_mask
-from wsi_pipeline.vsi_converter import find_ets_file, vsi_to_flat_image
+from wsi_pipeline.vsi_converter import (
+    ets_to_ome_tiff,
+    find_ets_file,
+    vsi_to_flat_image,
+    vsi_to_ome_tiff,
+)
 
 # Main processing (top-level interface)
 from wsi_pipeline.wsi_processing import (
@@ -70,8 +75,10 @@ __all__ = [
     # ETS/VSI file handling
     "ETSFile",
     "ETSFileError",
+    "ets_to_ome_tiff",
     "find_ets_file",
     "vsi_to_flat_image",
+    "vsi_to_ome_tiff",
     # Main processing
     "WSIProcessor",
     "process_wsi",

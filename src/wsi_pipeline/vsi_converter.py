@@ -14,6 +14,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import tifffile
 
 from .bioformats_runtime import ensure_bioformats_jnius
 from .etsfile import ETSFile
@@ -109,6 +110,68 @@ def find_all_ets_files(vsi_fname: str | Path) -> list[Path]:
         return []
 
     return sorted(ets_folder.rglob("*.ets"), key=lambda x: x.parent.name)
+
+
+def _normalize_ome_tiff_output_path(output_path: str | Path) -> Path:
+    """Normalize output paths to the `.ome.tif` extension."""
+    path = Path(output_path)
+    if path.name.lower().endswith(".ome.tif"):
+        return path
+
+    base_name = path.name
+    for suffix in path.suffixes:
+        base_name = base_name[: -len(suffix)]
+
+    return path.with_name(f"{base_name}.ome.tif")
+
+
+def _infer_vsi_path_from_ets(ets_fname: str | Path) -> Path | None:
+    """Infer a sibling VSI path from a standard ETS stack layout."""
+    ets_path = Path(ets_fname)
+    stack_dir = ets_path.parent
+    vsi_container = stack_dir.parent
+
+    if (
+        stack_dir.name.lower().startswith("stack")
+        and vsi_container.name.startswith("_")
+        and vsi_container.name.endswith("_")
+    ):
+        vsi_stem = vsi_container.name[1:-1]
+        candidate = vsi_container.parent / f"{vsi_stem}.vsi"
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _ome_metadata_from_vsi_payload(vsi_metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Build a minimal OME metadata dict from VSI metadata when available."""
+    ome_metadata: dict[str, Any] = {"axes": "YXS"}
+    if not vsi_metadata:
+        return ome_metadata
+
+    channel_count = _safe_int(vsi_metadata.get("channel_count"))
+    if channel_count is not None and channel_count != 3:
+        raise ValueError(
+            f"Unsupported VSI channel count {channel_count}; the ETS reader currently expects RGB data."
+        )
+
+    channel_labels = vsi_metadata.get("channel_labels")
+    if isinstance(channel_labels, list) and channel_labels:
+        ome_metadata["Channel"] = {"Name": [str(label) for label in channel_labels[:3]]}
+
+    physical_pixel_size_um = vsi_metadata.get("physical_pixel_size_um")
+    if isinstance(physical_pixel_size_um, dict):
+        size_x = _safe_float(physical_pixel_size_um.get("x"))
+        size_y = _safe_float(physical_pixel_size_um.get("y"))
+        if size_x is not None:
+            ome_metadata["PhysicalSizeX"] = size_x
+            ome_metadata["PhysicalSizeXUnit"] = "um"
+        if size_y is not None:
+            ome_metadata["PhysicalSizeY"] = size_y
+            ome_metadata["PhysicalSizeYUnit"] = "um"
+
+    return ome_metadata
 
 
 def vsi_to_flat_image(
@@ -225,6 +288,168 @@ def ets_to_flat_image(
         return None
 
 
+def ets_to_ome_tiff(
+    ets_fname: str | Path,
+    output_path: str | Path,
+    *,
+    vsi_fname: str | Path | None = None,
+    metadata_backend: str = "auto",
+    tile_size: int = 512,
+    compression: str = "jpeg",
+) -> Path | None:
+    """
+    Convert an ETS file to pyramidal OME-TIFF.
+
+    Parameters
+    ----------
+    ets_fname : str or Path
+        Path to the ETS file.
+    output_path : str or Path
+        Destination path. Normalized to ``.ome.tif``.
+    vsi_fname : str or Path, optional
+        Associated VSI path used for physical metadata extraction.
+    metadata_backend : {"auto", "bioformats", "ets_only"}
+        Metadata backend used when VSI metadata is available.
+    tile_size : int
+        OME-TIFF tile edge size in pixels.
+    compression : str
+        TIFF compression mode passed to ``tifffile`` (for example ``"jpeg"``).
+
+    Returns
+    -------
+    Path or None
+        Output path on success, otherwise ``None``.
+    """
+    backend = _normalize_metadata_backend(metadata_backend)
+    if tile_size <= 0:
+        raise ValueError("tile_size must be > 0")
+
+    normalized_output_path = _normalize_ome_tiff_output_path(output_path)
+    normalized_output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ets_path = Path(ets_fname)
+    vsi_path = Path(vsi_fname) if vsi_fname is not None else _infer_vsi_path_from_ets(ets_path)
+    vsi_metadata: dict[str, Any] | None = None
+
+    if backend == "bioformats" and vsi_path is None:
+        raise RuntimeError(
+            "Bio-Formats metadata backend requires a VSI path; provide `vsi_fname`."
+        )
+
+    if vsi_path is not None:
+        try:
+            metadata_payload = get_vsi_metadata(
+                vsi_path,
+                metadata_backend=backend,
+                target_schema="latest",
+            )
+            if metadata_payload:
+                vsi_metadata = metadata_payload
+            elif backend == "bioformats":
+                raise RuntimeError(
+                    f"Bio-Formats metadata backend returned empty metadata for {vsi_path}."
+                )
+            elif backend == "auto":
+                logger.warning(
+                    "VSI metadata extraction returned empty metadata for %s; "
+                    "writing OME-TIFF with minimal metadata.",
+                    vsi_path,
+                )
+        except ValueError:
+            raise
+        except Exception as exc:
+            if backend == "bioformats":
+                raise
+            logger.warning(
+                "Unable to resolve VSI metadata for %s (%s); writing OME-TIFF with minimal metadata.",
+                vsi_path,
+                exc,
+            )
+    elif backend == "auto":
+        logger.warning(
+            "No VSI path available for %s; writing OME-TIFF with minimal metadata.",
+            ets_path,
+        )
+
+    ome_metadata = _ome_metadata_from_vsi_payload(vsi_metadata)
+
+    try:
+        with ETSFile(ets_path) as ets:
+            if ets.nlevels <= 0:
+                raise ValueError("ETS file has no pyramid levels.")
+
+            write_options = {
+                "tile": (tile_size, tile_size),
+                "compression": compression,
+                "photometric": "rgb",
+            }
+
+            with tifffile.TiffWriter(str(normalized_output_path), bigtiff=True) as ome_writer:
+                for level in range(ets.nlevels):
+                    image = ets.read_level(level)
+                    channel_count = image.shape[-1] if image.ndim == 3 else 1
+                    if channel_count != 3:
+                        raise ValueError(
+                            "Unsupported VSI channel count "
+                            f"{channel_count}; the ETS reader currently expects RGB data."
+                        )
+
+                    if level == 0:
+                        level0_options = dict(write_options)
+                        if ets.nlevels > 1:
+                            level0_options["subifds"] = ets.nlevels - 1
+                        level0_options["metadata"] = ome_metadata
+                        ome_writer.write(image, **level0_options)
+                    else:
+                        ome_writer.write(image, subfiletype=1, **write_options)
+
+        return normalized_output_path
+    except ValueError:
+        raise
+    except Exception as exc:
+        logger.error("Error writing OME-TIFF %s from %s: %s", normalized_output_path, ets_path, exc)
+        return None
+
+
+def vsi_to_ome_tiff(
+    vsi_fname: str | Path,
+    output_path: str | Path,
+    *,
+    metadata_backend: str = "auto",
+    tile_size: int = 512,
+    compression: str = "jpeg",
+) -> Path | None:
+    """
+    Convert a VSI file to pyramidal OME-TIFF.
+
+    Parameters
+    ----------
+    vsi_fname : str or Path
+        Path to the VSI file.
+    output_path : str or Path
+        Destination path. Normalized to ``.ome.tif``.
+    metadata_backend : {"auto", "bioformats", "ets_only"}
+        Metadata backend selection.
+    tile_size : int
+        OME-TIFF tile edge size in pixels.
+    compression : str
+        TIFF compression mode passed to ``tifffile``.
+    """
+    ets_path = find_ets_file(vsi_fname)
+    if ets_path is None:
+        return None
+
+    normalized_output_path = _normalize_ome_tiff_output_path(output_path)
+    return ets_to_ome_tiff(
+        ets_path,
+        normalized_output_path,
+        vsi_fname=vsi_fname,
+        metadata_backend=metadata_backend,
+        tile_size=tile_size,
+        compression=compression,
+    )
+
+
 def batch_convert_vsi(
     input_pattern: str,
     output_dir: str | Path,
@@ -266,24 +491,34 @@ def batch_convert_vsi(
 
     logger.info("Processing %d files...", len(vsi_files))
 
+    format_normalized = format.strip().lower()
     output_files = []
     for vsi_path in vsi_files:
         vsi_path = Path(vsi_path)
-        output_name = f"level_{level}_{vsi_path.stem}.{format}"
+        output_name = (
+            f"level_{level}_{vsi_path.stem}.ome.tif"
+            if format_normalized == "ome-tiff"
+            else f"level_{level}_{vsi_path.stem}.{format}"
+        )
         output_path = output_dir / output_name
 
         logger.debug("  %s -> %s", vsi_path.name, output_name)
 
-        img = vsi_to_flat_image(
-            vsi_path,
-            level=level,
-            output_path=output_path,
-            format=format,
-            jpeg_quality=jpeg_quality,
-        )
+        if format_normalized == "ome-tiff":
+            ome_tiff_path = vsi_to_ome_tiff(vsi_path, output_path)
+            if ome_tiff_path is not None:
+                output_files.append(ome_tiff_path)
+        else:
+            img = vsi_to_flat_image(
+                vsi_path,
+                level=level,
+                output_path=output_path,
+                format=format,
+                jpeg_quality=jpeg_quality,
+            )
 
-        if img is not None:
-            output_files.append(output_path)
+            if img is not None:
+                output_files.append(output_path)
 
     logger.info("Completed: %d/%d files", len(output_files), len(vsi_files))
     return output_files
