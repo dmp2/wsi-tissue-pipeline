@@ -57,12 +57,18 @@ git clone https://github.com/dmp2/wsi-tissue-pipeline.git
 cd wsi-tissue-pipeline
 
 # Build and run with Docker Compose
-docker-compose -f docker/docker-compose.yml up --build
+docker compose -f docker/docker-compose.yml up --build
 
 # Access services:
 # - Jupyter Lab: http://localhost:8888
 # - MLflow UI: http://localhost:5000
 ```
+
+Notebook defaults in Docker:
+- `notebooks/01_wsi_to_tissue_sections.ipynb`, `02_quality_control.ipynb`, and `04_emlddmm_preparation.ipynb` use `/data` and `/output`.
+- Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty.
+- Notebook 03 is separate from the TIFF tile workflow and auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty.
+- Docker includes `emlddmm`, so notebook 04 does not require an extra package install.
 
 ### Option 3: Local Installation
 

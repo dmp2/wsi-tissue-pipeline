@@ -14,12 +14,20 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import sys
 import urllib.request
 from pathlib import Path
 from typing import Optional
-import json
+
+try:
+    from wsi_pipeline.demo_data import create_synthetic_wsi
+except ImportError:
+    src_root = Path(__file__).resolve().parents[1] / "src"
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+    from wsi_pipeline.demo_data import create_synthetic_wsi
 
 # Sample datasets available for download
 DATASETS = {
@@ -81,95 +89,6 @@ DATASETS = {
         ],
     },
 }
-
-
-def create_synthetic_wsi(output_path: Path, seed: int = 42) -> Path:
-    """Create a synthetic WSI-like image for testing."""
-    try:
-        import numpy as np
-        from PIL import Image, ImageDraw
-    except ImportError:
-        print("Error: numpy and Pillow are required for synthetic data generation")
-        print("Install with: pip install numpy Pillow")
-        sys.exit(1)
-    
-    np.random.seed(seed)
-    
-    # Create a large image with tissue-like regions
-    width, height = 4096, 3072
-    
-    # Start with white background (like a glass slide)
-    img = np.ones((height, width, 3), dtype=np.uint8) * 245
-    
-    # Add some slide artifacts (subtle variations)
-    noise = np.random.normal(0, 3, (height, width, 3)).astype(np.int16)
-    img = np.clip(img.astype(np.int16) + noise, 0, 255).astype(np.uint8)
-    
-    # Create tissue sections (pink/purple blobs)
-    num_sections = np.random.randint(3, 8)
-    
-    for i in range(num_sections):
-        # Random ellipse parameters
-        cx = np.random.randint(width // 4, 3 * width // 4)
-        cy = np.random.randint(height // 4, 3 * height // 4)
-        rx = np.random.randint(200, 600)
-        ry = np.random.randint(150, 500)
-        angle = np.random.uniform(0, 360)
-        
-        # Create mask for this tissue section
-        y_coords, x_coords = np.ogrid[:height, :width]
-        
-        # Rotated ellipse equation
-        cos_a = np.cos(np.radians(angle))
-        sin_a = np.sin(np.radians(angle))
-        x_rot = (x_coords - cx) * cos_a + (y_coords - cy) * sin_a
-        y_rot = -(x_coords - cx) * sin_a + (y_coords - cy) * cos_a
-        
-        ellipse_mask = (x_rot / rx) ** 2 + (y_rot / ry) ** 2 <= 1
-        
-        # Add irregular boundary using perlin-like noise
-        boundary_noise = np.random.normal(0, 0.1, ellipse_mask.shape)
-        from scipy import ndimage
-        boundary_noise = ndimage.gaussian_filter(boundary_noise, sigma=50)
-        ellipse_mask = ((x_rot / rx) ** 2 + (y_rot / ry) ** 2) <= (1 + boundary_noise)
-        
-        # Tissue color (H&E staining: pink to purple)
-        tissue_color = np.array([
-            np.random.randint(180, 230),  # R (pink)
-            np.random.randint(140, 200),  # G
-            np.random.randint(180, 220),  # B (slight purple)
-        ])
-        
-        # Apply tissue color with some variation
-        for c in range(3):
-            tissue_region = img[:, :, c].copy()
-            local_variation = np.random.normal(0, 10, (height, width))
-            tissue_values = tissue_color[c] + local_variation
-            tissue_region[ellipse_mask] = np.clip(tissue_values[ellipse_mask], 0, 255)
-            img[:, :, c] = tissue_region
-        
-        # Add some internal structure (nuclei-like spots)
-        num_spots = np.random.randint(50, 200)
-        spot_coords = np.where(ellipse_mask)
-        if len(spot_coords[0]) > num_spots:
-            indices = np.random.choice(len(spot_coords[0]), num_spots, replace=False)
-            for idx in indices:
-                sy, sx = spot_coords[0][idx], spot_coords[1][idx]
-                spot_radius = np.random.randint(2, 8)
-                y_spot, x_spot = np.ogrid[:height, :width]
-                spot_mask = (x_spot - sx) ** 2 + (y_spot - sy) ** 2 <= spot_radius ** 2
-                # Dark purple for nuclei
-                img[spot_mask] = [np.random.randint(80, 120), 
-                                  np.random.randint(60, 100), 
-                                  np.random.randint(100, 150)]
-    
-    # Convert to PIL and save
-    pil_img = Image.fromarray(img)
-    pil_img.save(output_path, quality=95)
-    
-    print(f"  Created: {output_path.name} ({output_path.stat().st_size / 1024 / 1024:.1f} MB)")
-    return output_path
-
 
 def download_file(url: str, output_path: Path, expected_md5: Optional[str] = None) -> bool:
     """Download a file with progress indication."""
@@ -297,11 +216,13 @@ def main():
                 # Generate synthetic data
                 seed = hash(file_info["name"]) % (2**32)
                 try:
-                    from scipy import ndimage
-                    create_synthetic_wsi(output_path, seed=seed)
+                    created = create_synthetic_wsi(output_path, seed=seed)
+                    print(
+                        f"  Created: {created.name} "
+                        f"({created.stat().st_size / 1024 / 1024:.1f} MB)"
+                    )
                 except ImportError:
-                    print("  Note: scipy required for synthetic data generation")
-                    print("  Install with: pip install scipy")
+                    print("  Note: numpy, Pillow, and scipy are required for synthetic data generation")
             elif file_info.get("url"):
                 # Download from URL
                 success = download_file(

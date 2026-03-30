@@ -1,11 +1,9 @@
 # WSI Tissue Pipeline - Docker Compose Configuration
 # 
 # Usage:
-#   Development:  docker-compose up
-#   Production:   docker-compose -f docker-compose.yml -f docker-compose.prod.yml up
-#   GPU:          docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
-
-version: '3.8'
+#   Development:  docker compose up
+#   Production:   docker compose -f docker-compose.yml -f docker-compose.prod.yml up
+#   GPU:          docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
 
 services:
   # ===========================================
@@ -108,7 +106,7 @@ services:
     container_name: wsi-minio
     hostname: minio
     profiles:
-      - storage  # Only start with: docker-compose --profile storage up
+      - storage  # Only start with: docker compose --profile storage up
     
     ports:
       - "9000:9000"   # API

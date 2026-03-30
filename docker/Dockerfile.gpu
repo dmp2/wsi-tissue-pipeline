@@ -72,7 +72,11 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-RUN pip install ".[visualization]"
+RUN pip install \
+    ".[visualization]" \
+    "jupyterlab>=4.0" \
+    "ipywidgets>=8.0" \
+    "emlddmm"
 
 # ============================================
 # Runtime stage
@@ -104,4 +108,4 @@ EXPOSE 8888 5000 9999
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')" || exit 1
 
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--NotebookApp.token=''"]
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=", "--ServerApp.password="]

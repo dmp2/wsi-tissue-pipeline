@@ -44,9 +44,11 @@ pip install -e .
 ### Option 3: Docker
 
 ```bash
-# Build and run with Docker Compose
-cd docker
-docker-compose up --build
+# Build and run from the repository root
+docker compose -f docker/docker-compose.yml up --build
+
+# Open Jupyter Lab
+# http://localhost:8888
 ```
 
 ## Detailed Installation
@@ -199,8 +201,10 @@ pip install -e ".[bioformats]"
 ##### Docker
 
 - `docker/Dockerfile` installs `openjdk-17-jre-headless`.
-- The image also installs `.[all]`, which now includes the Bio-Formats extra.
+- The image also installs `.[all]` plus explicit `jupyterlab`, `ipywidgets`, and `emlddmm` packages.
 - This is the recommended fully managed local runtime when you want the pipeline environment curated end to end.
+- The Docker Jupyter command disables auth tokens for the documented local workflow, so `http://localhost:8888` opens directly after `docker compose up`.
+- Notebook defaults use `/data` for inputs and `/output` for outputs. Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty, notebook 03 auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty, and notebook 04 runs without an extra `pip install emlddmm`.
 
 #### Environment overrides
 
@@ -245,7 +249,7 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ```bash
 # Ensure nvidia-docker is installed
-docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
 ```
 
 ## Verification
@@ -337,7 +341,7 @@ git pull origin main
 pip install -e .
 
 # Or rebuild Docker
-docker-compose build --no-cache
+docker compose build --no-cache
 ```
 
 ## Uninstalling
@@ -350,5 +354,5 @@ pip uninstall wsi-tissue-pipeline
 conda env remove -n wsi-pipeline
 
 # Remove Docker images
-docker-compose down --rmi all
+docker compose down --rmi all
 ```

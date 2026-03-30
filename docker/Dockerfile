@@ -58,8 +58,12 @@ RUN pip install --upgrade pip setuptools wheel
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-# Install package with all dependencies
-RUN pip install ".[all]"
+# Install package with all dependencies plus explicit notebook runtime deps.
+RUN pip install \
+    ".[all]" \
+    "jupyterlab>=4.0" \
+    "ipywidgets>=8.0" \
+    "emlddmm"
 
 # ============================================
 # Runtime stage - final image
@@ -96,8 +100,8 @@ EXPOSE 9999
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import wsi_pipeline; print('OK')" || exit 1
 
-# Default command: start Jupyter Lab
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--NotebookApp.token=''", "--NotebookApp.password=''"]
+# Default command: start Jupyter Lab without auth prompts in the local Docker workflow
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=", "--ServerApp.password="]
 
 # ============================================
 # Development stage - includes dev tools
@@ -122,4 +126,4 @@ RUN pip install \
 USER appuser
 
 # Development command
-CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser"]
+CMD ["jupyter", "lab", "--ip=0.0.0.0", "--port=8888", "--no-browser", "--ServerApp.token=", "--ServerApp.password="]

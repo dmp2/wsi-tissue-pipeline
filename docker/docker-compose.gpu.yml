@@ -1,5 +1,5 @@
 # GPU Override for Docker Compose
-# Usage: docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
+# Usage: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
 
 version: '3.8'
 
