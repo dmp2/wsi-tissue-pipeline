@@ -68,7 +68,7 @@ Notebook defaults in Docker:
 - `notebooks/01_wsi_to_tissue_sections.ipynb`, `02_quality_control.ipynb`, and `04_emlddmm_preparation.ipynb` use `/data` and `/output`.
 - Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty.
 - Notebook 03 is separate from the TIFF tile workflow and auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty.
-- Docker installs `emlddmm` from `https://github.com/twardlab/emlddmm.git`, so notebook 04 does not require an extra package install.
+- Docker clones `https://github.com/twardlab/emlddmm.git`, installs its requirements, and adds it to `PYTHONPATH`, so notebook 04 does not require an extra package install.
 
 ### Option 3: Local Installation
 

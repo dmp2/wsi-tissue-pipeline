@@ -54,9 +54,14 @@ ARG EMLDDMM_GIT_REF
 # Create virtual environment
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+ENV EMLDDMM_HOME=/opt/emlddmm
 
 # Upgrade pip and install build tools
 RUN pip install --upgrade pip setuptools wheel
+
+# Clone the upstream EM-LDDMM source tree and install its requirements.
+RUN git clone --depth 1 --branch "${EMLDDMM_GIT_REF}" "${EMLDDMM_GIT_URL}" "${EMLDDMM_HOME}" \
+    && pip install -r "${EMLDDMM_HOME}/requirements.txt"
 
 # Copy only requirements first (for caching)
 COPY pyproject.toml README.md ./
@@ -66,8 +71,7 @@ COPY src/ ./src/
 RUN pip install \
     ".[all]" \
     "jupyterlab>=4.0" \
-    "ipywidgets>=8.0" \
-    "emlddmm @ git+${EMLDDMM_GIT_URL}@${EMLDDMM_GIT_REF}"
+    "ipywidgets>=8.0"
 
 # ============================================
 # Runtime stage - final image
@@ -76,7 +80,10 @@ FROM base as runtime
 
 # Copy virtual environment from builder
 COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/emlddmm /opt/emlddmm
 ENV PATH="/opt/venv/bin:$PATH"
+ENV EMLDDMM_HOME=/opt/emlddmm
+ENV PYTHONPATH="/opt/emlddmm:${PYTHONPATH}"
 
 # Copy application code
 COPY --chown=appuser:appuser . /home/appuser/app
