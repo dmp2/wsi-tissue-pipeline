@@ -547,7 +547,7 @@ def set_up_hist_for_emlddmm(config: dict) -> None:
         raise ImportError(
             "The 'histsetup' module from the 'emlddmm' package is required "
             "for set_up_hist_for_emlddmm(). Install it with:\n"
-            "  pip install emlddmm\n"
+            "  pip install \"emlddmm @ git+https://github.com/twardlab/emlddmm.git\"\n"
             "or add it to sys.path manually."
         ) from err
 

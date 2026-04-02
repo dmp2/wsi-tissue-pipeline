@@ -4,6 +4,8 @@
 # Build arguments
 ARG PYTHON_VERSION=3.11
 ARG BASE_IMAGE=python:${PYTHON_VERSION}-slim-bookworm
+ARG EMLDDMM_GIT_URL=https://github.com/twardlab/emlddmm.git
+ARG EMLDDMM_GIT_REF=main
 
 FROM ${BASE_IMAGE} as base
 
@@ -46,6 +48,8 @@ WORKDIR /home/appuser
 # Builder stage - install Python dependencies
 # ============================================
 FROM base as builder
+ARG EMLDDMM_GIT_URL
+ARG EMLDDMM_GIT_REF
 
 # Create virtual environment
 RUN python -m venv /opt/venv
@@ -63,7 +67,7 @@ RUN pip install \
     ".[all]" \
     "jupyterlab>=4.0" \
     "ipywidgets>=8.0" \
-    "emlddmm"
+    "emlddmm @ git+${EMLDDMM_GIT_URL}@${EMLDDMM_GIT_REF}"
 
 # ============================================
 # Runtime stage - final image

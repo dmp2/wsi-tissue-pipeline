@@ -124,7 +124,7 @@ Important step-5 extras:
 Recommended install when you plan to use step 5 with precomputed targets and transformation-graph execution:
 
 ```bash
-pip install tensorstore emlddmm
+pip install tensorstore "emlddmm @ git+https://github.com/twardlab/emlddmm.git"
 ```
 
 ### Platform-Specific Instructions
@@ -201,10 +201,10 @@ pip install -e ".[bioformats]"
 ##### Docker
 
 - `docker/Dockerfile` installs `openjdk-17-jre-headless`.
-- The image also installs `.[all]` plus explicit `jupyterlab`, `ipywidgets`, and `emlddmm` packages.
+- The image also installs `.[all]` plus explicit `jupyterlab`, `ipywidgets`, and `emlddmm` from `https://github.com/twardlab/emlddmm.git`.
 - This is the recommended fully managed local runtime when you want the pipeline environment curated end to end.
 - The Docker Jupyter command disables auth tokens for the documented local workflow, so `http://localhost:8888` opens directly after `docker compose up`.
-- Notebook defaults use `/data` for inputs and `/output` for outputs. Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty, notebook 03 auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty, and notebook 04 runs without an extra `pip install emlddmm`.
+- Notebook defaults use `/data` for inputs and `/output` for outputs. Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty, notebook 03 auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty, and notebook 04 runs without an extra `pip install` inside Docker.
 
 #### Environment overrides
 
