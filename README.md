@@ -56,6 +56,11 @@ This pipeline processes large whole-slide images (potentially 0.5 TB+ per specim
 git clone https://github.com/dmp2/wsi-tissue-pipeline.git
 cd wsi-tissue-pipeline
 
+# Optional but recommended for local bind mounts:
+# keep machine-specific settings in your untracked .env
+cp .env.example .env
+# then set APP_UID / APP_GID from: id -u ; id -g
+
 # Build and run with Docker Compose
 docker compose -f docker/docker-compose.yml up --build
 
@@ -69,6 +74,11 @@ Notebook defaults in Docker:
 - Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty.
 - Notebook 03 is separate from the TIFF tile workflow and auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty.
 - Docker clones `https://github.com/twardlab/emlddmm.git`, installs its requirements, and adds it to `PYTHONPATH`, so notebook 04 does not require an extra package install.
+
+Local Docker notes:
+- `.env` is ignored by git, so keep host-specific values there rather than in tracked files.
+- Set `APP_UID` and `APP_GID` locally when you want the container's non-root user to match your host user for writable bind mounts.
+- The tracked Compose and Dockerfiles keep generic defaults and do not require committing personal UID/GID values.
 
 ### Option 3: Local Installation
 

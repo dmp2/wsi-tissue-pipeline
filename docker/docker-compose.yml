@@ -14,6 +14,11 @@ services:
       context: ..
       dockerfile: docker/Dockerfile
       target: development
+      args:
+        PYTHON_VERSION: "3.10"
+        EMLDDMM_INSTALL_REQUIREMENTS: "0"
+        APP_UID: "${APP_UID:-1000}"
+        APP_GID: "${APP_GID:-1000}"
     container_name: wsi-pipeline
     hostname: pipeline
     
@@ -31,8 +36,8 @@ services:
       - ../configs:/home/appuser/app/configs:ro
       
       # Data directories (configure these)
-      - ${DATA_DIR:-./data}:/data
-      - ${OUTPUT_DIR:-./output}:/output
+      - ${DATA_DIR:-../data}:/data
+      - ${OUTPUT_DIR:-../output}:/output
       
       # MLflow artifacts
       - mlflow_data:/mlruns

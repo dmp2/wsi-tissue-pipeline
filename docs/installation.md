@@ -45,6 +45,9 @@ pip install -e .
 
 ```bash
 # Build and run from the repository root
+cp .env.example .env
+# Optional for writable local bind mounts:
+# set APP_UID and APP_GID in .env from `id -u` and `id -g`
 docker compose -f docker/docker-compose.yml up --build
 
 # Open Jupyter Lab
