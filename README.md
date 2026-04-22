@@ -73,7 +73,9 @@ Notebook defaults in Docker:
 - `notebooks/01_wsi_to_tissue_sections.ipynb`, `02_quality_control.ipynb`, and `04_emlddmm_preparation.ipynb` use `/data` and `/output`.
 - Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty.
 - Notebook 03 is separate from the TIFF tile workflow and auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty.
-- Docker clones `https://github.com/twardlab/emlddmm.git`, installs its requirements, and adds it to `PYTHONPATH`, so notebook 04 does not require an extra package install.
+- Docker clones `https://github.com/twardlab/emlddmm.git`, adds it to `PYTHONPATH`, and installs the extra runtime dependencies notebook 04 needs without requiring the full pinned upstream requirements set.
+- To smoke-test notebook 02 non-interactively after notebook 01 populates `/output/tissue_sections`, run:
+  `docker compose -f docker/docker-compose.yml run --rm pipeline jupyter nbconvert --to notebook --execute /home/appuser/app/notebooks/02_quality_control.ipynb --output 02_quality_control.executed.ipynb --output-dir /tmp/nbexec`
 
 Local Docker notes:
 - `.env` is ignored by git, so keep host-specific values there rather than in tracked files.
@@ -239,7 +241,7 @@ The pipeline is organized into focused submodules:
 | `neuroglancer` | Neuroglancer state, server, and viewer | `NeuroglancerViewer`, `emit_ng_state_for_ngff_plate`, `open_neuroglancer_plate_view` |
 | `sciserver` | SciServer deployment (optional) | `SciServerPipeline`, `setup_sciserver_tracking` |
 
-**Canonical API:** Prefer standalone functions (`process_wsi`, `process_specimen`, `build_qc_grids`) for scripting. Use `WSIProcessor` and `QCGridBuilder` classes when you want to configure once and call multiple times.
+**Canonical API:** Prefer standalone functions (`process_wsi`, `process_specimen`, `run_qc_workflow`, `build_qc_grids`) for scripting. Use `WSIProcessor` and `QCGridBuilder` classes when you want to configure once and call multiple times.
 
 ### Import Examples
 

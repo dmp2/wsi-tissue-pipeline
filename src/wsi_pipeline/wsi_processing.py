@@ -554,6 +554,7 @@ def process_wsi(
     import imageio.v3 as iio
 
     output_paths = []
+    tile_records = []
     for i, tile in enumerate(tiles):
         if isinstance(tile, da.Array):
             tile_np = tile.compute()
@@ -573,6 +574,15 @@ def process_wsi(
         output_path = output_dir / output_name
         iio.imwrite(output_path, tile_np)
         output_paths.append(output_path)
+        tile_records.append(
+            {
+                "source_image": input_path.name,
+                "tile_index_on_source": i,
+                "path": str(output_path),
+                "width": int(tile_np.shape[1]),
+                "height": int(tile_np.shape[0]),
+            }
+        )
 
     # Save metadata
     metadata = {
@@ -581,6 +591,7 @@ def process_wsi(
         "n_tiles": len(tiles),
         "segmentation": seg_info,
         "output_paths": [str(p) for p in output_paths],
+        "tile_records": tile_records,
     }
 
     metadata_path = output_dir / f"{input_path.stem}_metadata.json"

@@ -121,18 +121,20 @@ print(f"Created {results['n_outputs']} tissue tiles")
 ### 3. Generate QC Grids
 
 ```python
-from wsi_pipeline.qc_grid import build_qc_grids
+from wsi_pipeline.qc_grid import run_qc_workflow
 
-qc_paths = build_qc_grids(
+qc_result = run_qc_workflow(
     input_dir=Path(OUTPUT_DIR) / 'specimen_001',
     output_dir=Path(OUTPUT_DIR) / 'specimen_001' / 'qc',
     thumb_size=256,
-    create_master=True
+    write_master=True,
+    write_per_slide=True,
+    write_stats=True,
 )
 
 # Display in notebook
 from IPython.display import Image
-Image(filename=str(qc_paths[0]))
+Image(filename=str(qc_result.artifacts.master_contact_sheet))
 ```
 
 ### 4. MLflow Tracking
