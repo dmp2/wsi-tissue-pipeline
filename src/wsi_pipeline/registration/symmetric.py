@@ -7,8 +7,8 @@ surrounding pipeline gains clearer docs, logging, and report outputs, but the
 underlying numerical behavior here is intentionally left unchanged.
 """
 
+import emlddmm
 import torch
-from emlddmm import emlddmm
 
 
 def _integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
@@ -23,7 +23,13 @@ def _integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
     dt = 1.0 / v.shape[0]
     for t in range(v.shape[0]):
         Xs = mesh - v[t] * dt
-        phi = emlddmm.interp(xv[:ndim], phi - mesh, Xs, interp2d=interp2d, **(grid_sample_kwargs or {})) + Xs
+        phi = emlddmm.interp(
+            xv[:ndim],
+            phi - mesh,
+            Xs,
+            interp2d=interp2d,
+            **(grid_sample_kwargs or {}),
+        ) + Xs
         phis.append(phi)
     return torch.stack(phis)
 
@@ -33,7 +39,15 @@ def _warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None)
     image = torch.as_tensor(image, device=phis.device)
     warped = []
     for t in range(phis.shape[0]):
-        warped.append(emlddmm.interp(x, image, phis[t], interp2d=interp2d, **(grid_sample_kwargs or {})))
+        warped.append(
+            emlddmm.interp(
+                x,
+                image,
+                phis[t],
+                interp2d=interp2d,
+                **(grid_sample_kwargs or {}),
+            )
+        )
     return torch.stack(warped)
 
 
@@ -104,7 +118,11 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     I_t = torch.as_tensor(I)
     J_t = torch.as_tensor(J)
     device, dtype = I_t.device, I_t.dtype
-    W0_t = torch.ones_like(I_t[0], device=device, dtype=dtype) if W0 is None else torch.as_tensor(W0, device=device, dtype=dtype)
+    W0_t = (
+        torch.ones_like(I_t[0], device=device, dtype=dtype)
+        if W0 is None
+        else torch.as_tensor(W0, device=device, dtype=dtype)
+    )
     xI_t = [torch.as_tensor(x, device=device, dtype=dtype) for x in xI]
     xJ_t = [torch.as_tensor(x, device=device, dtype=dtype) for x in xJ]
     # Flow forward

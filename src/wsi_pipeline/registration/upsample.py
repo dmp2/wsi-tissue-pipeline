@@ -113,7 +113,14 @@ def _resolve_present_mask(J, W, mode, present_mask):
         return present_mask
 
     if W is not None:
-        return np.any(W > 0, axis=(1, 2))
+        w_present_mask = np.any(W > 0, axis=(1, 2))
+        if mode == "img" and np.all(w_present_mask):
+            # In image mode, some callers pass dense per-slice weights even when
+            # the repaired global z lattice still contains zero-filled gaps.
+            # Fall back to image content when W alone cannot distinguish missing
+            # planes, while still honoring sparse W masks when they are present.
+            return np.any(J != 0, axis=(0, 2, 3))
+        return w_present_mask
 
     if mode == "seg":
         return np.any(J != 0, axis=(0, 2, 3))

@@ -444,7 +444,24 @@ def test_workflow_rejects_transformation_graph_without_atlas(tmp_path):
         )
 
 
-def test_workflow_requires_external_transformation_graph_script_when_requested(tmp_path):
+def test_workflow_requires_external_transformation_graph_script_when_requested(
+    tmp_path,
+    monkeypatch,
+):
+    original_find_spec = workflow_module.importlib.util.find_spec
+
+    def fake_find_spec(name: str):
+        if name in {"emlddmm.transformation_graph_v01", "transformation_graph_v01", "emlddmm"}:
+            return None
+        return original_find_spec(name)
+
+    monkeypatch.setattr(workflow_module.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.setattr(
+        workflow_module,
+        "_find_workspace_transformation_graph_script",
+        lambda: None,
+    )
+
     with pytest.raises(FileNotFoundError, match="external emlddmm package"):
         workflow_module.plan_emlddmm_workflow(
             dataset_root=tmp_path,
