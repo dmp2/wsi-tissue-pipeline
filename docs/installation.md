@@ -46,13 +46,45 @@ pip install -e .
 ```bash
 # Build and run from the repository root
 cp .env.example .env
-# Optional for writable local bind mounts:
-# set APP_UID and APP_GID in .env from `id -u` and `id -g`
+# Set DATA_DIR and OUTPUT_DIR in .env to absolute host paths outside this repo.
+# Optional for writable local bind mounts: set APP_UID and APP_GID from `id -u` and `id -g`.
 docker compose -f docker/docker-compose.yml up --build
 
 # Open Jupyter Lab
 # http://localhost:8888
 ```
+
+#### Docker directory contract
+
+Docker uses two path namespaces:
+- Host paths in `.env`, such as `DATA_DIR` and `OUTPUT_DIR`.
+- In-container paths used by notebooks and commands, such as `/data` and `/output`.
+
+Recommended host layout:
+
+```text
+/absolute/path/outside/repo/wsi-data/input       # raw WSI or flat image inputs
+/absolute/path/outside/repo/wsi-data/resources   # optional atlas, labels, configs, jars, precomputed inputs
+/absolute/path/outside/repo/wsi-output           # writable pipeline outputs
+```
+
+Recommended `.env` values:
+
+```bash
+DATA_DIR=/absolute/path/outside/repo/wsi-data
+OUTPUT_DIR=/absolute/path/outside/repo/wsi-output
+APP_UID=<your id -u>
+APP_GID=<your id -g>
+```
+
+Inside the container:
+- `/data/input` is the default notebook input directory.
+- `/data/resources` is the recommended location for optional external resources.
+- `/output` is the writable output root.
+- `/output/tissue_sections` is the default notebook and staged-runner dataset root.
+- `/output/notebook_runs` is a good durable location for executed notebook copies and scratch artifacts.
+
+Create the host directories before `docker compose up`. If a bind-mount source path does not exist, Docker may create it on the host, sometimes with ownership that your user cannot write. Keep private WSI data outside the git checkout; the repo ignores `data/` and `output/`, but ignored files are still easy to move, copy, or expose by mistake.
 
 ## Detailed Installation
 
@@ -210,7 +242,7 @@ pip install -e ".[bioformats]"
 - The image also installs `.[all]`, explicit `jupyterlab` / `ipywidgets`, clones `https://github.com/twardlab/emlddmm.git`, installs its `requirements.txt`, and adds that checkout to `PYTHONPATH`.
 - This is the recommended fully managed local runtime when you want the pipeline environment curated end to end.
 - The Docker Jupyter command disables auth tokens for the documented local workflow, so `http://localhost:8888` opens directly after `docker compose up`.
-- Notebook defaults use `/data` for inputs and `/output` for outputs. Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty, notebook 03 auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty, and notebook 04 runs without an extra `pip install` inside Docker.
+- Notebook defaults use `/data/input` for raw inputs and `/output` for outputs. Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty, notebook 03 auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty, and notebook 04 runs without an extra `pip install` inside Docker.
 
 #### Environment overrides
 
@@ -255,7 +287,7 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ```bash
 # Ensure nvidia-docker is installed
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up --build
 ```
 
 ## Verification
@@ -308,9 +340,11 @@ tile:
 #### Permission denied errors in Docker
 
 ```bash
-# Fix permissions
-sudo chown -R $USER:$USER ./data ./output
+# Fix ownership on the host paths you mounted through DATA_DIR and OUTPUT_DIR.
+sudo chown -R "$USER:$USER" "$DATA_DIR" "$OUTPUT_DIR"
 ```
+
+On Linux, set `APP_UID` and `APP_GID` in `.env` to match `id -u` and `id -g` before building the image. Avoid relying on Docker to create missing bind-mount source directories; create them yourself first so ownership is predictable.
 
 #### Java runtime not found
 

@@ -15,12 +15,12 @@ Stages:
     all                   Run steps 1 → 2 → 4 sequentially
 
 Usage:
-    python run_pipeline.py step1 -i /data/wsi -o /data/tiles --pattern "*.jpg"
-    python run_pipeline.py step2 -o /data/tiles
-    python run_pipeline.py step3 -o /data/zarr_plate
-    python run_pipeline.py step4 -o /data/tiles --dv 35.05 35.05 16.0
-    python run_pipeline.py step5 --dataset-root /data/tiles
-    python run_pipeline.py all   -i /data/wsi -o /data/tiles -c configs/default.yaml
+    python run_pipeline.py step1 -i /data/input -o /output/tissue_sections --pattern "*.jpg"
+    python run_pipeline.py step2 -o /output/tissue_sections
+    python run_pipeline.py step3 -o /output/per_tissue_ngff
+    python run_pipeline.py step4 -o /output/tissue_sections --dv 35.05 35.05 16.0
+    python run_pipeline.py step5 --dataset-root /output/tissue_sections
+    python run_pipeline.py all   -i /data/input -o /output/tissue_sections -c configs/default.yaml
 """
 
 from __future__ import annotations
