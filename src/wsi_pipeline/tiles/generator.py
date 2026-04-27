@@ -211,10 +211,13 @@ def generate_tissue_tiles(
     extra_margin_px: int = 0,
 ) -> tuple[list[da.Array], int]:
     """
-    Build one high-res (Y,X,C) Dask tile per tissue with common square side length.
+    Build one high-res (Y,X,C) Dask tile per tissue with a common square side.
 
-    The common side length is derived from the largest high-res bounding box
-    across all tissues.
+    ``low_res_filled`` is segmented at thumbnail/coarse scale, then labels are
+    mapped back onto the high-resolution image only for each output window.  All
+    output windows use the same square dimension, are centered on their tissue
+    bounding box, and are padded when the centered square extends beyond the
+    source image.
 
     Parameters
     ----------
@@ -276,21 +279,20 @@ def generate_tissue_tiles(
         y0_lr, y1_lr = yi[[0, -1]]
         x0_lr, x1_lr = xi[[0, -1]]
 
-        # Map LR bbox -> HR bbox (inclusive)
+        # Map LR bbox -> HR bbox (exclusive)
         y0_hr = int(np.floor(y0_lr * Yr))
-        y1_hr = int(np.ceil((y1_lr + 1) * Yr) - 1)
+        y1_hr = int(np.ceil((y1_lr + 1) * Yr))
         x0_hr = int(np.floor(x0_lr * Xr))
-        x1_hr = int(np.ceil((x1_lr + 1) * Xr) - 1)
+        x1_hr = int(np.ceil((x1_lr + 1) * Xr))
 
-        # Expand by optional margin, clamped to image
-        y0_hr = max(0, y0_hr - extra_margin_px)
-        x0_hr = max(0, x0_hr - extra_margin_px)
-        y1_hr = min(Yh - 1, y1_hr + extra_margin_px)
-        x1_hr = min(Xh - 1, x1_hr + extra_margin_px)
+        y0_hr = max(0, min(Yh, y0_hr))
+        y1_hr = max(0, min(Yh, y1_hr))
+        x0_hr = max(0, min(Xh, x0_hr))
+        x1_hr = max(0, min(Xh, x1_hr))
 
-        H_hr = y1_hr - y0_hr + 1
-        W_hr = x1_hr - x0_hr + 1
-        max_side = max(max_side, H_hr, W_hr)
+        H_hr = y1_hr - y0_hr
+        W_hr = x1_hr - x0_hr
+        max_side = max(max_side, H_hr + (2 * extra_margin_px), W_hr + (2 * extra_margin_px))
 
         roi_specs.append((lid, y0_lr, y1_lr, x0_lr, x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, H_hr, W_hr))
 
@@ -303,37 +305,65 @@ def generate_tissue_tiles(
 
     tile_dim = _round_up(max_side, pad_multiple)
 
-    # Safety bound: cannot exceed full image
-    tile_dim = min(tile_dim, max(Yh, Xh))
-
     # -------- Pass 2: build tiles lazily with common tile_dim --------
     tiles: list[da.Array] = []
 
     for (lid, y0_lr, y1_lr, x0_lr, x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, H_hr, W_hr) in roi_specs:
-        # Upsample LR labels only within the LR ROI to HR ROI size
-        lr_crop_lbl = lr_lbl[y0_lr:y1_lr + 1, x0_lr:x1_lr + 1].astype(np.int32)
+        center_y = (y0_hr + y1_hr) / 2.0
+        center_x = (x0_hr + x1_hr) / 2.0
+        tile_y0 = int(np.floor(center_y - tile_dim / 2.0))
+        tile_x0 = int(np.floor(center_x - tile_dim / 2.0))
+        tile_y1 = tile_y0 + tile_dim
+        tile_x1 = tile_x0 + tile_dim
 
-        # 2x2 affine matrix for scaling
-        A_roi = np.array([
-            [lr_crop_lbl.shape[1] / W_hr, 0],
-            [0, lr_crop_lbl.shape[0] / H_hr],
-        ], dtype=float)
+        src_y0 = max(0, tile_y0)
+        src_x0 = max(0, tile_x0)
+        src_y1 = min(Yh, tile_y1)
+        src_x1 = min(Xh, tile_x1)
+
+        src_h = src_y1 - src_y0
+        src_w = src_x1 - src_x0
+        if src_h <= 0 or src_w <= 0:
+            continue
+
+        lr_crop_y0 = max(0, int(np.floor(src_y0 / Yr)))
+        lr_crop_x0 = max(0, int(np.floor(src_x0 / Xr)))
+        lr_crop_y1 = min(lr_lbl.shape[0], int(np.ceil(src_y1 / Yr)))
+        lr_crop_x1 = min(lr_lbl.shape[1], int(np.ceil(src_x1 / Xr)))
+        lr_crop_lbl = lr_lbl[lr_crop_y0:lr_crop_y1, lr_crop_x0:lr_crop_x1].astype(np.int32)
+
+        matrix = np.array([[1.0 / Yr, 0.0], [0.0, 1.0 / Xr]], dtype=float)
+        offset = np.array(
+            [(src_y0 / Yr) - lr_crop_y0, (src_x0 / Xr) - lr_crop_x0],
+            dtype=float,
+        )
 
         hr_roi_lbl = affine_transform(
             da.from_array(lr_crop_lbl, chunks=lr_crop_lbl.shape),
-            matrix=A_roi,
-            output_shape=(H_hr, W_hr),
+            matrix=matrix,
+            offset=offset,
+            output_shape=(src_h, src_w),
             order=0,
         ).astype(np.int32)
         hr_roi_mask = hr_roi_lbl == lid
 
-        # Slice s0 in ROI lazily -> (Y,X,C)
-        s0_roi_cyx = s0_cyx[:, y0_hr:y1_hr + 1, x0_hr:x1_hr + 1]
+        # Slice s0 in the centered tile window intersection lazily -> (Y,X,C)
+        s0_roi_cyx = s0_cyx[:, src_y0:src_y1, src_x0:src_x1]
         roi_yxc = da.moveaxis(s0_roi_cyx, 0, -1)
 
-        # Apply HR mask and square-crop/pad lazily to the *common* tile_dim
+        # Apply HR mask and pad source-edge intersections into the common square.
         masked = da.where(hr_roi_mask[..., None], roi_yxc, 0)
-        tile = center_crop_pad_dask(masked, tile_dim).rechunk((chunk, chunk, C))
+        pad_top = src_y0 - tile_y0
+        pad_left = src_x0 - tile_x0
+        pad_bottom = tile_y1 - src_y1
+        pad_right = tile_x1 - src_x1
+        if pad_top or pad_bottom or pad_left or pad_right:
+            masked = da.pad(
+                masked,
+                ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
+                mode="constant",
+            )
+        tile = masked[:tile_dim, :tile_dim, :].rechunk((chunk, chunk, C))
         tiles.append(tile)
 
     return tiles, tile_dim

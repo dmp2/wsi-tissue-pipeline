@@ -333,7 +333,7 @@ brew install openslide
 
 Reduce chunk size in configuration:
 ```yaml
-tile:
+tiles:
   chunk_size: 2048  # Reduce from default 4096
 ```
 

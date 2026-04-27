@@ -9,13 +9,13 @@ segmentation:
   min_area_px: 500
   struct_elem_px: 5
   split_touching: true
-  r_split: 3.0
+  r_split: 3
 
 tiles:
   # Optimize for server-class hardware
   chunk_size: 8192
   pad_multiple: 32
-  extra_margin_px: 100
+  extra_margin_px: 0
 
 output:
   format: "ome-zarr"

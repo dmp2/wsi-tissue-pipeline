@@ -88,6 +88,36 @@ class TestSegmentation:
             assert mask is not None, f"Backend {backend} failed"
             assert mask.shape == img.shape[:2]
 
+    def test_thumbnail_does_not_upscale_low_resolution_images(self):
+        """Low pyramid levels should not be enlarged before segmentation."""
+        from wsi_pipeline.wsi_processing import _create_thumbnail
+
+        img = np.ones((256, 512, 3), dtype=np.uint8) * 245
+        thumb, scale = _create_thumbnail(img, target_long_side=1800)
+
+        assert thumb.shape == img.shape
+        assert scale == 1.0
+
+    def test_min_area_is_interpreted_at_thumbnail_scale(self):
+        """Downsampling should not reduce the configured minimum component size."""
+        from wsi_pipeline.wsi_processing import segment_tissue
+
+        img = np.ones((1000, 1000, 3), dtype=np.uint8) * 245
+        img[475:525, 475:525] = [80, 60, 100]
+
+        mask, info = segment_tissue(
+            img,
+            backend="local-otsu",
+            target_long_side=500,
+            min_area_px=3000,
+            struct_elem_px=2,
+            split_touching=False,
+        )
+
+        assert info["min_area"] == 3000
+        assert info["n_components"] == 0
+        assert not mask.any()
+
 
 class TestTileExtraction:
     """Test tile extraction functions."""
@@ -153,6 +183,57 @@ class TestTileExtraction:
 
             assert h2 >= h1
             assert w2 >= w1
+
+    def test_extract_tissue_tiles_centers_edge_components(self):
+        """Tiles should include balanced padding instead of pinning tissue to an edge."""
+        from wsi_pipeline.wsi_processing import extract_tissue_tiles
+
+        img = np.zeros((100, 100, 3), dtype=np.uint8)
+        img[0:20, 0:20] = [120, 80, 100]
+        mask = np.zeros((100, 100), dtype=bool)
+        mask[0:20, 0:20] = True
+
+        tiles = extract_tissue_tiles(
+            img,
+            mask,
+            chunk_size=32,
+            pad_multiple=64,
+            extra_margin_px=20,
+        )
+        tile = tiles[0].compute()
+        tissue = np.any(tile > 0, axis=2)
+        rows = np.where(np.any(tissue, axis=1))[0]
+        cols = np.where(np.any(tissue, axis=0))[0]
+
+        assert tile.shape[:2] == (64, 64)
+        assert rows[0] > 0
+        assert cols[0] > 0
+        assert rows[-1] < tile.shape[0] - 1
+        assert cols[-1] < tile.shape[1] - 1
+
+    def test_extract_tissue_tiles_uses_common_square_size(self):
+        """All tissue sections from one source should share one square tile size."""
+        from wsi_pipeline.wsi_processing import extract_tissue_tiles
+
+        img = np.zeros((160, 240, 3), dtype=np.uint8)
+        img[20:50, 20:60] = [120, 80, 100]
+        img[80:140, 120:220] = [130, 90, 110]
+        mask = np.zeros((160, 240), dtype=bool)
+        mask[20:50, 20:60] = True
+        mask[80:140, 120:220] = True
+
+        tiles = extract_tissue_tiles(
+            img,
+            mask,
+            chunk_size=32,
+            pad_multiple=64,
+            extra_margin_px=16,
+        )
+        shapes = [tile.shape[:2] for tile in tiles]
+
+        assert len(tiles) == 2
+        assert shapes[0] == shapes[1]
+        assert shapes[0][0] == shapes[0][1]
 
 
 class TestProcessWSI:

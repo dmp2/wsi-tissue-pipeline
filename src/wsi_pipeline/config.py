@@ -53,7 +53,7 @@ class SegmentationConfig(BaseModel):
     )
 
     r_split: int = Field(
-        default=2, ge=1, le=10,
+        default=3, ge=1, le=10,
         description=(
             "Radius (px, at thumbnail scale) used by watershed to split touching tissue sections. "
             "Increase if sections that should be separate are merged; "

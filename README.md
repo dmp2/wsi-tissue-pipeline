@@ -328,12 +328,15 @@ segmentation:
   min_area_px: 3000
   struct_elem_px: 4
   split_touching: true
-  r_split: 2
+  r_split: 3
 
 output:
   format: "ome-zarr"  # or "tiff"
   chunk_size: 512
   compression: "zstd"
+
+tiles:
+  extra_margin_px: 0
 
 mlflow:
   tracking_uri: "sqlite:///mlflow.db"

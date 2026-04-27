@@ -21,7 +21,7 @@ segmentation:
   split_touching: true
   
   # Ratio threshold for splitting elongated components
-  r_split: 3.0
+  r_split: 3
 
 # Tile extraction settings
 tiles:
@@ -32,7 +32,7 @@ tiles:
   pad_multiple: 16
   
   # Extra margin around detected tissue (pixels at full resolution)
-  extra_margin_px: 100
+  extra_margin_px: 0
 
 # Output format settings
 output:

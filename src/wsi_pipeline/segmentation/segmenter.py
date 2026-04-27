@@ -81,7 +81,7 @@ class WSISegmenter:
         struct_elem_px: int = 9,
         min_area_px: int = 2000,
         split_touching: bool = True,
-        r_split: int = 2,
+        r_split: int = 3,
         diagnostics: bool = False,
     ):
         self.backend = backend
@@ -196,7 +196,7 @@ def segment_mask(
     struct_elem_px: int = 9,
     min_area_px: int = 2000,
     split_touching: bool = True,
-    r_split: int = 2,
+    r_split: int = 3,
     diagnostics: bool = False,
 ) -> np.ndarray:
     """
@@ -254,7 +254,7 @@ def make_lowres_mask(
     small_switch: int = 1200,
     keep_top_k: int | None = None,
     split_touching: bool = True,
-    r_split: int = 2,
+    r_split: int = 3,
     diagnostics: bool = False,
     return_diag: bool = False,
 ) -> tuple[np.ndarray, dict | None]:

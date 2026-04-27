@@ -18,10 +18,16 @@ from scipy import ndimage as ndi
 from skimage import filters, measure, morphology
 from skimage.filters.rank import entropy as rank_entropy
 from skimage.morphology import disk
-from skimage.segmentation import watershed
-from skimage.transform import resize
 
 from .config import PipelineConfig, SegmentationConfig, TileConfig, load_config
+from .segmentation.core import (
+    create_thumbnail as _shared_create_thumbnail,
+    upsample_mask as _shared_upsample_mask,
+)
+from .segmentation.morphology import (
+    split_touching_components as _shared_split_touching_components,
+)
+from .tiles.generator import generate_tissue_tiles
 
 logger = logging.getLogger(__name__)
 
@@ -73,21 +79,7 @@ def _create_thumbnail(
     scale : float
         Scale factor (thumbnail_size / original_size).
     """
-    if isinstance(img, da.Array):
-        H, W = int(img.shape[0]), int(img.shape[1])
-        arr = img.compute()
-    else:
-        H, W = img.shape[:2]
-        arr = img
-
-    if target_long_side and max(H, W) != target_long_side:
-        scale = target_long_side / max(H, W)
-        Ht = max(1, int(round(H * scale)))
-        Wt = max(1, int(round(W * scale)))
-        out = resize(arr, (Ht, Wt), order=1, preserve_range=True, anti_aliasing=True)
-        return out.astype(arr.dtype), scale
-
-    return arr, 1.0
+    return _shared_create_thumbnail(img, target_long_side)
 
 
 def _upsample_mask(
@@ -95,10 +87,7 @@ def _upsample_mask(
     target_shape: tuple[int, int],
 ) -> np.ndarray:
     """Upsample boolean mask using nearest-neighbor interpolation."""
-    H, W = target_shape
-    return resize(
-        mask_thumbnail.astype(np.uint8), (H, W), order=0, preserve_range=True
-    ).astype(bool)
+    return _shared_upsample_mask(mask_thumbnail, target_shape)
 
 
 def _entropy_mask(
@@ -186,7 +175,7 @@ def _otsu_mask(
 
 def _split_touching_components(
     mask: np.ndarray,
-    r_split: int = 2,
+    r_split: int = 3,
     min_area: int = 256,
 ) -> np.ndarray:
     """
@@ -206,32 +195,7 @@ def _split_touching_components(
     mask : np.ndarray
         Mask with touching components separated.
     """
-    mask = np.asarray(mask, dtype=bool)
-    if not mask.any() or r_split <= 0:
-        return morphology.remove_small_objects(mask, min_size=min_area)
-
-    # Generate seeds by erosion
-    seeds = morphology.binary_erosion(mask, footprint=disk(r_split))
-    markers = measure.label(seeds, connectivity=2)
-
-    # Fallback if erosion removed all markers
-    if markers.max() == 0:
-        dist = ndi.distance_transform_edt(mask)
-        if dist.max() > 0:
-            peak = np.zeros_like(mask, dtype=bool)
-            peak[np.unravel_index(np.argmax(dist), dist.shape)] = True
-            markers = measure.label(peak, connectivity=2)
-
-    # Watershed
-    dist = ndi.distance_transform_edt(mask)
-    labels = watershed(-dist, markers=markers, mask=mask, watershed_line=True)
-    out = labels > 0
-
-    # Cleanup
-    min_area_post = max(64, min_area // 2)
-    out = morphology.remove_small_objects(out, min_size=min_area_post)
-
-    return out
+    return _shared_split_touching_components(mask, r_split=r_split, min_area=min_area)
 
 
 def _load_image(input_path: Path) -> np.ndarray:
@@ -283,7 +247,7 @@ def segment_tissue(
     min_area_px: int = 3000,
     struct_elem_px: int = 4,
     split_touching: bool = True,
-    r_split: int = 2,
+    r_split: int = 3,
     diagnostics: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
@@ -329,10 +293,11 @@ def segment_tissue(
     thumb, scale = _create_thumbnail(img, target_long_side)
     Ht, Wt = thumb.shape[:2]
 
-    # Scale parameters
-    area_scale = (Ht * Wt) / (H * W) if H > 0 and W > 0 else 1.0
-    min_area_scaled = max(64, int(min_area_px * area_scale))
-    struct_elem_scaled = max(2, int(struct_elem_px * scale))
+    # Segmentation parameters are defined at thumbnail scale.  Keeping them
+    # stable across source sizes avoids admitting tiny background components
+    # when a large slide is downsampled for mask generation.
+    min_area_scaled = max(64, int(min_area_px))
+    struct_elem_scaled = max(2, int(struct_elem_px))
 
     # Convert to grayscale
     gray = _to_gray(thumb)
@@ -383,7 +348,13 @@ def extract_tissue_tiles(
     extra_margin_px: int = 0,
 ) -> list[da.Array]:
     """
-    Extract individual tissue tiles from image using mask.
+    Extract individual tissue tiles from image using a segmentation mask.
+
+    This is the notebook/CLI-facing wrapper around
+    :func:`wsi_pipeline.tiles.generator.generate_tissue_tiles`.  The mask may be
+    a full-resolution upsampled mask or a lower-resolution thumbnail mask; the
+    output tiles are centered, square, and share one common side length for the
+    source image.
 
     Parameters
     ----------
@@ -401,78 +372,28 @@ def extract_tissue_tiles(
     Returns
     -------
     tiles : list of dask.array.Array
-        List of tissue tiles.
+        List of centered square tissue tiles in ``(Y, X, C)`` order.
     """
-    # Label connected components
-    labeled, n_labels = measure.label(mask, return_num=True, connectivity=2)
+    if isinstance(img, da.Array):
+        img_da = img
+    else:
+        img_da = da.from_array(img, chunks=(chunk_size, chunk_size, -1))
 
-    tiles = []
-    for i in range(1, n_labels + 1):
-        # Create component mask
-        component_mask = labeled == i
+    if img_da.ndim != 3:
+        raise ValueError("Expected image with shape (Y, X, C) or (C, Y, X).")
 
-        # Fill holes within component
-        component_mask = ndi.binary_fill_holes(component_mask)
+    if img_da.shape[0] in (1, 3) and img_da.shape[-1] not in (1, 3):
+        s0_cyx = img_da
+    else:
+        s0_cyx = da.moveaxis(img_da, -1, 0)
 
-        # Find bounding box
-        rows = np.any(component_mask, axis=1)
-        cols = np.any(component_mask, axis=0)
-
-        if not rows.any() or not cols.any():
-            continue
-
-        y_idx = np.where(rows)[0]
-        x_idx = np.where(cols)[0]
-        y0, y1 = int(y_idx[0]), int(y_idx[-1]) + 1
-        x0, x1 = int(x_idx[0]), int(x_idx[-1]) + 1
-
-        # Add margin
-        if extra_margin_px > 0:
-            H, W = mask.shape
-            y0 = max(0, y0 - extra_margin_px)
-            y1 = min(H, y1 + extra_margin_px)
-            x0 = max(0, x0 - extra_margin_px)
-            x1 = min(W, x1 + extra_margin_px)
-
-        # Extract tile
-        if isinstance(img, da.Array):
-            tile = img[y0:y1, x0:x1, :]
-        else:
-            tile = da.from_array(img[y0:y1, x0:x1, :], chunks=(chunk_size, chunk_size, -1))
-
-        # Apply mask (set background to 0)
-        mask_region = component_mask[y0:y1, x0:x1]
-        if isinstance(tile, da.Array):
-            mask_da = da.from_array(mask_region[..., np.newaxis], chunks=tile.chunks[:2] + ((1,),))
-            tile = da.where(mask_da, tile, 0)
-        else:
-            tile = np.where(mask_region[..., np.newaxis], tile, 0)
-
-        # Pad to multiple
-        if pad_multiple > 1:
-            h, w = tile.shape[:2]
-            new_h = ((h + pad_multiple - 1) // pad_multiple) * pad_multiple
-            new_w = ((w + pad_multiple - 1) // pad_multiple) * pad_multiple
-
-            if new_h > h or new_w > w:
-                if isinstance(tile, da.Array):
-                    pad_h = new_h - h
-                    pad_w = new_w - w
-                    tile = da.pad(
-                        tile,
-                        ((0, pad_h), (0, pad_w), (0, 0)),
-                        mode="constant",
-                        constant_values=0,
-                    )
-                else:
-                    tile = np.pad(
-                        tile,
-                        ((0, new_h - h), (0, new_w - w), (0, 0)),
-                        mode="constant",
-                    )
-
-        tiles.append(tile)
-
+    tiles, _tile_dim = generate_tissue_tiles(
+        s0_cyx=s0_cyx,
+        low_res_filled=np.asarray(mask, dtype=bool),
+        chunk=chunk_size,
+        pad_multiple=pad_multiple,
+        extra_margin_px=extra_margin_px,
+    )
     return tiles
 
 

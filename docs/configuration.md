@@ -51,7 +51,7 @@ segmentation:
   
   # Aspect ratio threshold for splitting elongated components
   # Higher = only split very elongated shapes
-  r_split: 3.0
+  r_split: 3
 ```
 
 #### Backend Details
@@ -68,7 +68,7 @@ segmentation:
 Control how tissue regions are extracted as individual tiles.
 
 ```yaml
-tile:
+tiles:
   # Chunk size for Dask processing
   # Larger = faster but more memory
   chunk_size: 4096
@@ -78,7 +78,7 @@ tile:
   pad_multiple: 16
   
   # Extra margin around detected tissue (in pixels at full resolution)
-  extra_margin_px: 100
+  extra_margin_px: 0
 ```
 
 ### Output Settings
@@ -329,7 +329,7 @@ segmentation:
   min_area_px: 200
   split_touching: false
 
-tile:
+tiles:
   # Need more margin for registration
   extra_margin_px: 200
 ```
@@ -370,12 +370,12 @@ segmentation:
   min_area_px: 500
   struct_elem_px: 5
   split_touching: true
-  r_split: 3.0
+  r_split: 3
 
-tile:
+tiles:
   chunk_size: 4096
   pad_multiple: 16
-  extra_margin_px: 100
+  extra_margin_px: 0
 
 output:
   format: "ome-zarr"

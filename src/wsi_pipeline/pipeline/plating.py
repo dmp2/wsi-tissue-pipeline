@@ -136,6 +136,7 @@ def process_slide_with_plating(
     # mips options
     min_side_for_mips: int | None = None,        # default to chunk size in writers
     downscale: int = 2,                             # default downsampling rate for mips (not used yet)
+    tile_extra_margin_px: int = 0,
     # dtype policy
     dtype: np.dtype | None = "uint8",            # cast ROI to uint8 before mip (recommended for imagery)
     source_context: Mapping[str, Any] | None = None,
@@ -160,6 +161,8 @@ def process_slide_with_plating(
     - zarr_path: Path to the highest-resolution OME-Zarr image.
     - low_res_mask: Binary mask of tissue regions, assumed to be the lowest resolution. If None, generate the mask.
     - target_dim: Target square dimensions for each tissue region at the highest resolution.
+    - tile_extra_margin_px: Extra high-resolution pixels to include around each tissue before
+      rounding all tiles to a common square side.
     - source_context: Optional source metadata hints. Supported keys:
       ``source_kind`` (``"vsi"``, ``"ome-tiff"``, ``"ome-zarr"``, ``"unknown"``),
       ``source_path``, ``ngff_metadata``, ``metadata_backend`` (``"auto"``, ``"bioformats"``, ``"ets_only"``),
@@ -248,7 +251,7 @@ def process_slide_with_plating(
         low_res_filled=filled_lr.astype(bool),
         chunk=plate_chunk_xy,
         pad_multiple=plate_chunk_xy,  # or another multiple, if we prefer
-        extra_margin_px=0
+        extra_margin_px=tile_extra_margin_px
     )
     # Break out early if there are no tissue sections
     if not tiles_yxc:

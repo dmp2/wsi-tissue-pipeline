@@ -99,6 +99,7 @@ def step1_segment(args, config) -> int:
     print(f"Output:   {output_dir}")
     print(f"Pattern:  {pattern}")
     print(f"Backend:  {config.segmentation.backend}")
+    print(f"Tile margin: {config.tiles.extra_margin_px}px")
     print(f"MLflow:   {'enabled' if mlflow_enabled else 'disabled'}")
     print()
 

@@ -64,7 +64,7 @@ def create_thumbnail(image: np.ndarray | da.Array, target_long_side: int) -> tup
     else:
         H, W = image.shape[:2]
         arr = image
-    if target_long_side and max(H, W) != target_long_side:
+    if target_long_side and max(H, W) > target_long_side:
         scale = target_long_side / max(H, W)
         Ht, Wt = max(1, int(round(H * scale))), max(1, int(round(W * scale)))
         out = resize(arr, (Ht, Wt), order=1, preserve_range=True, anti_aliasing=True)
