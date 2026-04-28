@@ -25,8 +25,10 @@ from .segmentation.core import (
     upsample_mask as _shared_upsample_mask,
 )
 from .segmentation.morphology import (
+    keep_largest_components as _shared_keep_largest_components,
     split_touching_components as _shared_split_touching_components,
 )
+from .segmentation.stain import he_stain_mask
 from .tiles.generator import generate_tissue_tiles
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,9 @@ def _entropy_mask(
     gray: np.ndarray | da.Array,
     struct_elem_px: int,
     min_area: int,
+    *,
+    stain_mask: np.ndarray | None = None,
+    pre_open_px: int = 0,
 ) -> np.ndarray:
     """
     Create tissue mask using local entropy.
@@ -106,6 +111,10 @@ def _entropy_mask(
         Structuring element radius.
     min_area : int
         Minimum object area in pixels.
+    stain_mask : np.ndarray, optional
+        Boolean stain-confidence mask to apply before morphology.
+    pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
 
     Returns
     -------
@@ -142,6 +151,11 @@ def _entropy_mask(
     thr = filters.threshold_otsu(ent_np)
     bw = ent_np > thr
 
+    if stain_mask is not None:
+        bw = bw & np.asarray(stain_mask, dtype=bool)
+    if pre_open_px > 0:
+        bw = morphology.opening(bw, footprint=disk(int(pre_open_px)))
+
     # Morphological cleanup
     bw = morphology.binary_closing(bw, footprint=fp)
     bw = ndi.binary_fill_holes(bw)
@@ -155,6 +169,9 @@ def _otsu_mask(
     gray: np.ndarray,
     struct_elem_px: int,
     min_area: int,
+    *,
+    stain_mask: np.ndarray | None = None,
+    pre_open_px: int = 0,
 ) -> np.ndarray:
     """Create tissue mask using global Otsu threshold."""
     # Gaussian blur
@@ -163,6 +180,11 @@ def _otsu_mask(
     # Otsu threshold (tissue is darker than background)
     thr = filters.threshold_otsu(sm)
     bw = sm < thr
+
+    if stain_mask is not None:
+        bw = bw & np.asarray(stain_mask, dtype=bool)
+    if pre_open_px > 0:
+        bw = morphology.opening(bw, footprint=disk(int(pre_open_px)))
 
     # Morphological cleanup
     fp = disk(struct_elem_px)
@@ -246,8 +268,14 @@ def segment_tissue(
     target_long_side: int = 1800,
     min_area_px: int = 3000,
     struct_elem_px: int = 4,
+    stain_gate: bool = False,
+    stain_min_saturation: float = 0.08,
+    stain_min_od: float = 0.35,
+    stain_min_he_signal: float = 0.0,
+    stain_pre_open_px: int = 0,
     split_touching: bool = True,
     r_split: int = 3,
+    keep_top_k: int | None = None,
     diagnostics: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
@@ -265,10 +293,22 @@ def segment_tissue(
         Minimum tissue area in pixels (at thumbnail scale).
     struct_elem_px : int
         Structuring element radius.
+    stain_gate : bool
+        Apply an H&E stain-confidence gate before morphology.
+    stain_min_saturation : float
+        Minimum HSV saturation for stain-confidence gating.
+    stain_min_od : float
+        Minimum summed optical density for stain-confidence gating.
+    stain_min_he_signal : float
+        Optional minimum HED hematoxylin+eosin signal for stain rescue.
+    stain_pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
     split_touching : bool
         Whether to split touching tissue sections.
     r_split : int
         Radius for splitting.
+    keep_top_k : int, optional
+        Keep only the K largest connected components after splitting.
     diagnostics : bool
         Enable diagnostic output.
 
@@ -301,18 +341,40 @@ def segment_tissue(
 
     # Convert to grayscale
     gray = _to_gray(thumb)
+    stain_mask_t = None
+    if stain_gate:
+        stain_mask_t = he_stain_mask(
+            thumb,
+            min_saturation=stain_min_saturation,
+            min_od=stain_min_od,
+            min_he_signal=stain_min_he_signal,
+        )
 
     # Segment based on backend
     if backend == "local-entropy":
-        mask_t = _entropy_mask(gray, struct_elem_scaled, min_area_scaled)
+        mask_t = _entropy_mask(
+            gray,
+            struct_elem_scaled,
+            min_area_scaled,
+            stain_mask=stain_mask_t,
+            pre_open_px=stain_pre_open_px,
+        )
     elif backend == "local-otsu":
-        mask_t = _otsu_mask(gray, struct_elem_scaled, min_area_scaled)
+        mask_t = _otsu_mask(
+            gray,
+            struct_elem_scaled,
+            min_area_scaled,
+            stain_mask=stain_mask_t,
+            pre_open_px=stain_pre_open_px,
+        )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
     # Split touching components
     if split_touching:
         mask_t = _split_touching_components(mask_t, r_split, min_area_scaled)
+
+    mask_t = _shared_keep_largest_components(mask_t, keep_top_k)
 
     # Count components
     labeled, n_components = measure.label(mask_t, return_num=True, connectivity=2)
@@ -324,14 +386,21 @@ def segment_tissue(
         "scale": scale,
         "struct_elem_px": struct_elem_scaled,
         "min_area": min_area_scaled,
+        "stain_gate": stain_gate,
+        "stain_min_saturation": stain_min_saturation,
+        "stain_min_od": stain_min_od,
+        "stain_min_he_signal": stain_min_he_signal,
+        "stain_pre_open_px": stain_pre_open_px,
         "n_components": n_components,
+        "keep_top_k": keep_top_k,
     }
 
     if diagnostics:
         logger.debug(
             "[segmenter] backend=%s size_t=(%d, %d) struct_elem_px=%s min_area=%s "
-            "r_split=%s CCs: %s",
-            backend, Ht, Wt, struct_elem_scaled, min_area_scaled, r_split, n_components
+            "stain_gate=%s r_split=%s CCs: %s",
+            backend, Ht, Wt, struct_elem_scaled, min_area_scaled, stain_gate,
+            r_split, n_components
         )
 
     # Upsample mask to full resolution
@@ -457,8 +526,14 @@ def process_wsi(
         target_long_side=segmentation_config.target_long_side,
         min_area_px=segmentation_config.min_area_px,
         struct_elem_px=segmentation_config.struct_elem_px,
+        stain_gate=segmentation_config.stain_gate,
+        stain_min_saturation=segmentation_config.stain_min_saturation,
+        stain_min_od=segmentation_config.stain_min_od,
+        stain_min_he_signal=segmentation_config.stain_min_he_signal,
+        stain_pre_open_px=segmentation_config.stain_pre_open_px,
         split_touching=segmentation_config.split_touching,
         r_split=segmentation_config.r_split,
+        keep_top_k=segmentation_config.keep_top_k,
         diagnostics=segmentation_config.diagnostics,
     )
 

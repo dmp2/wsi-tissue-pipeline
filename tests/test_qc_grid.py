@@ -252,6 +252,83 @@ def test_run_qc_workflow_falls_back_to_legacy_filename_parsing(temp_dir: Path):
     assert result.artifacts.stats_csv.exists()
 
 
+def test_run_qc_workflow_falls_back_to_processing_metadata(temp_dir: Path):
+    from wsi_pipeline.qc_grid import run_qc_workflow
+
+    input_dir = temp_dir / "process_outputs"
+    input_dir.mkdir()
+    output_dir = input_dir / "_qc_grids"
+
+    tile_a = input_dir / "level_7_Image_00_00.tif"
+    tile_b = input_dir / "level_7_Image_00_01.tif"
+    tile_c = input_dir / "level_7_Image_01_00.tif"
+    _write_tile(tile_a, width=18, height=12, value=60)
+    _write_tile(tile_b, width=20, height=15, value=110)
+    _write_tile(tile_c, width=22, height=16, value=160)
+
+    (input_dir / "level_7_Image_00_metadata.json").write_text(
+        json.dumps(
+            {
+                "input_path": "/data/input/level_7_Image_00.png",
+                "tile_records": [
+                    {
+                        "source_image": "level_7_Image_00.png",
+                        "tile_index_on_source": 0,
+                        "path": str(tile_a),
+                        "width": 18,
+                        "height": 12,
+                    },
+                    {
+                        "source_image": "level_7_Image_00.png",
+                        "tile_index_on_source": 1,
+                        "path": str(tile_b),
+                        "width": 20,
+                        "height": 15,
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (input_dir / "level_7_Image_01_metadata.json").write_text(
+        json.dumps(
+            {
+                "input_path": "/data/input/level_7_Image_01.png",
+                "tile_records": [
+                    {
+                        "source_image": "level_7_Image_01.png",
+                        "tile_index_on_source": 0,
+                        "path": str(tile_c),
+                        "width": 22,
+                        "height": 16,
+                    },
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    result = run_qc_workflow(input_dir, output_dir)
+
+    assert len(result.records) == 3
+    assert result.artifacts.records_manifest is None
+    assert [record.filename for record in result.records] == [
+        "level_7_Image_00_00.tif",
+        "level_7_Image_00_01.tif",
+        "level_7_Image_01_00.tif",
+    ]
+    assert [record.source_image for record in result.records] == [
+        "level_7_Image_00.png",
+        "level_7_Image_00.png",
+        "level_7_Image_01.png",
+    ]
+    assert result.artifacts.master_contact_sheet is not None
+    assert result.artifacts.master_contact_sheet.exists()
+    assert len(result.artifacts.per_slide_grids) == 2
+
+
 def test_build_qc_grids_uses_pil_default_even_when_torch_available(
     monkeypatch,
     temp_dir: Path,

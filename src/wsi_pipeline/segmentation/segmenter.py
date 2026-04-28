@@ -22,8 +22,9 @@ from skimage.morphology import disk
 # Local imports
 from .core import create_thumbnail, to_gray, upsample_mask
 from .entropy import entropy_mask
-from .morphology import split_touching_components
+from .morphology import keep_largest_components, split_touching_components
 from .otsu import otsu_mask
+from .stain import he_stain_mask
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,22 @@ class WSISegmenter:
         Structuring element size in pixels.
     min_area_px : int
         Minimum tissue area in pixels.
+    stain_gate : bool
+        Apply an H&E stain-confidence gate before morphology.
+    stain_min_saturation : float
+        Minimum HSV saturation for stain-confidence gating.
+    stain_min_od : float
+        Minimum summed optical density for stain-confidence gating.
+    stain_min_he_signal : float
+        Optional HED hematoxylin+eosin signal threshold.
+    stain_pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
     split_touching : bool
         Whether to split touching tissue sections.
     r_split : int
         Radius for splitting touching sections.
+    keep_top_k : int, optional
+        Keep only the largest K components after splitting.
     diagnostics : bool
         Enable diagnostic output.
 
@@ -80,16 +93,28 @@ class WSISegmenter:
         target_long_side: int = 1800,
         struct_elem_px: int = 9,
         min_area_px: int = 2000,
+        stain_gate: bool = False,
+        stain_min_saturation: float = 0.08,
+        stain_min_od: float = 0.35,
+        stain_min_he_signal: float = 0.0,
+        stain_pre_open_px: int = 0,
         split_touching: bool = True,
         r_split: int = 3,
+        keep_top_k: int | None = None,
         diagnostics: bool = False,
     ):
         self.backend = backend
         self.target_long_side = int(target_long_side)
         self.struct_elem_px = max(2, int(struct_elem_px))
         self.min_area_px = max(64, int(min_area_px))
+        self.stain_gate = bool(stain_gate)
+        self.stain_min_saturation = float(stain_min_saturation)
+        self.stain_min_od = float(stain_min_od)
+        self.stain_min_he_signal = float(stain_min_he_signal)
+        self.stain_pre_open_px = max(0, int(stain_pre_open_px))
         self.split_touching = bool(split_touching)
         self.r_split = int(r_split)
+        self.keep_top_k = keep_top_k
         self.diagnostics = diagnostics
 
         # Backend checks
@@ -137,6 +162,14 @@ class WSISegmenter:
         # 2) Scale-aware params at thumbnail scale
         struct_r = max(2, int(round(self.struct_elem_px)))
         min_area = max(64, int(round(self.min_area_px)))
+        stain_mask_t = None
+        if self.stain_gate:
+            stain_mask_t = he_stain_mask(
+                thumb,
+                min_saturation=self.stain_min_saturation,
+                min_od=self.stain_min_od,
+                min_he_signal=self.stain_min_he_signal,
+            )
 
         # 3) Compute mask on thumbnail by backend
         if self.backend == "tiatoolbox-otsu":
@@ -161,11 +194,23 @@ class WSISegmenter:
 
         elif self.backend == "local-otsu":
             g = to_gray(thumb)
-            mask_t = otsu_mask(g, struct_r, min_area)
+            mask_t = otsu_mask(
+                g,
+                struct_r,
+                min_area,
+                stain_mask=stain_mask_t,
+                pre_open_px=self.stain_pre_open_px,
+            )
 
         elif self.backend == "local-entropy":
             g = to_gray(thumb)
-            mask_t = entropy_mask(g, struct_r, min_area)
+            mask_t = entropy_mask(
+                g,
+                struct_r,
+                min_area,
+                stain_mask=stain_mask_t,
+                pre_open_px=self.stain_pre_open_px,
+            )
 
         else:
             raise ValueError(f"Unknown backend: {self.backend}")
@@ -174,13 +219,15 @@ class WSISegmenter:
         lbl_b = measure.label(mask_t, connectivity=2).max()
         if self.split_touching:
             mask_t = split_touching_components(mask_t, self.r_split, min_area)
+        mask_t = keep_largest_components(mask_t, self.keep_top_k)
         lbl_a = measure.label(mask_t, connectivity=2).max()
 
         if self.diagnostics:
             logger.debug(
                 "[segmenter] backend=%s size_t=%s struct_elem_px=%s min_area=%s "
-                "r_split=%s CCs: %s->%s",
-                self.backend, mask_t.shape, struct_r, min_area, self.r_split, lbl_b, lbl_a
+                "stain_gate=%s r_split=%s keep_top_k=%s CCs: %s->%s",
+                self.backend, mask_t.shape, struct_r, min_area, self.stain_gate,
+                self.r_split, self.keep_top_k, lbl_b, lbl_a
             )
 
         # 5) Upsample back to full resolution and return
@@ -195,8 +242,14 @@ def segment_mask(
     target_long_side: int = 1800,
     struct_elem_px: int = 9,
     min_area_px: int = 2000,
+    stain_gate: bool = False,
+    stain_min_saturation: float = 0.08,
+    stain_min_od: float = 0.35,
+    stain_min_he_signal: float = 0.0,
+    stain_pre_open_px: int = 0,
     split_touching: bool = True,
     r_split: int = 3,
+    keep_top_k: int | None = None,
     diagnostics: bool = False,
 ) -> np.ndarray:
     """
@@ -216,10 +269,22 @@ def segment_mask(
         Structuring element size.
     min_area_px : int
         Minimum tissue area.
+    stain_gate : bool
+        Apply an H&E stain-confidence gate before morphology.
+    stain_min_saturation : float
+        Minimum HSV saturation for stain-confidence gating.
+    stain_min_od : float
+        Minimum summed optical density for stain-confidence gating.
+    stain_min_he_signal : float
+        Optional HED hematoxylin+eosin signal threshold.
+    stain_pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
     split_touching : bool
         Whether to split touching sections.
     r_split : int
         Split radius.
+    keep_top_k : int, optional
+        Keep only the largest K components after splitting.
     diagnostics : bool
         Enable diagnostics.
 
@@ -233,8 +298,14 @@ def segment_mask(
         target_long_side=target_long_side,
         struct_elem_px=struct_elem_px,
         min_area_px=min_area_px,
+        stain_gate=stain_gate,
+        stain_min_saturation=stain_min_saturation,
+        stain_min_od=stain_min_od,
+        stain_min_he_signal=stain_min_he_signal,
+        stain_pre_open_px=stain_pre_open_px,
         split_touching=split_touching,
         r_split=r_split,
+        keep_top_k=keep_top_k,
         diagnostics=diagnostics,
     )
     return seg(image)
@@ -253,6 +324,11 @@ def make_lowres_mask(
     edge_only: bool = True,
     small_switch: int = 1200,
     keep_top_k: int | None = None,
+    stain_gate: bool = False,
+    stain_min_saturation: float = 0.08,
+    stain_min_od: float = 0.35,
+    stain_min_he_signal: float = 0.0,
+    stain_pre_open_px: int = 0,
     split_touching: bool = True,
     r_split: int = 3,
     diagnostics: bool = False,
@@ -288,6 +364,16 @@ def make_lowres_mask(
         Size threshold below which to combine entropy and intensity.
     keep_top_k : int, optional
         Keep only the K largest components.
+    stain_gate : bool
+        Apply an H&E stain-confidence gate before morphology.
+    stain_min_saturation : float
+        Minimum HSV saturation for stain-confidence gating.
+    stain_min_od : float
+        Minimum summed optical density for stain-confidence gating.
+    stain_min_he_signal : float
+        Optional HED hematoxylin+eosin signal threshold.
+    stain_pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
     split_touching : bool
         Split touching components.
     r_split : int
@@ -343,6 +429,28 @@ def make_lowres_mask(
         bw0 = mask_ent | mask_int
     else:
         bw0 = mask_ent
+
+    if stain_gate:
+        rgb_img = dask_img.compute() if isinstance(dask_img, da.Array) else np.asarray(dask_img)
+        if rgb_img.ndim == 3 and rgb_img.shape[0] in (1, 3) and rgb_img.shape[-1] not in (1, 3):
+            rgb_img = np.moveaxis(rgb_img, 0, -1)
+        stain_mask_np = he_stain_mask(
+            rgb_img,
+            min_saturation=stain_min_saturation,
+            min_od=stain_min_od,
+            min_he_signal=stain_min_he_signal,
+        )
+        bw0 = bw0 & da.from_array(stain_mask_np, chunks=bw0.chunks)
+
+        if stain_pre_open_px > 0:
+            open_r = int(stain_pre_open_px)
+            bw0 = da.map_overlap(
+                lambda x: morphology.opening(x, disk(open_r)),
+                bw0,
+                depth=(open_r, open_r),
+                boundary="reflect",
+                dtype=bool,
+            )
 
     # Morphology (with overlap) to connect edges
     nhood = disk(se_r)
@@ -421,6 +529,11 @@ def make_lowres_mask(
         "W": W,
         "struct_elem_px": se_r,
         "min_area": min_area,
+        "stain_gate": stain_gate,
+        "stain_min_saturation": stain_min_saturation,
+        "stain_min_od": stain_min_od,
+        "stain_min_he_signal": stain_min_he_signal,
+        "stain_pre_open_px": stain_pre_open_px,
         "r_split": r_split,
         "n_before": n_before,
         "n_after": n_after,
@@ -431,9 +544,10 @@ def make_lowres_mask(
 
     if diagnostics:
         logger.debug(
-            "[preprocess] size=(%dx%d) struct_elem_px=%s min_area=%s r_split=%s components: %s -> %s",
-            H, W, se_r, min_area, r_split, n_before, n_after
-            + (f" -> {n_kept}" if keep_top_k else "")
+            "[preprocess] size=(%dx%d) struct_elem_px=%s min_area=%s stain_gate=%s "
+            "r_split=%s components: %s -> %s",
+            H, W, se_r, min_area, stain_gate, r_split, n_before, n_after
+            if not keep_top_k else f"{n_after} -> {n_kept}"
         )
 
     return (bw, diag if return_diag else None)

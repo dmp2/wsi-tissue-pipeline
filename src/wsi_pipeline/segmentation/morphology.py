@@ -109,5 +109,35 @@ def split_touching_components(mask_bool: np.ndarray, r_split: int = 3, min_area:
     return out
 
 
+def keep_largest_components(mask_bool: np.ndarray, keep_top_k: int | None = None) -> np.ndarray:
+    """
+    Keep only the largest connected tissue components.
+
+    This is a safety-net for levels where segmentation admits background
+    fragments after the normal area filter.  It should be used only when the
+    expected number of tissue sections on a slide is known.
+
+    Parameters
+    ----------
+    mask_bool : np.ndarray
+        Boolean tissue mask.
+    keep_top_k : int, optional
+        Number of largest connected components to keep. ``None`` keeps all.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask containing at most ``keep_top_k`` components.
+    """
+    mask_bool = np.asarray(mask_bool, dtype=bool)
+    if keep_top_k is None or keep_top_k <= 0 or not mask_bool.any():
+        return mask_bool
+
+    lbl = measure.label(mask_bool, connectivity=2)
+    props = sorted(measure.regionprops(lbl), key=lambda p: p.area, reverse=True)
+    keep = {p.label for p in props[: int(keep_top_k)]}
+    return np.isin(lbl, list(keep))
+
+
 # Backward compatibility
 _split_touching_components = split_touching_components

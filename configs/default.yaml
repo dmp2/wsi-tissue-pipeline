@@ -16,12 +16,22 @@ segmentation:
   
   # Structuring element size for morphological operations
   struct_elem_px: 5
+
+  # Optional H&E brightfield stain gate before morphology
+  stain_gate: false
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_pre_open_px: 0
   
   # Whether to split touching tissue sections
   split_touching: true
   
-  # Ratio threshold for splitting elongated components
+  # Watershed seed erosion radius for splitting touching components
   r_split: 3
+
+  # Optional safety-net: keep only the largest K components when expected count is known
+  keep_top_k: null
 
 # Tile extraction settings
 tiles:

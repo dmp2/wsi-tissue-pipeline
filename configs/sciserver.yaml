@@ -8,8 +8,14 @@ segmentation:
   target_long_side: 2000
   min_area_px: 500
   struct_elem_px: 5
+  stain_gate: false
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_pre_open_px: 0
   split_touching: true
   r_split: 3
+  keep_top_k: null
 
 tiles:
   # Optimize for server-class hardware

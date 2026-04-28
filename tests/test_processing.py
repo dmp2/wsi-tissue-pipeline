@@ -118,6 +118,79 @@ class TestSegmentation:
         assert info["n_components"] == 0
         assert not mask.any()
 
+    def test_segment_tissue_keep_top_k_keeps_largest_components(self):
+        """Optional safety-net should retain only the largest K components."""
+        from wsi_pipeline.wsi_processing import segment_tissue
+
+        img = np.ones((256, 256, 3), dtype=np.uint8) * 245
+        img[20:90, 20:90] = [80, 60, 100]
+        img[120:190, 20:90] = [80, 60, 100]
+        img[40:65, 180:205] = [80, 60, 100]
+
+        mask, info = segment_tissue(
+            img,
+            backend="local-otsu",
+            target_long_side=256,
+            min_area_px=100,
+            struct_elem_px=2,
+            split_touching=False,
+            keep_top_k=2,
+        )
+
+        assert info["n_components"] == 2
+        assert mask[40:65, 180:205].sum() == 0
+
+    def test_he_stain_gate_rejects_pale_background_like_pixels(self):
+        """H&E stain gate should keep stained tissue and reject pale artifacts."""
+        from wsi_pipeline.segmentation.stain import he_stain_mask
+
+        img = np.ones((64, 96, 3), dtype=np.uint8) * 245
+        img[12:52, 10:35] = [160, 80, 145]   # H&E-like purple tissue
+        img[12:52, 60:85] = [220, 155, 175]  # H&E-like pink tissue
+        img[4:10, 5:90] = [232, 235, 224]    # pale coverslip/background artifact
+
+        mask = he_stain_mask(img, min_saturation=0.08, min_od=0.35)
+
+        assert mask[20:40, 15:30].mean() > 0.95
+        assert mask[20:40, 65:80].mean() > 0.95
+        assert mask[4:10, 5:90].sum() == 0
+
+    def test_stain_gate_can_break_pale_bridge_before_morphology(self):
+        """Stain gate runs before closing so pale bridges do not merge sections."""
+        from skimage import measure
+        from wsi_pipeline.wsi_processing import segment_tissue
+
+        img = np.ones((128, 192, 3), dtype=np.uint8) * 245
+        img[35:95, 25:70] = [150, 75, 140]
+        img[35:95, 120:165] = [220, 145, 175]
+        img[55:70, 70:120] = [180, 180, 180]
+
+        mask_plain, _ = segment_tissue(
+            img,
+            backend="local-otsu",
+            target_long_side=128,
+            min_area_px=100,
+            struct_elem_px=4,
+            split_touching=False,
+        )
+        mask_gated, info_gated = segment_tissue(
+            img,
+            backend="local-otsu",
+            target_long_side=128,
+            min_area_px=100,
+            struct_elem_px=4,
+            stain_gate=True,
+            stain_min_saturation=0.08,
+            stain_min_od=0.35,
+            stain_pre_open_px=1,
+            split_touching=False,
+        )
+
+        assert measure.label(mask_plain, connectivity=2).max() == 1
+        assert info_gated["stain_gate"] is True
+        assert measure.label(mask_gated, connectivity=2).max() == 2
+        assert mask_gated[58:67, 80:110].sum() == 0
+
 
 class TestTileExtraction:
     """Test tile extraction functions."""

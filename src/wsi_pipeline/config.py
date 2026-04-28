@@ -48,6 +48,40 @@ class SegmentationConfig(BaseModel):
         ),
     )
 
+    stain_gate: bool = Field(
+        default=False,
+        description=(
+            "Apply an H&E brightfield stain-confidence gate before morphology. "
+            "Useful for excluding pale background artifacts before closing/filling."
+        ),
+    )
+
+    stain_min_saturation: float = Field(
+        default=0.08, ge=0.0, le=1.0,
+        description="Minimum HSV saturation used by the optional H&E stain gate.",
+    )
+
+    stain_min_od: float = Field(
+        default=0.35, ge=0.0,
+        description="Minimum summed optical density used by the optional H&E stain gate.",
+    )
+
+    stain_min_he_signal: float = Field(
+        default=0.0, ge=0.0,
+        description=(
+            "Optional HED hematoxylin+eosin stain signal threshold that can rescue "
+            "light but color-deconvolution-positive tissue."
+        ),
+    )
+
+    stain_pre_open_px: int = Field(
+        default=0, ge=0, le=20,
+        description=(
+            "Optional opening radius applied after stain gating and before closing. "
+            "Use small values, such as 1, to break wispy pale bridges."
+        ),
+    )
+
     split_touching: bool = Field(
         default=True, description="Whether to split touching tissue sections"
     )
@@ -58,6 +92,15 @@ class SegmentationConfig(BaseModel):
             "Radius (px, at thumbnail scale) used by watershed to split touching tissue sections. "
             "Increase if sections that should be separate are merged; "
             "decrease if single sections are split incorrectly."
+        ),
+    )
+
+    keep_top_k: int | None = Field(
+        default=None, ge=1,
+        description=(
+            "Optional safety-net that keeps only the K largest tissue components "
+            "after segmentation and splitting. Use only when the expected number "
+            "of tissue sections on each slide is known."
         ),
     )
 

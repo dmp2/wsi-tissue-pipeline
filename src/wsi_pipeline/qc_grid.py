@@ -421,6 +421,82 @@ def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecor
     return records
 
 
+def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
+    """
+    Load records from per-slide metadata emitted by ``process_wsi``.
+
+    Notebook 01 writes files like ``level_7_Image_00_00.tif`` plus
+    ``level_7_Image_00_metadata.json`` before any global-index renaming.  These
+    files do not match the legacy renamed-tile pattern, so QC needs this
+    metadata fallback when review happens before artifact deletion/renaming.
+    """
+    records: list[QCRecord] = []
+    metadata_paths = sorted(input_dir.glob("*_metadata.json"))
+    for metadata_path in metadata_paths:
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            logger.warning("Skipping malformed processing metadata %s: %s", metadata_path, exc)
+            continue
+
+        tile_records = payload.get("tile_records") or []
+        if not tile_records:
+            output_paths = payload.get("output_paths") or []
+            tile_records = [
+                {
+                    "path": path,
+                    "source_image": Path(payload.get("input_path", metadata_path.stem)).name,
+                    "tile_index_on_source": idx,
+                }
+                for idx, path in enumerate(output_paths)
+            ]
+
+        for item in tile_records:
+            path = Path(str(item.get("path", "")))
+            if not path.is_absolute():
+                path = input_dir / path
+            if not path.exists() or path.suffix.lower() not in {".tif", ".tiff", ".png", ".jpg", ".jpeg"}:
+                continue
+
+            width = int(item.get("width", 0) or 0)
+            height = int(item.get("height", 0) or 0)
+            if width <= 0 or height <= 0:
+                width, height = _image_size(path)
+
+            records.append(
+                QCRecord(
+                    relative_path=str(path.relative_to(input_dir)),
+                    filename=path.name,
+                    source_image=str(item.get("source_image") or payload.get("input_path") or metadata_path.stem),
+                    tile_index_on_source=int(item.get("tile_index_on_source", 0)),
+                    overall_index=0,
+                    overall_label="",
+                    width=width,
+                    height=height,
+                )
+            )
+
+    records.sort(
+        key=lambda record: (
+            record.source_image,
+            record.tile_index_on_source,
+            record.filename,
+        )
+    )
+    for idx, record in enumerate(records, start=1):
+        records[idx - 1] = QCRecord(
+            relative_path=record.relative_path,
+            filename=record.filename,
+            source_image=record.source_image,
+            tile_index_on_source=record.tile_index_on_source,
+            overall_index=idx,
+            overall_label=f"{idx:04d}",
+            width=record.width,
+            height=record.height,
+        )
+    return records
+
+
 def _load_legacy_qc_records(
     input_dir: Path,
     pattern: re.Pattern | None = None,
@@ -463,6 +539,9 @@ def load_qc_records(
     chosen_manifest = _resolve_manifest_path(input_dir, manifest_path)
     if chosen_manifest is not None:
         return _load_manifest_records(input_dir, chosen_manifest)
+    metadata_records = _load_processing_metadata_records(input_dir)
+    if metadata_records:
+        return metadata_records
     return _load_legacy_qc_records(input_dir, pattern=pattern)
 
 
@@ -627,7 +706,7 @@ def run_qc_workflow(
     output_dir: str | Path,
     manifest_path: str | Path | None = None,
     thumb_size: int = 256,
-    padding: int = 0,
+    padding: int = 1,
     columns: int | str = "auto",
     label_mode: str = "both",
     backend: str = "pil",

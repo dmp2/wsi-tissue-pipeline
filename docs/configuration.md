@@ -45,13 +45,23 @@ segmentation:
   # Structuring element size for morphological operations
   # Larger = smoother boundaries but may merge close sections
   struct_elem_px: 5
+
+  # Optional H&E brightfield stain gate before morphology
+  stain_gate: false
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_pre_open_px: 0
   
   # Whether to attempt splitting touching tissue sections
   split_touching: true
   
-  # Aspect ratio threshold for splitting elongated components
-  # Higher = only split very elongated shapes
+  # Watershed seed erosion radius for splitting touching components
+  # Higher can split stronger bridges, but may fragment real sections
   r_split: 3
+
+  # Optional safety-net when expected tissue count is known
+  keep_top_k: null
 ```
 
 #### Backend Details
@@ -369,8 +379,14 @@ segmentation:
   target_long_side: 2000
   min_area_px: 500
   struct_elem_px: 5
+  stain_gate: false
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_pre_open_px: 0
   split_touching: true
   r_split: 3
+  keep_top_k: null
 
 tiles:
   chunk_size: 4096

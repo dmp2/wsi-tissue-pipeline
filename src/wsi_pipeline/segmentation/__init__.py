@@ -51,10 +51,12 @@ from .morphology import (  # deprecated
     _remove_small_objects,
     _split_touching_components,
     binary_closing,
+    keep_largest_components,
     remove_small_objects,
     split_touching_components,
 )
 from .otsu import _otsu_mask, otsu_mask  # _otsu_mask deprecated
+from .stain import he_stain_mask
 
 # High-level segmenter
 from .segmenter import WSISegmenter, make_lowres_mask, segment_mask
@@ -69,9 +71,11 @@ __all__ = [
     # Algorithms
     "entropy_mask",
     "otsu_mask",
+    "he_stain_mask",
     "remove_small_objects",
     "binary_closing",
     "split_touching_components",
+    "keep_largest_components",
     # High-level
     "WSISegmenter",
     "segment_mask",

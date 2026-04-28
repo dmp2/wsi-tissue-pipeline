@@ -327,8 +327,14 @@ segmentation:
   target_long_side: 1800
   min_area_px: 3000
   struct_elem_px: 4
+  stain_gate: false
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_pre_open_px: 0
   split_touching: true
   r_split: 3
+  keep_top_k: null
 
 output:
   format: "ome-zarr"  # or "tiff"
