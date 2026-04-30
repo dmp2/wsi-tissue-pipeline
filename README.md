@@ -223,6 +223,7 @@ wsi-tissue-pipeline/
 |   |-- 02_quality_control.ipynb
 |   |-- 03_neuroglancer_visualization.ipynb
 |   |-- 04_emlddmm_preparation.ipynb
+|   |-- 05_emlddmm_registration.ipynb
 |   `-- colab_setup.py
 |
 |-- configs/
