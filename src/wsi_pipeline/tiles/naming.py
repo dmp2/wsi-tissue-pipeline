@@ -100,6 +100,7 @@ def _load_tile_metadata(output_dir: Path, pad: int) -> dict[str, dict[str, Any]]
                     "tile_index_on_source": int(record.get("tile_index_on_source", 0)),
                     "width": int(record.get("width", 0)),
                     "height": int(record.get("height", 0)),
+                    "component_qc": record.get("component_qc"),
                 }
                 lookup[path.name] = entry
                 lookup[_strip_overall_suffix(path.name, pad)] = entry
@@ -112,6 +113,7 @@ def _load_tile_metadata(output_dir: Path, pad: int) -> dict[str, dict[str, Any]]
                 "tile_index_on_source": idx,
                 "width": 0,
                 "height": 0,
+                "component_qc": None,
             }
             lookup[path.name] = entry
             lookup[_strip_overall_suffix(path.name, pad)] = entry
@@ -151,6 +153,7 @@ def _build_manifest_record(
         "overall_label": overall_label_text,
         "width": width,
         "height": height,
+        "component_qc": metadata.get("component_qc"),
     }
 
 

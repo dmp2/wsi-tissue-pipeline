@@ -12,6 +12,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -49,9 +50,60 @@ class QCRecord:
     overall_label: str
     width: int
     height: int
+    component_qc: dict[str, Any] | None = None
 
     def path(self, input_dir: str | Path) -> Path:
         return Path(input_dir) / self.relative_path
+
+    @property
+    def artifact_likely(self) -> bool:
+        if not self.component_qc:
+            return False
+        return bool(self.component_qc.get("artifact_likely", False))
+
+    @property
+    def artifact_reason(self) -> str:
+        if not self.component_qc:
+            return ""
+        return str(self.component_qc.get("artifact_reason", ""))
+
+
+def _make_qc_record(**kwargs: Any) -> QCRecord:
+    """
+    Construct a QCRecord, tolerating stale notebook kernels during autoreload.
+
+    IPython can occasionally reload functions while leaving an older dataclass
+    object in module globals.  In that state, the old QCRecord constructor does
+    not accept ``component_qc`` even though the loader function now passes it.
+    """
+    try:
+        return QCRecord(**kwargs)
+    except TypeError as exc:
+        if "component_qc" not in str(exc):
+            raise
+        component_qc = kwargs.pop("component_qc", None)
+        record = QCRecord(**kwargs)
+        object.__setattr__(record, "component_qc", component_qc)
+        return record
+
+
+def _record_component_qc(record: QCRecord) -> dict[str, Any] | None:
+    value = getattr(record, "component_qc", None)
+    return value if isinstance(value, dict) else None
+
+
+def _record_artifact_likely(record: QCRecord) -> bool:
+    component_qc = _record_component_qc(record)
+    if component_qc is None:
+        return False
+    return bool(component_qc.get("artifact_likely", False))
+
+
+def _record_artifact_reason(record: QCRecord) -> str:
+    component_qc = _record_component_qc(record)
+    if component_qc is None:
+        return ""
+    return str(component_qc.get("artifact_reason", ""))
 
 
 @dataclass(frozen=True)
@@ -267,6 +319,19 @@ def annotate_image(
     return img
 
 
+def mark_artifact_image(img: Image.Image) -> Image.Image:
+    """Draw a red border around a likely artifact thumbnail."""
+    img = img.copy()
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+    for offset in range(3):
+        draw.rectangle(
+            [offset, offset, w - 1 - offset, h - 1 - offset],
+            outline=(220, 20, 20),
+        )
+    return img
+
+
 def create_grid_pil(
     images: list[Image.Image],
     columns: int,
@@ -404,7 +469,7 @@ def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecor
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     records = []
     for item in payload.get("records", []):
-        record = QCRecord(
+        record = _make_qc_record(
             relative_path=str(item["relative_path"]),
             filename=str(item["filename"]),
             source_image=str(item["source_image"]),
@@ -413,6 +478,7 @@ def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecor
             overall_label=str(item["overall_label"]),
             width=int(item["width"]),
             height=int(item["height"]),
+            component_qc=item.get("component_qc"),
         )
         if record.path(input_dir).exists():
             records.append(record)
@@ -464,7 +530,7 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
                 width, height = _image_size(path)
 
             records.append(
-                QCRecord(
+                _make_qc_record(
                     relative_path=str(path.relative_to(input_dir)),
                     filename=path.name,
                     source_image=str(item.get("source_image") or payload.get("input_path") or metadata_path.stem),
@@ -473,6 +539,7 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
                     overall_label="",
                     width=width,
                     height=height,
+                    component_qc=item.get("component_qc"),
                 )
             )
 
@@ -484,7 +551,7 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
         )
     )
     for idx, record in enumerate(records, start=1):
-        records[idx - 1] = QCRecord(
+        records[idx - 1] = _make_qc_record(
             relative_path=record.relative_path,
             filename=record.filename,
             source_image=record.source_image,
@@ -493,6 +560,7 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
             overall_label=f"{idx:04d}",
             width=record.width,
             height=record.height,
+            component_qc=_record_component_qc(record),
         )
     return records
 
@@ -508,7 +576,7 @@ def _load_legacy_qc_records(
             continue
         width, height = _image_size(path)
         records.append(
-            QCRecord(
+            _make_qc_record(
                 relative_path=str(path.relative_to(input_dir)),
                 filename=path.name,
                 source_image=_legacy_source_image(parsed),
@@ -573,7 +641,7 @@ def _sorted_groups(records: list[QCRecord]) -> list[tuple[int, str, list[QCRecor
 
 def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataFrame:
     input_dir = Path(input_dir)
-    rows: list[dict[str, str | int | float]] = []
+    rows: list[dict[str, Any]] = []
     for record in records:
         with Image.open(record.path(input_dir)) as img:
             arr = np.asarray(img)
@@ -588,10 +656,21 @@ def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataF
                     "width": img.width,
                     "height": img.height,
                     "area_px": img.width * img.height,
-                    "mean_intensity": float(arr.mean()),
-                    "std_intensity": float(arr.std()),
+                    "image_mean_intensity": float(arr.mean()),
+                    "image_std_intensity": float(arr.std()),
+                    "artifact_likely": _record_artifact_likely(record),
+                    "artifact_reason": _record_artifact_reason(record),
                 }
             )
+            component_qc = _record_component_qc(record)
+            if component_qc:
+                rows[-1].update(
+                    {
+                        key: value
+                        for key, value in component_qc.items()
+                        if key not in {"artifact_likely", "artifact_reason"}
+                    }
+                )
     return pd.DataFrame(rows)
 
 
@@ -609,13 +688,17 @@ def _build_label(
     master: bool = False,
 ) -> str | None:
     if label_mode == "slice":
-        return f"{record.tile_index_on_source:02d}"
+        label = f"{record.tile_index_on_source:02d}"
+        return f"{label}|ART?" if _record_artifact_likely(record) else label
     if label_mode == "overall":
-        return record.overall_label
+        label = record.overall_label
+        return f"{label}|ART?" if _record_artifact_likely(record) else label
     if label_mode == "both":
         if master:
-            return f"s{group_ordinal:02d}:t{record.tile_index_on_source:02d}|g{record.overall_label}"
-        return f"t{record.tile_index_on_source:02d}|g{record.overall_label}"
+            label = f"s{group_ordinal:02d}:t{record.tile_index_on_source:02d}|g{record.overall_label}"
+        else:
+            label = f"t{record.tile_index_on_source:02d}|g{record.overall_label}"
+        return f"{label}|ART?" if _record_artifact_likely(record) else label
     if label_mode == "none":
         return None
     raise ValueError("label_mode must be one of 'slice', 'overall', 'both', or 'none'")
@@ -661,6 +744,8 @@ def render_qc_grids(
                 label = _build_label(record, label_mode)
                 if label:
                     thumb = annotate_image(thumb, label)
+                if _record_artifact_likely(record):
+                    thumb = mark_artifact_image(thumb)
                 thumbs.append(thumb)
 
             grid = _create_grid(
@@ -682,6 +767,8 @@ def render_qc_grids(
                 label = _build_label(record, label_mode, group_ordinal=group_ordinal, master=True)
                 if label:
                     thumb = annotate_image(thumb, label)
+                if _record_artifact_likely(record):
+                    thumb = mark_artifact_image(thumb)
                 all_thumbs.append(thumb)
 
         master = _create_grid(

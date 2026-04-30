@@ -155,6 +155,29 @@ class TestSegmentation:
         assert mask[20:40, 65:80].mean() > 0.95
         assert mask[4:10, 5:90].sum() == 0
 
+    def test_adaptive_od_stain_gate_keeps_low_saturation_tissue(self):
+        """Adaptive OD mode should not require a hand-tuned saturation cutoff."""
+        from wsi_pipeline.segmentation.stain import he_stain_mask
+
+        img = np.ones((64, 96, 3), dtype=np.uint8) * 245
+        img[12:52, 10:35] = [160, 80, 145]
+        img[12:52, 60:85] = [220, 145, 175]
+        img[28:36, 35:60] = [180, 180, 180]  # low-saturation but optically dense bridge
+
+        fixed = he_stain_mask(img, min_saturation=0.08, min_od=0.35)
+        adaptive, info = he_stain_mask(
+            img,
+            mode="adaptive-od",
+            min_od=0.10,
+            od_bg_percentile=0.80,
+            od_mad_multiplier=4.0,
+            return_info=True,
+        )
+
+        assert fixed[28:36, 35:60].sum() == 0
+        assert adaptive[28:36, 35:60].mean() > 0.95
+        assert info["od_threshold"] >= 0.10
+
     def test_stain_gate_can_break_pale_bridge_before_morphology(self):
         """Stain gate runs before closing so pale bridges do not merge sections."""
         from skimage import measure
@@ -333,6 +356,23 @@ class TestProcessWSI:
         # Check that output files exist
         for path in results["output_paths"]:
             assert Path(path).exists()
+
+    def test_process_wsi_can_disable_component_qc(self, sample_image: Path, temp_dir: Path):
+        """Component QC should be optional for compatibility/debugging."""
+        from wsi_pipeline.wsi_processing import process_wsi
+        from wsi_pipeline.config import PipelineConfig
+
+        config = PipelineConfig()
+        config.output.format = "tiff"
+        config.output.generate_qc = False
+        config.mlflow.enabled = False
+        config.segmentation.component_qc_enabled = False
+
+        results = process_wsi(sample_image, temp_dir / "output_no_component_qc", config=config)
+
+        assert results["component_qc"]["enabled"] is False
+        assert results["component_qc"]["records"] == []
+        assert all(record["component_qc"] is None for record in results["tile_records"])
 
     def test_process_wsi_zarr_output(self, sample_image: Path, temp_dir: Path):
         """Test WSI processing with OME-Zarr output."""

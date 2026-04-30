@@ -42,6 +42,18 @@ from .core import (  # deprecated
     to_gray,
     upsample_mask,
 )
+from .appendage import (
+    AppendageRecord,
+    refine_appendages,
+)
+from .component_qc import (
+    ComponentQCMode,
+    ComponentQCProfile,
+    ComponentQCRecord,
+    filter_mask_by_labels,
+    label_components_left_to_right,
+    score_components,
+)
 
 # Segmentation algorithms
 from .entropy import _entropy_mask, entropy_mask  # _entropy_mask deprecated
@@ -56,7 +68,7 @@ from .morphology import (  # deprecated
     split_touching_components,
 )
 from .otsu import _otsu_mask, otsu_mask  # _otsu_mask deprecated
-from .stain import he_stain_mask
+from .stain import HEFeatures, he_features, he_stain_mask
 
 # High-level segmenter
 from .segmenter import WSISegmenter, make_lowres_mask, segment_mask
@@ -72,6 +84,16 @@ __all__ = [
     "entropy_mask",
     "otsu_mask",
     "he_stain_mask",
+    "HEFeatures",
+    "he_features",
+    "AppendageRecord",
+    "refine_appendages",
+    "ComponentQCMode",
+    "ComponentQCProfile",
+    "ComponentQCRecord",
+    "score_components",
+    "filter_mask_by_labels",
+    "label_components_left_to_right",
     "remove_small_objects",
     "binary_closing",
     "split_touching_components",

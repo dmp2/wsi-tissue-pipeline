@@ -49,6 +49,9 @@ def test_process_wsi_metadata_includes_tile_records(sample_image: Path, temp_dir
     assert Path(first_record["path"]).exists()
     assert first_record["width"] > 0
     assert first_record["height"] > 0
+    assert "component_qc" in first_record
+    assert "component_qc" in result
+    assert result["component_qc"]["mode"] == "annotate"
 
     metadata_path = output_dir / f"{sample_image.stem}_metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
@@ -86,6 +89,11 @@ def test_rename_outputs_writes_manifest_and_excludes_deleted(temp_dir: Path):
                 "path": str(tile_b),
                 "width": 30,
                 "height": 22,
+                "component_qc": {
+                    "component_area_px": 120,
+                    "artifact_likely": True,
+                    "artifact_reason": "thin_low_stain_component",
+                },
             },
             {
                 "source_image": "specimen_A.jpg",
@@ -127,6 +135,8 @@ def test_rename_outputs_writes_manifest_and_excludes_deleted(temp_dir: Path):
         "specimen_A.jpg",
         "specimen_A.jpg",
     ]
+    assert manifest["records"][0]["component_qc"] is None
+    assert manifest["records"][1]["component_qc"]["artifact_likely"] is True
 
 
 def test_run_qc_workflow_consumes_manifest_and_writes_artifacts(temp_dir: Path):
@@ -165,6 +175,12 @@ def test_run_qc_workflow_consumes_manifest_and_writes_artifacts(temp_dir: Path):
                 "overall_label": "0001",
                 "width": 20,
                 "height": 15,
+                "component_qc": {
+                    "component_area_px": 42,
+                    "aspect_ratio": 12.0,
+                    "artifact_likely": True,
+                    "artifact_reason": "thin_low_stain_component",
+                },
             },
             {
                 "relative_path": tile_c.name,
@@ -191,10 +207,16 @@ def test_run_qc_workflow_consumes_manifest_and_writes_artifacts(temp_dir: Path):
     ]
     assert result.artifacts.stats_csv is not None
     assert result.artifacts.stats_csv.exists()
+    assert result.records[1].artifact_likely
+    assert result.records[1].artifact_reason == "thin_low_stain_component"
 
     stats_df = pd.read_csv(result.artifacts.stats_csv)
     assert list(stats_df["source_image"]) == ["slide_b", "slide_a", "slide_b"]
     assert set(stats_df["filename"]) == {tile_a.name, tile_b.name, tile_c.name}
+    beta_stats = stats_df.loc[stats_df["filename"] == tile_b.name].iloc[0]
+    assert bool(beta_stats["artifact_likely"])
+    assert beta_stats["artifact_reason"] == "thin_low_stain_component"
+    assert beta_stats["component_area_px"] == 42
 
 
 def test_sorted_groups_follow_overall_index_instead_of_lexicographic_source_name():
@@ -284,6 +306,11 @@ def test_run_qc_workflow_falls_back_to_processing_metadata(temp_dir: Path):
                         "path": str(tile_b),
                         "width": 20,
                         "height": 15,
+                        "component_qc": {
+                            "component_area_px": 56,
+                            "artifact_likely": True,
+                            "artifact_reason": "edge_strip",
+                        },
                     },
                 ],
             },
@@ -324,6 +351,8 @@ def test_run_qc_workflow_falls_back_to_processing_metadata(temp_dir: Path):
         "level_7_Image_00.png",
         "level_7_Image_01.png",
     ]
+    assert result.records[1].artifact_likely
+    assert result.records[1].artifact_reason == "edge_strip"
     assert result.artifacts.master_contact_sheet is not None
     assert result.artifacts.master_contact_sheet.exists()
     assert len(result.artifacts.per_slide_grids) == 2

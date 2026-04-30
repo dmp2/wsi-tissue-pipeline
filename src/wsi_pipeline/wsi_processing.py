@@ -24,6 +24,8 @@ from .segmentation.core import (
     create_thumbnail as _shared_create_thumbnail,
     upsample_mask as _shared_upsample_mask,
 )
+from .segmentation.appendage import refine_appendages
+from .segmentation.component_qc import filter_mask_by_labels, score_components
 from .segmentation.morphology import (
     keep_largest_components as _shared_keep_largest_components,
     split_touching_components as _shared_split_touching_components,
@@ -269,13 +271,19 @@ def segment_tissue(
     min_area_px: int = 3000,
     struct_elem_px: int = 4,
     stain_gate: bool = False,
+    stain_gate_mode: str = "fixed",
     stain_min_saturation: float = 0.08,
     stain_min_od: float = 0.35,
     stain_min_he_signal: float = 0.0,
+    stain_od_bg_percentile: float = 0.80,
+    stain_od_mad_multiplier: float = 4.0,
     stain_pre_open_px: int = 0,
     split_touching: bool = True,
     r_split: int = 3,
     keep_top_k: int | None = None,
+    appendage_refinement_enabled: bool = False,
+    appendage_refinement_mode: str = "trim",
+    appendage_refinement_profile: str = "he_sections",
     diagnostics: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
@@ -295,12 +303,18 @@ def segment_tissue(
         Structuring element radius.
     stain_gate : bool
         Apply an H&E stain-confidence gate before morphology.
+    stain_gate_mode : str
+        H&E gate mode: "fixed", "adaptive-od", or "adaptive-he".
     stain_min_saturation : float
-        Minimum HSV saturation for stain-confidence gating.
+        Minimum HSV saturation for fixed stain-confidence gating.
     stain_min_od : float
-        Minimum summed optical density for stain-confidence gating.
+        Minimum summed optical density, or adaptive mode floor.
     stain_min_he_signal : float
         Optional minimum HED hematoxylin+eosin signal for stain rescue.
+    stain_od_bg_percentile : float
+        Brightness percentile for adaptive background optical-density estimation.
+    stain_od_mad_multiplier : float
+        Robust MAD multiplier for adaptive optical-density gating.
     stain_pre_open_px : int
         Optional opening radius applied after stain gating and before closing.
     split_touching : bool
@@ -309,6 +323,12 @@ def segment_tissue(
         Radius for splitting.
     keep_top_k : int, optional
         Keep only the K largest connected components after splitting.
+    appendage_refinement_enabled : bool
+        Trim or annotate weakly stained peripheral appendages before tile extraction.
+    appendage_refinement_mode : str
+        Appendage refinement mode: "trim" or "annotate".
+    appendage_refinement_profile : str
+        Appendage refinement profile. Currently only "he_sections" is supported.
     diagnostics : bool
         Enable diagnostic output.
 
@@ -342,12 +362,17 @@ def segment_tissue(
     # Convert to grayscale
     gray = _to_gray(thumb)
     stain_mask_t = None
+    stain_info: dict[str, Any] = {}
     if stain_gate:
-        stain_mask_t = he_stain_mask(
+        stain_mask_t, stain_info = he_stain_mask(
             thumb,
+            mode=stain_gate_mode,
             min_saturation=stain_min_saturation,
             min_od=stain_min_od,
             min_he_signal=stain_min_he_signal,
+            od_bg_percentile=stain_od_bg_percentile,
+            od_mad_multiplier=stain_od_mad_multiplier,
+            return_info=True,
         )
 
     # Segment based on backend
@@ -374,6 +399,28 @@ def segment_tissue(
     if split_touching:
         mask_t = _split_touching_components(mask_t, r_split, min_area_scaled)
 
+    appendage_info: dict[str, Any] = {
+        "enabled": appendage_refinement_enabled,
+        "mode": appendage_refinement_mode,
+        "profile": appendage_refinement_profile,
+        "n_appendages_flagged": 0,
+        "flagged_area_px": 0,
+        "n_appendages_trimmed": 0,
+        "trimmed_area_px": 0,
+        "trimmed_fraction": 0.0,
+        "appendage_reason": "",
+        "records": [],
+    }
+    if appendage_refinement_enabled:
+        mask_t, appendage_info = refine_appendages(
+            thumb,
+            mask_t,
+            mode=appendage_refinement_mode,
+            profile=appendage_refinement_profile,
+            min_area_px=min_area_scaled,
+            he_mask=stain_mask_t if stain_gate and stain_gate_mode == "adaptive-he" else None,
+        )
+
     mask_t = _shared_keep_largest_components(mask_t, keep_top_k)
 
     # Count components
@@ -387,10 +434,16 @@ def segment_tissue(
         "struct_elem_px": struct_elem_scaled,
         "min_area": min_area_scaled,
         "stain_gate": stain_gate,
+        "stain_gate_mode": stain_gate_mode,
         "stain_min_saturation": stain_min_saturation,
         "stain_min_od": stain_min_od,
         "stain_min_he_signal": stain_min_he_signal,
+        "stain_od_bg_percentile": stain_od_bg_percentile,
+        "stain_od_mad_multiplier": stain_od_mad_multiplier,
+        "stain_od_threshold": stain_info.get("od_threshold"),
+        "stain_he_threshold": stain_info.get("he_threshold"),
         "stain_pre_open_px": stain_pre_open_px,
+        "appendage_refinement": appendage_info,
         "n_components": n_components,
         "keep_top_k": keep_top_k,
     }
@@ -527,15 +580,52 @@ def process_wsi(
         min_area_px=segmentation_config.min_area_px,
         struct_elem_px=segmentation_config.struct_elem_px,
         stain_gate=segmentation_config.stain_gate,
+        stain_gate_mode=segmentation_config.stain_gate_mode,
         stain_min_saturation=segmentation_config.stain_min_saturation,
         stain_min_od=segmentation_config.stain_min_od,
         stain_min_he_signal=segmentation_config.stain_min_he_signal,
+        stain_od_bg_percentile=segmentation_config.stain_od_bg_percentile,
+        stain_od_mad_multiplier=segmentation_config.stain_od_mad_multiplier,
         stain_pre_open_px=segmentation_config.stain_pre_open_px,
         split_touching=segmentation_config.split_touching,
         r_split=segmentation_config.r_split,
         keep_top_k=segmentation_config.keep_top_k,
+        appendage_refinement_enabled=segmentation_config.appendage_refinement_enabled,
+        appendage_refinement_mode=segmentation_config.appendage_refinement_mode,
+        appendage_refinement_profile=segmentation_config.appendage_refinement_profile,
         diagnostics=segmentation_config.diagnostics,
     )
+
+    component_qc_records: list[dict[str, Any]] = []
+    component_qc_by_tile: dict[int, dict[str, Any]] = {}
+    if segmentation_config.component_qc_enabled:
+        component_qc_records = [
+            record.to_dict()
+            for record in score_components(
+                img,
+                mask,
+                profile=segmentation_config.component_qc_profile,
+            )
+        ]
+
+        if segmentation_config.component_qc_mode == "drop_artifacts":
+            labels_to_keep = {
+                int(record["component_label"])
+                for record in component_qc_records
+                if not bool(record["artifact_likely"])
+            }
+            mask = filter_mask_by_labels(mask, labels_to_keep)
+            component_qc_records = [
+                record for record in component_qc_records
+                if int(record["component_label"]) in labels_to_keep
+            ]
+            for new_idx, record in enumerate(component_qc_records):
+                record["tile_index_on_source"] = new_idx
+
+        component_qc_by_tile = {
+            int(record["tile_index_on_source"]): record
+            for record in component_qc_records
+        }
 
     # Extract tiles
     tiles = extract_tissue_tiles(
@@ -577,6 +667,7 @@ def process_wsi(
                 "path": str(output_path),
                 "width": int(tile_np.shape[1]),
                 "height": int(tile_np.shape[0]),
+                "component_qc": component_qc_by_tile.get(i),
             }
         )
 
@@ -586,6 +677,13 @@ def process_wsi(
         "output_dir": str(output_dir),
         "n_tiles": len(tiles),
         "segmentation": seg_info,
+        "appendage_refinement": seg_info.get("appendage_refinement"),
+        "component_qc": {
+            "enabled": segmentation_config.component_qc_enabled,
+            "mode": segmentation_config.component_qc_mode,
+            "profile": segmentation_config.component_qc_profile,
+            "records": component_qc_records,
+        },
         "output_paths": [str(p) for p in output_paths],
         "tile_records": tile_records,
     }

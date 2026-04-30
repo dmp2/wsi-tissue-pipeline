@@ -48,9 +48,12 @@ segmentation:
 
   # Optional H&E brightfield stain gate before morphology
   stain_gate: false
+  stain_gate_mode: "fixed"  # or "adaptive-od"/"adaptive-he" for H&E datasets
   stain_min_saturation: 0.08
   stain_min_od: 0.35
   stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
   stain_pre_open_px: 0
   
   # Whether to attempt splitting touching tissue sections
@@ -62,6 +65,16 @@ segmentation:
 
   # Optional safety-net when expected tissue count is known
   keep_top_k: null
+
+  # Optional H&E-aware cleanup for low-stain peripheral appendages
+  appendage_refinement_enabled: false
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+
+  # Component-level artifact QC after segmentation
+  component_qc_enabled: true
+  component_qc_mode: "annotate"
+  component_qc_profile: "he_sections"
 ```
 
 #### Backend Details
@@ -380,13 +393,22 @@ segmentation:
   min_area_px: 500
   struct_elem_px: 5
   stain_gate: false
+  stain_gate_mode: "fixed"
   stain_min_saturation: 0.08
   stain_min_od: 0.35
   stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
   stain_pre_open_px: 0
   split_touching: true
   r_split: 3
   keep_top_k: null
+  appendage_refinement_enabled: false
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+  component_qc_enabled: true
+  component_qc_mode: "annotate"
+  component_qc_profile: "he_sections"
 
 tiles:
   chunk_size: 4096
