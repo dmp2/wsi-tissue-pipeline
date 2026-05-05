@@ -1,0 +1,49 @@
+# Constraint-compatible companion to requirements.txt.
+# Use this with pip -c for ad hoc optional installs. requirements.txt contains
+# extras such as dask[array,distributed], which pip does not accept in a
+# constraints file.
+
+setuptools>=61.0
+
+# Core scientific computing
+numpy>=1.24.0
+scipy>=1.10.0
+scikit-image>=0.21.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+tinybrain>=1.3.0
+
+# Image I/O and formats
+tifffile>=2024.1.30
+imageio>=2.31.0
+zarr>=2.16.0
+ngff-zarr>=0.4.0
+tensorstore>=0.1.45
+numcodecs>=0.12.0
+h5py>=3.10
+nibabel>=5.0
+
+# Dask for parallel computing
+dask>=2024.1.0
+distributed>=2024.1.0
+dask-image>=2024.1.0
+
+# Configuration and CLI
+pyyaml>=6.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+python-dotenv>=1.0.0
+click>=8.1.0
+rich>=13.0.0
+
+# MLflow for experiment tracking
+mlflow>=2.10.0
+
+# Utilities
+tqdm>=4.65.0
+pandas>=2.0.0
+
+# Optional PyTorch bounds. Install CPU/GPU wheels explicitly from the PyTorch
+# index when running EM-LDDMM locally.
+torch>=2.0.0,<2.11
+torchvision>=0.15.0,<0.26

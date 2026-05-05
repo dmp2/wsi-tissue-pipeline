@@ -548,7 +548,9 @@ def set_up_hist_for_emlddmm(config: dict) -> None:
             "The 'histsetup' module from the 'emlddmm' package is required "
             "for set_up_hist_for_emlddmm(). Set it up with:\n"
             "  git clone https://github.com/twardlab/emlddmm.git ../emlddmm\n"
-            "  pip install -r ../emlddmm/requirements.txt\n"
+            '  python -m pip install -c constraints.txt "h5py>=3.10" "nibabel>=5.0"\n'
+            "  python -m pip install --index-url https://download.pytorch.org/whl/cpu "
+            '"torch==2.10.0+cpu"\n'
             "  export PYTHONPATH=\"$(cd ../emlddmm && pwd):${PYTHONPATH}\"\n"
             "or add it to sys.path manually."
         ) from err

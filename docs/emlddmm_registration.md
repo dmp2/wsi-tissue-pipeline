@@ -91,7 +91,7 @@ Orientation-derived initialization:
 
 Resolution order for `transformation_graph_v01.py`:
 1. `--transformation-graph-script`
-2. installed external `emlddmm` package
+2. external `emlddmm` checkout on `PYTHONPATH`
 3. workspace-local development fallback
 
 Important:
