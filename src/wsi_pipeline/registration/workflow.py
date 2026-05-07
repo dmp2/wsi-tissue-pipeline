@@ -509,6 +509,7 @@ def _build_self_alignment_kwargs(config: EmlddmmWorkflowConfig) -> dict[str, Any
         "draw": config.self_alignment.draw,
         "n_steps": config.self_alignment.n_steps,
         "eA2d": config.self_alignment.eA2d,
+        "dtype": "float32",
     }
     kwargs.update(config.self_alignment.extra_kwargs)
     return kwargs

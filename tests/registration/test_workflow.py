@@ -32,6 +32,7 @@ class FakeBackend:
 
     def __init__(self) -> None:
         self.last_multiscale_kwargs = None
+        self.last_self_alignment_kwargs = None
         self.module = SimpleNamespace(__file__=__file__)
 
     def read_data(self, path):
@@ -54,6 +55,7 @@ class FakeBackend:
         return x, images, "slice_dataset", ["red", "mask"]
 
     def atlas_free_reconstruction(self, *, xJ, J, W, **kwargs):
+        self.last_self_alignment_kwargs = kwargs
         A2d = np.repeat(np.eye(3, dtype=np.float32)[None], J.shape[1], axis=0)
         return {"A2d": A2d, "I": np.asarray(J), "Jr": np.asarray(J)}
 
@@ -270,6 +272,26 @@ def test_workflow_dry_run_writes_plan_and_summary_only(tmp_path):
     assert plan["pre_resampling_plan"]["policy"] == "sectioned-stack"
     assert "target_downsampling" in plan
     assert "atlas_downsampling" in plan
+
+
+def test_workflow_self_alignment_defaults_to_float32_backend_dtype(tmp_path):
+    backend = FakeBackend()
+
+    workflow_module.run_emlddmm_workflow(
+        dataset_root=tmp_path,
+        target_source=tmp_path,
+        target_source_format="prepared-dir",
+        registration_output=tmp_path / "emlddmm",
+        backend=backend,
+    )
+
+    stage_config = json.loads(
+        (tmp_path / "emlddmm" / "self_alignment" / "self_alignment_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert backend.last_self_alignment_kwargs["dtype"] == "float32"
+    assert stage_config["dtype"] == "float32"
 
 
 def test_workflow_rejects_label_without_atlas(tmp_path):
