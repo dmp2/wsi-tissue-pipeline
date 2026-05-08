@@ -87,6 +87,7 @@ def _validate_pair_registration_config(config):
     _validate_unsupported_2d_pair_option("local_contrast", config.get("local_contrast"))
     _validate_unsupported_2d_pair_option("up_vector", config.get("up_vector"))
     _validate_no_affine_pair_config(config)
+    _validate_out_of_plane_pair_config(config)
 
 
 def _validate_zero_schedule(name, value):
@@ -117,6 +118,26 @@ def _validate_false_schedule(name, value):
     for entry in entries:
         if entry not in {False, None, 0}:
             raise ValueError(f"{name} must be false for between-slice upsampling; got {value!r}")
+
+
+def _validate_out_of_plane_pair_config(config):
+    value = config.get("out_of_plane")
+    if value is None:
+        return
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    entries = list(value) if isinstance(value, (list, tuple)) else [value]
+    if all(entry is True or entry == 1 for entry in entries):
+        return
+    if any(entry is False or entry == 0 for entry in entries):
+        raise ValueError(
+            "out_of_plane=False is not supported for between-slice upsampling; "
+            "the synthetic 3D backend solve uses out_of_plane=True while affine "
+            "and slice matching remain disabled"
+        )
+    raise ValueError(
+        f"out_of_plane must be true or unset for between-slice upsampling; got {value!r}"
+    )
 
 
 def _validate_identity_matrix(name, value, size):

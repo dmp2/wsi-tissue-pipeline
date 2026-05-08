@@ -163,7 +163,7 @@ def _promote_2d_pair_config_for_backend(config, dtype):
         backend_config.get("downJ", [1, 1]),
         1,
     )
-    backend_config.setdefault("out_of_plane", False)
+    backend_config["out_of_plane"] = True
     backend_config.setdefault("dtype", dtype)
     backend_config["A"] = torch.eye(4, dtype=dtype)
     backend_config["A2d"] = None

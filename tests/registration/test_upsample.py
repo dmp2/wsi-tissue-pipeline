@@ -392,6 +392,20 @@ def test_pair_registration_rejects_affine_settings(config):
         )
 
 
+def test_pair_registration_rejects_out_of_plane_false():
+    xJ = _axes(np.array([0.0, 1.0, 2.0], dtype=np.float32))
+    J = np.zeros((1, 3, 2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="out_of_plane=False is not supported"):
+        upsample_module.upsample_between_slices(
+            xJ,
+            J,
+            mode="seg",
+            config={"nt": 2, "out_of_plane": False},
+            parallel=False,
+        )
+
+
 def test_symmetric_helper_returns_both_jacobian_keys(monkeypatch):
     nt = 4
 
@@ -453,7 +467,7 @@ def test_symmetric_helper_passes_coordinate_axes_as_tuples(monkeypatch):
         assert tuple(kwargs["I"].shape) == (1, 2, 3, 4)
         assert kwargs["downI"] == [1, 1, 1]
         assert kwargs["downJ"] == [1, 1, 1]
-        assert kwargs["out_of_plane"] is False
+        assert kwargs["out_of_plane"] is True
         assert kwargs["eA"] == 0.0
         assert kwargs["eA2d"] == 0.0
         assert kwargs["slice_matching"] is False
