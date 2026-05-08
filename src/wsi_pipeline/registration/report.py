@@ -15,6 +15,28 @@ logger = logging.getLogger(__name__)
 
 _IMAGE_LIMIT = 24
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+_SELF_ALIGNMENT_CAPTIONS = {
+    "input_target_overview.png": (
+        "Input target before self-alignment. Tiles show evenly spaced present z-slices; "
+        "channels are averaged and contrast is normalized per tile."
+    ),
+    "registered_target_overview.png": (
+        "Target after atlas-free self-alignment. Compare slice-to-slice continuity against "
+        "the input target montage."
+    ),
+    "atlas_free_template_overview.png": (
+        "Atlas-free reconstructed template produced by self-alignment, shown on the target grid."
+    ),
+}
+_UPSAMPLING_CAPTIONS = {
+    "filled_volume_overview.png": (
+        "Between-slice upsampled target volume. Tiles show evenly spaced z-slices from the "
+        "filled stack."
+    ),
+    "nearest_slice_reference_overview.png": (
+        "Nearest-slice reference used for upsampling QC, shown for comparison with the filled stack."
+    ),
+}
 
 
 def _relative_to_root(path: str | Path | None, root: Path) -> str | None:
@@ -54,6 +76,14 @@ def _upsampling_candidates(stage_dir: Path) -> list[Path]:
     ]
 
 
+def _image_caption(stage_name: str, path: Path) -> str:
+    if stage_name == "self_alignment":
+        return _SELF_ALIGNMENT_CAPTIONS.get(path.name, path.stem.replace("_", " "))
+    if stage_name == "upsampling":
+        return _UPSAMPLING_CAPTIONS.get(path.name, path.stem.replace("_", " "))
+    return path.stem.replace("_", " ")
+
+
 def _discover_stage_images(stage_name: str, stage_dir: Path, root: Path) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     if stage_name == "self_alignment":
@@ -82,7 +112,7 @@ def _discover_stage_images(stage_name: str, stage_dir: Path, root: Path) -> tupl
         {
             "path": _relative_to_root(path, root),
             "name": path.name,
-            "caption": path.stem.replace("_", " "),
+            "caption": _image_caption(stage_name, path),
         }
         for path in selected
     ]

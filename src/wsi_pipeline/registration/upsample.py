@@ -27,9 +27,143 @@ def _validate_and_reshape_jacobian_time_series(series, name):
     return series
 
 
+def _schedule_entries(value):
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if value is None:
+        return [None]
+    if not isinstance(value, (list, tuple)):
+        return [value]
+    if len(value) == 0:
+        return []
+    if any(isinstance(entry, (list, tuple, np.ndarray)) or entry is None for entry in value):
+        return [entry.tolist() if isinstance(entry, np.ndarray) else entry for entry in value]
+    return [list(value)]
+
+
+def _validate_2d_downsampling_config(name, value):
+    if value is None:
+        return
+    for entry in _schedule_entries(value):
+        if entry is None:
+            continue
+        if isinstance(entry, np.ndarray):
+            entry = entry.tolist()
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            raise ValueError(
+                f"{name} for between-slice pair registration must use 2D [y, x] "
+                f"entries; got {value!r}"
+            )
+        for factor in entry:
+            try:
+                numeric_factor = float(factor)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"{name} entries must contain positive integer downsampling factors; "
+                    f"got {value!r}"
+                ) from exc
+            if not numeric_factor.is_integer() or numeric_factor < 1:
+                raise ValueError(
+                    f"{name} entries must contain positive integer downsampling factors; "
+                    f"got {value!r}"
+                )
+
+
+def _validate_unsupported_2d_pair_option(name, value):
+    if value is None:
+        return
+    for entry in _schedule_entries(value):
+        if entry is None:
+            continue
+        raise ValueError(
+            f"{name} is not supported for 2D between-slice pair registration; "
+            f"leave it unset or use [None], got {value!r}"
+        )
+
+
+def _validate_pair_registration_config(config):
+    _validate_2d_downsampling_config("downI", config.get("downI"))
+    _validate_2d_downsampling_config("downJ", config.get("downJ"))
+    _validate_unsupported_2d_pair_option("local_contrast", config.get("local_contrast"))
+    _validate_unsupported_2d_pair_option("up_vector", config.get("up_vector"))
+    _validate_no_affine_pair_config(config)
+
+
+def _validate_zero_schedule(name, value):
+    if value is None:
+        return
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    entries = list(value) if isinstance(value, (list, tuple)) else [value]
+    for entry in entries:
+        if entry is None:
+            continue
+        try:
+            numeric_entry = float(entry)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{name} must be zero for between-slice upsampling; got {value!r}"
+            ) from exc
+        if numeric_entry != 0.0:
+            raise ValueError(f"{name} must be zero for between-slice upsampling; got {value!r}")
+
+
+def _validate_false_schedule(name, value):
+    if value is None:
+        return
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    entries = list(value) if isinstance(value, (list, tuple)) else [value]
+    for entry in entries:
+        if entry not in {False, None, 0}:
+            raise ValueError(f"{name} must be false for between-slice upsampling; got {value!r}")
+
+
+def _validate_identity_matrix(name, value, size):
+    if value is None:
+        return
+    matrix = np.asarray(value, dtype=np.float32)
+    identity = np.eye(size, dtype=np.float32)
+    if matrix.shape == (size, size):
+        is_identity = np.allclose(matrix, identity)
+    elif matrix.ndim == 3 and matrix.shape[1:] == (size, size):
+        is_identity = all(np.allclose(mat, identity) for mat in matrix)
+    else:
+        is_identity = False
+    if not is_identity:
+        raise ValueError(
+            f"{name} must be None or identity for between-slice upsampling; got shape {matrix.shape}"
+        )
+
+
+def _validate_no_affine_pair_config(config):
+    _validate_zero_schedule("eA", config.get("eA"))
+    _validate_zero_schedule("eA2d", config.get("eA2d"))
+    _validate_zero_schedule("Amode", config.get("Amode"))
+    _validate_false_schedule("slice_matching", config.get("slice_matching"))
+    _validate_identity_matrix("A", config.get("A"), 4)
+    _validate_identity_matrix("A2d", config.get("A2d"), 3)
+
+
+def _normalize_pair_registration_config(config):
+    normalized = dict(config)
+    normalized.setdefault("downI", [[1, 1]])
+    normalized.setdefault("downJ", [[1, 1]])
+    normalized.setdefault("local_contrast", [None])
+    normalized.setdefault("up_vector", [None])
+    normalized.setdefault("dtype", "float32")
+    normalized.setdefault("A", np.eye(4, dtype=np.float32))
+    normalized.setdefault("A2d", None)
+    normalized.setdefault("Amode", 0)
+    normalized.setdefault("eA", [0.0])
+    normalized.setdefault("eA2d", [0.0])
+    normalized.setdefault("slice_matching", [False])
+    return normalized
+
+
 def _register_pair(ind0, ind1, xJ, J, W, config):
     """Register a pair of observed slices and cache time-resolved trajectories."""
-    xy_axes = [np.asarray(xJ[1]), np.asarray(xJ[2])]
+    xy_axes = (np.asarray(xJ[1]), np.asarray(xJ[2]))
     I0 = np.asarray(J[:, ind0], dtype=np.float32)
     I1 = np.asarray(J[:, ind1], dtype=np.float32)
     W0 = None if W is None else np.asarray(W[ind0], dtype=np.float32)
@@ -89,6 +223,11 @@ def _validate_inputs(xJ, J, W, mode, config):
         raise ValueError(
             "xJ axis lengths must match J spatial dimensions "
             f"({len(z_axis)}, {len(y_axis)}, {len(x_axis)}) vs {J.shape[1:]}"
+        )
+    if len(y_axis) < 2 or len(x_axis) < 2:
+        raise ValueError(
+            "2D between-slice pair registration requires y and x axes with at least "
+            f"two points; got y={len(y_axis)}, x={len(x_axis)} for J shape {J.shape}"
         )
 
     if W is not None:
@@ -174,6 +313,8 @@ def upsample_between_slices(
     """
     _ = slice_spacing, n_resample, tissue_idx
     J, W = _validate_inputs(xJ, J, W, mode, config)
+    config = _normalize_pair_registration_config(config)
+    _validate_pair_registration_config(config)
 
     z_axis = np.asarray(xJ[0], dtype=np.float32)
     nt = int(config["nt"])

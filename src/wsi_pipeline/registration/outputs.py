@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from .backend import EmlddmmBackend
 from .targets import EmlddmmTarget
@@ -133,8 +133,34 @@ def _normalize_slice(slice_2d: np.ndarray) -> np.ndarray:
     return (out * 255.0).round().astype(np.uint8)
 
 
-def _volume_montage(volume: np.ndarray, *, present_mask: np.ndarray | None = None) -> Image.Image:
-    """Build a small montage over evenly spaced z slices."""
+def _text_size(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> tuple[int, int]:
+    """Return rendered text size across supported Pillow versions."""
+
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+
+def _draw_centered_text(
+    draw: ImageDraw.ImageDraw,
+    *,
+    center_x: int,
+    y: int,
+    text: str,
+    font: ImageFont.ImageFont,
+    fill: tuple[int, int, int] = (32, 32, 32),
+) -> None:
+    width, _ = _text_size(draw, text, font)
+    draw.text((center_x - width // 2, y), text, font=font, fill=fill)
+
+
+def _volume_montage(
+    volume: np.ndarray,
+    *,
+    present_mask: np.ndarray | None = None,
+    title: str | None = None,
+    note: str = "channel mean, contrast normalized per tile",
+) -> Image.Image:
+    """Build a labeled montage over evenly spaced z slices."""
 
     if volume.ndim != 4:
         raise ValueError(f"Expected channel-first 4D volume, got {volume.shape}")
@@ -153,8 +179,95 @@ def _volume_montage(volume: np.ndarray, *, present_mask: np.ndarray | None = Non
     for idx in selected:
         slice_2d = np.mean(channel_first[:, idx], axis=0)
         tiles.append(_normalize_slice(slice_2d))
-    montage = np.concatenate(tiles, axis=1)
-    return Image.fromarray(montage, mode="L")
+
+    font = ImageFont.load_default()
+    title = title or "Volume montage"
+    tile_h, tile_w = tiles[0].shape
+    gap = 8
+    left_margin = 34
+    right_margin = 8
+    title_height = 24
+    slice_label_height = 18
+    bottom_height = 30
+    image_area_w = len(tiles) * tile_w + (len(tiles) - 1) * gap
+
+    scratch = Image.new("RGB", (1, 1), "white")
+    scratch_draw = ImageDraw.Draw(scratch)
+    title_w, _ = _text_size(scratch_draw, title, font)
+    note_w, _ = _text_size(scratch_draw, note, font)
+    canvas_w = max(left_margin + image_area_w + right_margin, title_w + 16, note_w + 16)
+    canvas_h = title_height + slice_label_height + tile_h + bottom_height
+    tile_start_x = left_margin + max(
+        0,
+        (canvas_w - left_margin - right_margin - image_area_w) // 2,
+    )
+    tile_start_y = title_height + slice_label_height
+
+    canvas = Image.new("RGB", (canvas_w, canvas_h), "white")
+    draw = ImageDraw.Draw(canvas)
+    _draw_centered_text(draw, center_x=canvas_w // 2, y=6, text=title, font=font)
+    _draw_centered_text(
+        draw,
+        center_x=canvas_w // 2,
+        y=canvas_h - 13,
+        text=note,
+        font=font,
+        fill=(80, 80, 80),
+    )
+
+    y_axis_x = max(6, tile_start_x - 14)
+    draw.line(
+        (y_axis_x, tile_start_y, y_axis_x, tile_start_y + tile_h - 1),
+        fill=(64, 64, 64),
+    )
+    draw.line(
+        (y_axis_x - 3, tile_start_y, y_axis_x + 3, tile_start_y),
+        fill=(64, 64, 64),
+    )
+    draw.line(
+        (y_axis_x - 3, tile_start_y + tile_h - 1, y_axis_x + 3, tile_start_y + tile_h - 1),
+        fill=(64, 64, 64),
+    )
+    draw.text(
+        (max(0, y_axis_x - 10), tile_start_y + max(0, tile_h // 2 - 5)),
+        "y",
+        font=font,
+        fill=(32, 32, 32),
+    )
+
+    for tile_number, (idx, tile) in enumerate(zip(selected, tiles, strict=True)):
+        tile_x = tile_start_x + tile_number * (tile_w + gap)
+        tile_img = Image.fromarray(tile).convert("RGB")
+        canvas.paste(tile_img, (tile_x, tile_start_y))
+        draw.rectangle(
+            (tile_x, tile_start_y, tile_x + tile_w - 1, tile_start_y + tile_h - 1),
+            outline=(64, 64, 64),
+        )
+
+        _draw_centered_text(
+            draw,
+            center_x=tile_x + tile_w // 2,
+            y=title_height + 2,
+            text=f"z={int(idx)}",
+            font=font,
+        )
+
+        axis_y = tile_start_y + tile_h + 8
+        draw.line((tile_x, axis_y, tile_x + tile_w - 1, axis_y), fill=(64, 64, 64))
+        draw.line((tile_x, axis_y - 3, tile_x, axis_y + 3), fill=(64, 64, 64))
+        draw.line(
+            (tile_x + tile_w - 1, axis_y - 3, tile_x + tile_w - 1, axis_y + 3),
+            fill=(64, 64, 64),
+        )
+        _draw_centered_text(
+            draw,
+            center_x=tile_x + tile_w // 2,
+            y=axis_y + 3,
+            text="x",
+            font=font,
+            fill=(32, 32, 32),
+        )
+    return canvas
 
 
 def write_self_alignment_outputs(
@@ -201,16 +314,22 @@ def write_self_alignment_outputs(
     )
 
     input_preview = qc_dir / "input_target_overview.png"
-    _volume_montage(target.J, present_mask=target.present_mask).save(input_preview)
+    _volume_montage(
+        target.J,
+        present_mask=target.present_mask,
+        title="Input target before self-alignment",
+    ).save(input_preview)
     registered_preview = qc_dir / "registered_target_overview.png"
     _volume_montage(
         np.asarray(self_alignment["Jr"], dtype=np.float32),
         present_mask=target.present_mask,
+        title="Target after self-alignment",
     ).save(registered_preview)
     template_preview = qc_dir / "atlas_free_template_overview.png"
     _volume_montage(
         np.asarray(self_alignment["I"], dtype=np.float32),
         present_mask=target.present_mask,
+        title="Atlas-free reconstructed template",
     ).save(template_preview)
 
     stage_config_path = _write_json(output_dir / "self_alignment_config.json", stage_config)

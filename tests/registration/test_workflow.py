@@ -109,6 +109,45 @@ def _write_override(tmp_path: Path, payload: dict) -> Path:
     return override_path
 
 
+def _fake_upsample_between_slices_signature_check(
+    xJ,
+    J,
+    W=None,
+    *,
+    present_mask=None,
+    mode="seg",
+    config,
+    **kwargs,
+):
+    assert "nt" not in kwargs
+    assert "downI" not in kwargs
+    assert config["nt"] == 10
+    assert config["downI"] == [[1, 1]]
+    assert config["downJ"] == [[1, 1]]
+    assert config["local_contrast"] == [None]
+    assert config["up_vector"] == [None]
+    assert config["dtype"] == "float32"
+    assert np.allclose(config["A"], np.eye(4, dtype=np.float32))
+    assert config["A2d"] is None
+    assert config["Amode"] == 0
+    assert config["eA"] == [0.0]
+    assert config["eA2d"] == [0.0]
+    assert config["slice_matching"] == [False]
+    J = np.asarray(J, dtype=np.float32)
+    W = np.asarray(W, dtype=np.float32)
+    present_mask = np.asarray(present_mask)
+    assert W.shape == J.shape[1:]
+    assert present_mask.dtype.kind == "b"
+    assert present_mask.shape == (J.shape[1],)
+    assert mode in {"seg", "img"}
+    return {
+        "J_filled": J,
+        "J_nearest_bad": J,
+        "pairs": [(0, 2)],
+        "slices_with_data": [0, 2],
+    }
+
+
 def test_plan_workflow_resolves_atlas_free_prepared_dir(tmp_path):
     backend = FakeBackend()
 
@@ -294,6 +333,35 @@ def test_workflow_self_alignment_defaults_to_float32_backend_dtype(tmp_path):
     assert stage_config["dtype"] == "float32"
 
 
+def test_build_upsampling_kwargs_nests_solver_config_and_splits_wrapper_extras():
+    config = workflow_module.EmlddmmWorkflowConfig()
+    config.upsampling.extra_kwargs = {
+        "nt": 7,
+        "parallel": True,
+        "max_workers": 2,
+        "custom_solver_arg": "kept-in-config",
+    }
+
+    kwargs = workflow_module._build_upsampling_kwargs(config)
+
+    assert kwargs["mode"] == "seg"
+    assert kwargs["parallel"] is True
+    assert kwargs["max_workers"] == 2
+    assert "nt" not in kwargs
+    assert "downI" not in kwargs
+    assert kwargs["config"]["nt"] == 7
+    assert kwargs["config"]["downI"] == config.upsampling.downI
+    assert kwargs["config"]["downI"] == [[1, 1]]
+    assert kwargs["config"]["downJ"] == [[1, 1]]
+    assert kwargs["config"]["local_contrast"] == [None]
+    assert kwargs["config"]["up_vector"] == [None]
+    assert kwargs["config"]["dtype"] == "float32"
+    assert np.allclose(kwargs["config"]["A"], np.eye(4, dtype=np.float32))
+    assert kwargs["config"]["A2d"] is None
+    assert kwargs["config"]["Amode"] == 0
+    assert kwargs["config"]["custom_solver_arg"] == "kept-in-config"
+
+
 def test_workflow_rejects_label_without_atlas(tmp_path):
     with pytest.raises(ValueError, match="--label requires --atlas"):
         workflow_module.run_emlddmm_workflow(
@@ -399,16 +467,11 @@ def test_workflow_records_orientation_resolution_and_artifact_manifest(tmp_path)
 def test_workflow_runs_atlas_registration_and_upsampling(tmp_path, monkeypatch):
     backend = FakeBackend()
 
-    def fake_upsample_between_slices(*args, **kwargs):
-        J = np.asarray(args[1], dtype=np.float32)
-        return {
-            "J_filled": J,
-            "J_nearest_bad": J,
-            "pairs": [(0, 2)],
-            "slices_with_data": [0, 2],
-        }
-
-    monkeypatch.setattr(workflow_module, "_upsample_between_slices_impl", fake_upsample_between_slices)
+    monkeypatch.setattr(
+        workflow_module,
+        "_upsample_between_slices_impl",
+        _fake_upsample_between_slices_signature_check,
+    )
 
     result = workflow_module.run_emlddmm_workflow(
         dataset_root=tmp_path,
@@ -438,6 +501,36 @@ def test_workflow_runs_atlas_registration_and_upsampling(tmp_path, monkeypatch):
     assert (
         tmp_path / "emlddmm" / "upsampling" / "nearest_slice_reference_overview.png"
     ).exists()
+    upsampling_effective_config = json.loads(
+        (tmp_path / "emlddmm" / "upsampling" / "effective_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert "nt" not in upsampling_effective_config["upsampling_kwargs"]
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["nt"] == 10
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["downI"] == [[1, 1]]
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["downJ"] == [[1, 1]]
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["dtype"] == "float32"
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["A"] == [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["A2d"] is None
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["Amode"] == 0
+    assert upsampling_effective_config["working_grid_spacing"] == [5.0, 2.0, 2.0]
+    assert upsampling_effective_config["pair_registration"] == {
+        "semantics": "2d-observed-slice-pairs",
+        "input_stack": "self_alignment_result['Jr']",
+        "downI": [[1, 1]],
+        "downJ": [[1, 1]],
+    }
+    assert upsampling_effective_config["upsampling_kwargs"]["present_mask"] == [
+        True,
+        False,
+        True,
+    ]
     assert (tmp_path / "emlddmm" / "run_provenance.json").exists()
     assert (tmp_path / "emlddmm" / "reproduce_step5_command.txt").exists()
     assert summary["upsampling_enabled"] is True
@@ -538,16 +631,11 @@ def test_workflow_records_legacy_output_alias_usage(tmp_path):
 def test_workflow_writes_qc_report_and_relative_image_manifest(tmp_path, monkeypatch):
     backend = FakeBackend()
 
-    def fake_upsample_between_slices(*args, **kwargs):
-        J = np.asarray(args[1], dtype=np.float32)
-        return {
-            "J_filled": J,
-            "J_nearest_bad": J,
-            "pairs": [(0, 2)],
-            "slices_with_data": [0, 2],
-        }
-
-    monkeypatch.setattr(workflow_module, "_upsample_between_slices_impl", fake_upsample_between_slices)
+    monkeypatch.setattr(
+        workflow_module,
+        "_upsample_between_slices_impl",
+        _fake_upsample_between_slices_signature_check,
+    )
 
     result = workflow_module.run_emlddmm_workflow(
         dataset_root=tmp_path,

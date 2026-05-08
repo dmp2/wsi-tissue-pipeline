@@ -95,12 +95,8 @@ class UpsamplingConfig(BaseModel):
     enabled: bool = False
     mode: Literal["seg", "img"] = "seg"
     nt: int = 10
-    downI: list[list[int]] = Field(
-        default_factory=lambda: [[4, 4, 4], [2, 2, 2], [1, 1, 1]]
-    )
-    downJ: list[list[int]] = Field(
-        default_factory=lambda: [[1, 4, 4], [1, 2, 2], [1, 1, 1]]
-    )
+    downI: list[list[int]] = Field(default_factory=lambda: [[1, 1]])
+    downJ: list[list[int]] = Field(default_factory=lambda: [[1, 1]])
     n_iter: list[int] = Field(default_factory=lambda: [100, 50, 25])
     a: list[float] = Field(default_factory=lambda: [500.0])
     dv: list[float] = Field(default_factory=lambda: [1000.0])
@@ -109,8 +105,8 @@ class UpsamplingConfig(BaseModel):
     eA: list[float] = Field(default_factory=lambda: [0.0])
     eA2d: list[float] = Field(default_factory=lambda: [0.0])
     ev: list[float] = Field(default_factory=lambda: [1e-2])
-    local_contrast: list[list[int]] = Field(default_factory=lambda: [[1, 16, 16]])
-    up_vector: list[list[float]] = Field(default_factory=lambda: [[0.0, 0.0, -1.0]])
+    local_contrast: list[list[int] | None] = Field(default_factory=lambda: [None])
+    up_vector: list[list[float] | None] = Field(default_factory=lambda: [None])
     sigmaR: list[float] = Field(default_factory=lambda: [1e4])
     extra_kwargs: dict[str, Any] = Field(default_factory=dict)
 
