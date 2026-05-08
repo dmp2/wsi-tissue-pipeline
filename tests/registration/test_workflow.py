@@ -126,6 +126,7 @@ def _fake_upsample_between_slices_signature_check(
     assert config["downJ"] == [[1, 1]]
     assert config["local_contrast"] == [None]
     assert config["up_vector"] == [None]
+    assert config["n_draw"] == 0
     assert config["dtype"] == "float32"
     assert np.allclose(config["A"], np.eye(4, dtype=np.float32))
     assert config["A2d"] is None
@@ -355,6 +356,7 @@ def test_build_upsampling_kwargs_nests_solver_config_and_splits_wrapper_extras()
     assert kwargs["config"]["downJ"] == [[1, 1]]
     assert kwargs["config"]["local_contrast"] == [None]
     assert kwargs["config"]["up_vector"] == [None]
+    assert kwargs["config"]["n_draw"] == 0
     assert kwargs["config"]["dtype"] == "float32"
     assert np.allclose(kwargs["config"]["A"], np.eye(4, dtype=np.float32))
     assert kwargs["config"]["A2d"] is None
@@ -510,6 +512,7 @@ def test_workflow_runs_atlas_registration_and_upsampling(tmp_path, monkeypatch):
     assert upsampling_effective_config["upsampling_kwargs"]["config"]["nt"] == 10
     assert upsampling_effective_config["upsampling_kwargs"]["config"]["downI"] == [[1, 1]]
     assert upsampling_effective_config["upsampling_kwargs"]["config"]["downJ"] == [[1, 1]]
+    assert upsampling_effective_config["upsampling_kwargs"]["config"]["n_draw"] == 0
     assert upsampling_effective_config["upsampling_kwargs"]["config"]["dtype"] == "float32"
     assert upsampling_effective_config["upsampling_kwargs"]["config"]["A"] == [
         [1.0, 0.0, 0.0, 0.0],

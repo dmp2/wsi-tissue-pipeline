@@ -172,6 +172,7 @@ def _normalize_pair_registration_config(config):
     normalized.setdefault("downJ", [[1, 1]])
     normalized.setdefault("local_contrast", [None])
     normalized.setdefault("up_vector", [None])
+    normalized.setdefault("n_draw", 0)
     normalized.setdefault("dtype", "float32")
     normalized.setdefault("A", np.eye(4, dtype=np.float32))
     normalized.setdefault("A2d", None)

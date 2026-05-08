@@ -108,6 +108,7 @@ class UpsamplingConfig(BaseModel):
     local_contrast: list[list[int] | None] = Field(default_factory=lambda: [None])
     up_vector: list[list[float] | None] = Field(default_factory=lambda: [None])
     sigmaR: list[float] = Field(default_factory=lambda: [1e4])
+    n_draw: int = 0
     extra_kwargs: dict[str, Any] = Field(default_factory=dict)
 
 

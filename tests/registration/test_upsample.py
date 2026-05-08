@@ -103,6 +103,7 @@ def test_pair_registration_inputs_are_2d_and_identity_downsampling(monkeypatch):
     assert all(call["config"]["downJ"] == [[1, 1]] for call in calls)
     assert all(call["config"]["local_contrast"] == [None] for call in calls)
     assert all(call["config"]["up_vector"] == [None] for call in calls)
+    assert all(call["config"]["n_draw"] == 0 for call in calls)
     assert all(call["config"]["dtype"] == "float32" for call in calls)
     assert all(np.allclose(call["config"]["A"], np.eye(4, dtype=np.float32)) for call in calls)
     assert all(call["config"]["A2d"] is None for call in calls)

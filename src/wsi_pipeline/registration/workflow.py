@@ -584,6 +584,7 @@ def _build_upsampling_kwargs(config: EmlddmmWorkflowConfig) -> dict[str, Any]:
         "local_contrast": config.upsampling.local_contrast,
         "up_vector": config.upsampling.up_vector,
         "sigmaR": config.upsampling.sigmaR,
+        "n_draw": config.upsampling.n_draw,
         "dtype": "float32",
         "A": np.eye(4, dtype=np.float32),
         "A2d": None,
