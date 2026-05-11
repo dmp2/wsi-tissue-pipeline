@@ -298,6 +298,13 @@ def write_self_alignment_outputs(
             backend.write_matrix_data(str(matrix_path), A2d_np[idx])
             written_a2d.append(str(matrix_path))
 
+    input_vtk = images_dir / "input_target.vtk"
+    backend.write_vtk_data(
+        str(input_vtk),
+        target.xJ,
+        np.asarray(target.J, dtype=np.float32),
+        "input_target",
+    )
     template_vtk = images_dir / "atlas_free_template.vtk"
     backend.write_vtk_data(
         str(template_vtk),
@@ -341,6 +348,7 @@ def write_self_alignment_outputs(
             "present_slices": int(np.count_nonzero(target.present_mask)),
             "source_format": target.source_format,
             "source_path": str(target.source_path),
+            "input_vtk": str(input_vtk),
             "template_vtk": str(template_vtk),
             "registered_vtk": str(registered_vtk),
             "a2d_matrices": written_a2d,
@@ -352,6 +360,7 @@ def write_self_alignment_outputs(
         "effective_config": str(effective_config_path),
         "summary": str(summary_path),
         "a2d_matrices": written_a2d,
+        "input_vtk": str(input_vtk),
         "template_vtk": str(template_vtk),
         "registered_vtk": str(registered_vtk),
         "qc": [str(input_preview), str(registered_preview), str(template_preview)],

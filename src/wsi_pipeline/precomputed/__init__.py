@@ -17,6 +17,8 @@ create_precomputed_cloudvolume / write_slice_cloudvolume
     Low-level CloudVolume backend functions.
 create_precomputed_tensorstore / write_slice_tensorstore / write_slice_tensorstore_streaming
     Low-level TensorStore backend functions.
+write_precomputed_raw_volume
+    Small in-memory raw precomputed writer for already materialized volumes.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from .cloudvolume import (
     write_slice_cloudvolume,
 )
 from .plate_writer import PlatePrecomputedWriter
+from .raw import write_precomputed_raw_volume
 from .tensorstore import (
     create_precomputed_tensorstore,
     write_slice_tensorstore,
@@ -42,4 +45,6 @@ __all__ = [
     "write_slice_tensorstore_streaming",
     # High-level facade
     "PlatePrecomputedWriter",
+    # Small in-memory writer
+    "write_precomputed_raw_volume",
 ]
