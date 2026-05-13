@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  lintExpected:
-    name: lintExpected
+  lint:
+    name: lint
     runs-on: ubuntu-latest
 
     steps:
