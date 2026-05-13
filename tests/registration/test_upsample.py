@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -7,6 +9,23 @@ torch = pytest.importorskip("torch")
 
 import wsi_pipeline.registration.symmetric as symmetric_module
 import wsi_pipeline.registration.upsample as upsample_module
+
+
+def _fake_interp(x, image, phii, interp2d=False, **kwargs):
+    image_t = torch.as_tensor(image)
+    phii_t = torch.as_tensor(phii)
+    return torch.zeros(
+        (image_t.shape[0], *phii_t.shape[1:]),
+        device=phii_t.device,
+        dtype=image_t.dtype,
+    )
+
+
+def _fake_symmetric_backend(multiscale=None):
+    return SimpleNamespace(
+        emlddmm_multiscale=multiscale or (lambda **kwargs: None),
+        interp=_fake_interp,
+    )
 
 
 def _axes(z_values, size_y=2, size_x=2):
@@ -422,10 +441,25 @@ def test_symmetric_helper_returns_both_jacobian_keys(monkeypatch):
             ],
         }
 
-    def fake_integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_integrate_inverse_flow(
+        xv,
+        v,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         return torch.zeros((nt + 1, 2, 2, 2), dtype=torch.float32)
 
-    def fake_warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_warp_time_series(
+        x,
+        image,
+        phis,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         base = torch.arange(phis.shape[0], dtype=torch.float32)[:, None, None, None]
         channels = torch.as_tensor(image).shape[0]
         return base.expand(phis.shape[0], channels, 2, 2)
@@ -434,7 +468,11 @@ def test_symmetric_helper_returns_both_jacobian_keys(monkeypatch):
         base = torch.arange(phi.shape[0], dtype=torch.float32)[:, None, None]
         return base.expand(phi.shape[0], 2, 2)
 
-    monkeypatch.setattr(symmetric_module.emlddmm, "emlddmm_multiscale", fake_multiscale)
+    monkeypatch.setattr(
+        symmetric_module,
+        "_resolve_emlddmm_module",
+        lambda: _fake_symmetric_backend(fake_multiscale),
+    )
     monkeypatch.setattr(symmetric_module, "_integrate_inverse_flow", fake_integrate_inverse_flow)
     monkeypatch.setattr(symmetric_module, "_warp_time_series", fake_warp_time_series)
     monkeypatch.setattr(symmetric_module, "_calculate_determinant_of_jacobian", fake_det)
@@ -484,17 +522,36 @@ def test_symmetric_helper_passes_coordinate_axes_as_tuples(monkeypatch):
             ],
         }
 
-    def fake_integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_integrate_inverse_flow(
+        xv,
+        v,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         return torch.zeros((nt + 1, 2, 3, 4), dtype=torch.float32)
 
-    def fake_warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_warp_time_series(
+        x,
+        image,
+        phis,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         channels = torch.as_tensor(image).shape[0]
         return torch.zeros((phis.shape[0], channels, 3, 4), dtype=torch.float32)
 
     def fake_det(phi, spacing=None):
         return torch.ones((phi.shape[0], 3, 4), dtype=torch.float32)
 
-    monkeypatch.setattr(symmetric_module.emlddmm, "emlddmm_multiscale", fake_multiscale)
+    monkeypatch.setattr(
+        symmetric_module,
+        "_resolve_emlddmm_module",
+        lambda: _fake_symmetric_backend(fake_multiscale),
+    )
     monkeypatch.setattr(symmetric_module, "_integrate_inverse_flow", fake_integrate_inverse_flow)
     monkeypatch.setattr(symmetric_module, "_warp_time_series", fake_warp_time_series)
     monkeypatch.setattr(symmetric_module, "_calculate_determinant_of_jacobian", fake_det)
@@ -531,6 +588,7 @@ def test_symmetric_helper_resamples_velocity_transform_to_image_grid():
         xv,
         phis,
         x,
+        emlddmm_module=_fake_symmetric_backend(),
         interp2d=True,
     )
 
@@ -554,10 +612,25 @@ def test_symmetric_helper_uses_domain_specific_axes_and_spacing(monkeypatch):
             ],
         }
 
-    def fake_integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_integrate_inverse_flow(
+        xv,
+        v,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         return torch.zeros((nt + 1, 2, 2, 2), dtype=torch.float32)
 
-    def fake_warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_warp_time_series(
+        x,
+        image,
+        phis,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         warp_axes.append([np.asarray(axis) for axis in x])
         channels = torch.as_tensor(image).shape[0]
         return torch.zeros((phis.shape[0], channels, 2, 2), dtype=torch.float32)
@@ -566,7 +639,11 @@ def test_symmetric_helper_uses_domain_specific_axes_and_spacing(monkeypatch):
         det_spacings.append(tuple(float(s) for s in spacing))
         return torch.ones((phi.shape[0], 2, 2), dtype=torch.float32)
 
-    monkeypatch.setattr(symmetric_module.emlddmm, "emlddmm_multiscale", fake_multiscale)
+    monkeypatch.setattr(
+        symmetric_module,
+        "_resolve_emlddmm_module",
+        lambda: _fake_symmetric_backend(fake_multiscale),
+    )
     monkeypatch.setattr(symmetric_module, "_integrate_inverse_flow", fake_integrate_inverse_flow)
     monkeypatch.setattr(symmetric_module, "_warp_time_series", fake_warp_time_series)
     monkeypatch.setattr(symmetric_module, "_calculate_determinant_of_jacobian", fake_det)
