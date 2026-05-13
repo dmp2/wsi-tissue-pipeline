@@ -19,10 +19,11 @@ from skimage import filters, measure, morphology
 from skimage.filters.rank import entropy as rank_entropy
 from skimage.morphology import disk
 
+from .appendage import refine_appendages
+
 # Local imports
 from .core import create_thumbnail, to_gray, upsample_mask
 from .entropy import entropy_mask
-from .appendage import refine_appendages
 from .morphology import keep_largest_components, split_touching_components
 from .otsu import otsu_mask
 from .stain import he_stain_mask

@@ -116,7 +116,7 @@ def _validate_false_schedule(name, value):
         value = value.tolist()
     entries = list(value) if isinstance(value, (list, tuple)) else [value]
     for entry in entries:
-        if entry not in {False, None, 0}:
+        if entry not in {False, None}:
             raise ValueError(f"{name} must be false for between-slice upsampling; got {value!r}")
 
 

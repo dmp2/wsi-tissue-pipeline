@@ -7,23 +7,38 @@ surrounding pipeline gains clearer docs, logging, and report outputs, but the
 underlying numerical behavior here is intentionally left unchanged.
 """
 
-import emlddmm
 import torch
 
+from .backend import resolve_emlddmm_backend
 
-def _integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
+_SYMMETRIC_BACKEND_ATTRS = ("emlddmm_multiscale", "interp")
+
+
+def _resolve_emlddmm_module():
+    """Resolve the EM-LDDMM backend module used by symmetric registration."""
+    module = resolve_emlddmm_backend().module
+    missing = [attr for attr in _SYMMETRIC_BACKEND_ATTRS if not hasattr(module, attr)]
+    if missing:
+        raise ImportError(
+            "EM-LDDMM backend for symmetric registration is missing required attributes: "
+            f"{', '.join(missing)}"
+        )
+    return module
+
+
+def _integrate_inverse_flow(xv, v, *, emlddmm_module, interp2d=None, grid_sample_kwargs=None):
     """Integrate v_t -> phi^{-1}_t, storing all time steps."""
     v = torch.as_tensor(v)
     xv = [torch.as_tensor(x, device=v.device, dtype=v.dtype) for x in xv]
     ndim = v.shape[1]
     interp2d = bool(interp2d) if interp2d is not None else ndim == 2
-    mesh = torch.stack(torch.meshgrid(xv[:ndim], indexing='ij'))
+    mesh = torch.stack(torch.meshgrid(xv[:ndim], indexing="ij"))
     phi = mesh
     phis = [phi]
     dt = 1.0 / v.shape[0]
     for t in range(v.shape[0]):
         Xs = mesh - v[t] * dt
-        phi = emlddmm.interp(
+        phi = emlddmm_module.interp(
             xv[:ndim],
             phi - mesh,
             Xs,
@@ -34,13 +49,13 @@ def _integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
     return torch.stack(phis)
 
 
-def _warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None):
+def _warp_time_series(x, image, phis, *, emlddmm_module, interp2d=None, grid_sample_kwargs=None):
     """Warp an image along a stored phi^{-1}_t trajectory."""
     image = torch.as_tensor(image, device=phis.device, dtype=phis.dtype)
     warped = []
     for t in range(phis.shape[0]):
         warped.append(
-            emlddmm.interp(
+            emlddmm_module.interp(
                 x,
                 image,
                 phis[t],
@@ -51,7 +66,15 @@ def _warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None)
     return torch.stack(warped)
 
 
-def _resample_transform_to_domain(xv, phis, x, *, interp2d=None, grid_sample_kwargs=None):
+def _resample_transform_to_domain(
+    xv,
+    phis,
+    x,
+    *,
+    emlddmm_module,
+    interp2d=None,
+    grid_sample_kwargs=None,
+):
     """Evaluate a transform integrated on the velocity grid at image-domain points."""
     phis = torch.as_tensor(phis)
     ndim = phis.shape[1]
@@ -59,16 +82,18 @@ def _resample_transform_to_domain(xv, phis, x, *, interp2d=None, grid_sample_kwa
     xv = [torch.as_tensor(axis, device=phis.device, dtype=phis.dtype) for axis in xv[:ndim]]
     x = [torch.as_tensor(axis, device=phis.device, dtype=phis.dtype) for axis in x[:ndim]]
 
-    if len(xv) == len(x) and all(a.shape == b.shape and torch.equal(a, b) for a, b in zip(xv, x)):
+    if len(xv) == len(x) and all(
+        a.shape == b.shape and torch.equal(a, b) for a, b in zip(xv, x, strict=False)
+    ):
         return phis
 
-    velocity_mesh = torch.stack(torch.meshgrid(xv, indexing='ij'))
-    image_mesh = torch.stack(torch.meshgrid(x, indexing='ij'))
+    velocity_mesh = torch.stack(torch.meshgrid(xv, indexing="ij"))
+    image_mesh = torch.stack(torch.meshgrid(x, indexing="ij"))
     resampled = []
     for t in range(phis.shape[0]):
         displacement = phis[t] - velocity_mesh
         resampled.append(
-            emlddmm.interp(
+            emlddmm_module.interp(
                 xv,
                 displacement,
                 image_mesh,
@@ -232,6 +257,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     J_mid_w = pair_out["Jt"][t_mid]     # target slice flowed halfway toward atlas
     """
     # Initialize
+    emlddmm_module = _resolve_emlddmm_module()
     I_t = torch.as_tensor(I)
     J_t = torch.as_tensor(J)
     device, dtype = I_t.device, I_t.dtype
@@ -271,7 +297,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
 
     # Flow forward
     fwd_cfg = dict(backend_cfg)
-    out_fwd = emlddmm.emlddmm_multiscale(
+    out_fwd = emlddmm_module.emlddmm_multiscale(
         xI=xI_backend,
         I=I_backend,
         xJ=xJ_backend,
@@ -295,7 +321,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
             "v",
             _lift_in_plane_velocity_to_backend(v_init_back, fwd_last["v"].shape[2]),
         )
-        out_back = emlddmm.emlddmm_multiscale(
+        out_back = emlddmm_module.emlddmm_multiscale(
             xI=xJ_backend,
             I=J_backend,
             xJ=xI_backend,
@@ -307,7 +333,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         v_back = torch.flip(-v_back_raw, [0])
     else:
         back_cfg.setdefault("v", v_init_back)
-        out_back = emlddmm.emlddmm_multiscale(
+        out_back = emlddmm_module.emlddmm_multiscale(
             xI=xJ_t,
             I=J_t,
             xJ=xI_t,
@@ -333,12 +359,14 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     phi_I_velocity = _integrate_inverse_flow(
         xv,
         v_sym,
+        emlddmm_module=emlddmm_module,
         interp2d=interp2d,
         grid_sample_kwargs=grid_sample_kwargs,
     )
     phi_J_velocity = _integrate_inverse_flow(
         xv,
         torch.flip(-v_sym, [0]),
+        emlddmm_module=emlddmm_module,
         interp2d=interp2d,
         grid_sample_kwargs=grid_sample_kwargs,
     )
@@ -348,6 +376,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         xv,
         phi_I_velocity,
         xI_flow,
+        emlddmm_module=emlddmm_module,
         interp2d=interp2d,
         grid_sample_kwargs=grid_sample_kwargs,
     )
@@ -355,6 +384,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         xv,
         phi_J_velocity,
         xJ_flow,
+        emlddmm_module=emlddmm_module,
         interp2d=interp2d,
         grid_sample_kwargs=grid_sample_kwargs,
     )
@@ -362,6 +392,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         xI_flow,
         I_t,
         phi_I,
+        emlddmm_module=emlddmm_module,
         interp2d=interp2d,
         grid_sample_kwargs=grid_sample_kwargs,
     )
@@ -369,6 +400,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         xJ_flow,
         J_t,
         phi_J,
+        emlddmm_module=emlddmm_module,
         interp2d=interp2d,
         grid_sample_kwargs=grid_sample_kwargs,
     )

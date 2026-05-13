@@ -20,14 +20,18 @@ from skimage.filters.rank import entropy as rank_entropy
 from skimage.morphology import disk
 
 from .config import PipelineConfig, SegmentationConfig, TileConfig, load_config
-from .segmentation.core import (
-    create_thumbnail as _shared_create_thumbnail,
-    upsample_mask as _shared_upsample_mask,
-)
 from .segmentation.appendage import refine_appendages
 from .segmentation.component_qc import filter_mask_by_labels, score_components
+from .segmentation.core import (
+    create_thumbnail as _shared_create_thumbnail,
+)
+from .segmentation.core import (
+    upsample_mask as _shared_upsample_mask,
+)
 from .segmentation.morphology import (
     keep_largest_components as _shared_keep_largest_components,
+)
+from .segmentation.morphology import (
     split_touching_components as _shared_split_touching_components,
 )
 from .segmentation.stain import he_stain_mask

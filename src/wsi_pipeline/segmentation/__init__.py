@@ -34,14 +34,6 @@ Backend = Literal[
 
 # Core utilities
 # Deprecated aliases -- kept for backward compatibility, will be removed in v1.0
-from .core import (  # deprecated
-    _thumb,
-    _to_gray,
-    _upsample_bool,
-    create_thumbnail,
-    to_gray,
-    upsample_mask,
-)
 from .appendage import (
     AppendageRecord,
     refine_appendages,
@@ -53,6 +45,14 @@ from .component_qc import (
     filter_mask_by_labels,
     label_components_left_to_right,
     score_components,
+)
+from .core import (  # deprecated
+    _thumb,
+    _to_gray,
+    _upsample_bool,
+    create_thumbnail,
+    to_gray,
+    upsample_mask,
 )
 
 # Segmentation algorithms
@@ -68,10 +68,10 @@ from .morphology import (  # deprecated
     split_touching_components,
 )
 from .otsu import _otsu_mask, otsu_mask  # _otsu_mask deprecated
-from .stain import HEFeatures, he_features, he_stain_mask
 
 # High-level segmenter
 from .segmenter import WSISegmenter, make_lowres_mask, segment_mask
+from .stain import HEFeatures, he_features, he_stain_mask
 
 __all__ = [
     # Type

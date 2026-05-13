@@ -308,7 +308,7 @@ def generate_tissue_tiles(
     # -------- Pass 2: build tiles lazily with common tile_dim --------
     tiles: list[da.Array] = []
 
-    for (lid, y0_lr, y1_lr, x0_lr, x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, H_hr, W_hr) in roi_specs:
+    for (lid, _y0_lr, _y1_lr, _x0_lr, _x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, _H_hr, _W_hr) in roi_specs:
         center_y = (y0_hr + y1_hr) / 2.0
         center_x = (x0_hr + x1_hr) / 2.0
         tile_y0 = int(np.floor(center_y - tile_dim / 2.0))
