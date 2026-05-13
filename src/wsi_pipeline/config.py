@@ -48,17 +48,125 @@ class SegmentationConfig(BaseModel):
         ),
     )
 
+    stain_gate: bool = Field(
+        default=False,
+        description=(
+            "Apply an H&E brightfield stain-confidence gate before morphology. "
+            "Useful for excluding pale background artifacts before closing/filling."
+        ),
+    )
+
+    stain_gate_mode: Literal["fixed", "adaptive-od", "adaptive-he"] = Field(
+        default="fixed",
+        description=(
+            "H&E stain gate mode. 'fixed' uses saturation and optical-density "
+            "thresholds. 'adaptive-od' estimates a per-image optical-density "
+            "threshold from bright background and ignores saturation. 'adaptive-he' "
+            "uses deconvolved hematoxylin+eosin signal."
+        ),
+    )
+
+    stain_min_saturation: float = Field(
+        default=0.08, ge=0.0, le=1.0,
+        description="Minimum HSV saturation used by the fixed H&E stain gate.",
+    )
+
+    stain_min_od: float = Field(
+        default=0.35, ge=0.0,
+        description="Minimum summed optical density used by the optional H&E stain gate.",
+    )
+
+    stain_min_he_signal: float = Field(
+        default=0.0, ge=0.0,
+        description=(
+            "Optional HED hematoxylin+eosin stain signal threshold that can rescue "
+            "light but color-deconvolution-positive tissue."
+        ),
+    )
+
+    stain_od_bg_percentile: float = Field(
+        default=0.80, ge=0.50, le=0.99,
+        description=(
+            "Brightness percentile used to estimate background optical density "
+            "for adaptive-od stain gating."
+        ),
+    )
+
+    stain_od_mad_multiplier: float = Field(
+        default=4.0, ge=0.0, le=20.0,
+        description=(
+            "Robust MAD multiplier above background optical density for "
+            "adaptive-od stain gating."
+        ),
+    )
+
+    stain_pre_open_px: int = Field(
+        default=0, ge=0, le=20,
+        description=(
+            "Optional opening radius applied after stain gating and before closing. "
+            "Use small values, such as 1, to break wispy pale bridges."
+        ),
+    )
+
     split_touching: bool = Field(
         default=True, description="Whether to split touching tissue sections"
     )
 
     r_split: int = Field(
-        default=2, ge=1, le=10,
+        default=3, ge=1, le=10,
         description=(
             "Radius (px, at thumbnail scale) used by watershed to split touching tissue sections. "
             "Increase if sections that should be separate are merged; "
             "decrease if single sections are split incorrectly."
         ),
+    )
+
+    keep_top_k: int | None = Field(
+        default=None, ge=1,
+        description=(
+            "Optional safety-net that keeps only the K largest tissue components "
+            "after segmentation and splitting. Use only when the expected number "
+            "of tissue sections on each slide is known."
+        ),
+    )
+
+    appendage_refinement_enabled: bool = Field(
+        default=False,
+        description=(
+            "Trim or annotate weakly stained peripheral appendages after segmentation "
+            "and before tile extraction."
+        ),
+    )
+
+    appendage_refinement_mode: Literal["trim", "annotate"] = Field(
+        default="trim",
+        description=(
+            "Appendage refinement behavior. 'trim' removes likely low-H&E appendages; "
+            "'annotate' records them without changing the mask."
+        ),
+    )
+
+    appendage_refinement_profile: Literal["he_sections"] = Field(
+        default="he_sections",
+        description="Appendage refinement rule profile.",
+    )
+
+    component_qc_enabled: bool = Field(
+        default=True,
+        description="Score connected components for likely artifact/tissue QC.",
+    )
+
+    component_qc_mode: Literal["annotate", "drop_artifacts"] = Field(
+        default="annotate",
+        description=(
+            "Component QC behavior. 'annotate' writes all tiles with QC metadata; "
+            "'drop_artifacts' removes likely artifact components before tile extraction."
+        ),
+    )
+
+    component_qc_profile: Literal["he_sections"] = Field(
+        default="he_sections",
+        description="Component QC rule profile.",
     )
 
     diagnostics: bool = Field(

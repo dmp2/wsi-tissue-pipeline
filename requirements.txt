@@ -36,10 +36,10 @@ mlflow>=2.10.0
 tqdm>=4.65.0
 pandas>=2.0.0
 
-# Optional: PyTorch (for GPU-accelerated processing)
-# Uncomment if using GPU features
-# torch>=2.0.0
-# torchvision>=0.15.0
+# Optional: PyTorch (for registration/accelerated processing)
+# Keep bounded to avoid newer wheels that may force setuptools downgrades.
+# torch>=2.0.0,<2.11
+# torchvision>=0.15.0,<0.26
 
 # Optional: Neuroglancer visualization
 # neuroglancer>=2.37

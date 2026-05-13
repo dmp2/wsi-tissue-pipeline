@@ -33,10 +33,10 @@ dependencies:
   # Visualization
   - matplotlib>=3.7
   
-  # PyTorch (optional - uncomment for GPU support)
-  # - pytorch>=2.0
-  # - torchvision>=0.15
-  # - pytorch-cuda=12.1  # Adjust CUDA version as needed
+  # PyTorch (optional; prefer the explicit pip wheel commands in the docs)
+  # - pytorch>=2.0,<2.11
+  # - torchvision>=0.15,<0.26
+  # For GPU registration, use the commented CUDA 12.8 wheel command in notebook 05.
   
   # Development tools
   - jupyter>=1.0

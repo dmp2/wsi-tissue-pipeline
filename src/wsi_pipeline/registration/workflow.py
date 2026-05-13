@@ -113,6 +113,17 @@ def _jsonify(value: Any) -> Any:
     return value
 
 
+def _axis_spacing_values(axes: list[np.ndarray]) -> list[float | None]:
+    spacing: list[float | None] = []
+    for axis in axes:
+        axis_array = np.asarray(axis)
+        if axis_array.size < 2:
+            spacing.append(None)
+        else:
+            spacing.append(float(abs(axis_array[1] - axis_array[0])))
+    return spacing
+
+
 def _summarize_debug_object(value: Any) -> Any:
     if isinstance(value, np.ndarray):
         return {
@@ -509,6 +520,7 @@ def _build_self_alignment_kwargs(config: EmlddmmWorkflowConfig) -> dict[str, Any
         "draw": config.self_alignment.draw,
         "n_steps": config.self_alignment.n_steps,
         "eA2d": config.self_alignment.eA2d,
+        "dtype": "float32",
     }
     kwargs.update(config.self_alignment.extra_kwargs)
     return kwargs
@@ -546,9 +558,18 @@ def _build_atlas_registration_kwargs(
     return kwargs
 
 
+_UPSAMPLING_WRAPPER_EXTRA_KEYS = {
+    "parallel",
+    "max_workers",
+    "present_mask",
+    "slice_spacing",
+    "n_resample",
+    "tissue_idx",
+}
+
+
 def _build_upsampling_kwargs(config: EmlddmmWorkflowConfig) -> dict[str, Any]:
-    kwargs = {
-        "mode": config.upsampling.mode,
+    solver_config: dict[str, Any] = {
         "nt": config.upsampling.nt,
         "downI": config.upsampling.downI,
         "downJ": config.upsampling.downJ,
@@ -563,8 +584,21 @@ def _build_upsampling_kwargs(config: EmlddmmWorkflowConfig) -> dict[str, Any]:
         "local_contrast": config.upsampling.local_contrast,
         "up_vector": config.upsampling.up_vector,
         "sigmaR": config.upsampling.sigmaR,
+        "n_draw": config.upsampling.n_draw,
+        "dtype": "float32",
+        "A": np.eye(4, dtype=np.float32),
+        "A2d": None,
+        "Amode": 0,
     }
-    kwargs.update(config.upsampling.extra_kwargs)
+    kwargs: dict[str, Any] = {
+        "mode": config.upsampling.mode,
+        "config": solver_config,
+    }
+    for key, value in config.upsampling.extra_kwargs.items():
+        if key in _UPSAMPLING_WRAPPER_EXTRA_KEYS:
+            kwargs[key] = value
+        else:
+            solver_config[key] = value
     return kwargs
 
 
@@ -1786,14 +1820,19 @@ def run_emlddmm_workflow(
                 stage_started_at = datetime.now(timezone.utc).isoformat()
                 stage_dir = _stage_dir(registration_output_dir, "upsampling")
                 upsampling_kwargs = _build_upsampling_kwargs(loaded.config)
-                stage_payloads["upsampling"] = upsampling_kwargs
+                upsampling_call_kwargs = dict(upsampling_kwargs)
+                upsampling_call_kwargs.setdefault(
+                    "present_mask",
+                    np.asarray(loaded.target.present_mask, dtype=bool),
+                )
+                stage_payloads["upsampling"] = upsampling_call_kwargs
                 _write_stage_inputs(stage_dir, _stage_input_payload(loaded, "upsampling"))
                 assert self_alignment_result is not None
                 upsampling = _upsample_between_slices_impl(
                     loaded.xJd,
                     np.asarray(self_alignment_result["Jr"], dtype=np.float32),
-                    np.asarray(self_alignment_result["A2d"], dtype=np.float32),
-                    **upsampling_kwargs,
+                    W=np.asarray(loaded.Wd, dtype=np.float32),
+                    **upsampling_call_kwargs,
                 )
                 stage_artifacts = write_upsampling_outputs(
                     backend=loaded.backend,
@@ -1803,6 +1842,14 @@ def run_emlddmm_workflow(
                     effective_config={
                         "mode": loaded.config.upsampling.mode,
                         "device_used": loaded.device_used,
+                        "working_grid_spacing": _axis_spacing_values(loaded.xJd),
+                        "pair_registration": {
+                            "semantics": "2d-observed-slice-pairs",
+                            "input_stack": "self_alignment_result['Jr']",
+                            "downI": upsampling_call_kwargs.get("config", {}).get("downI"),
+                            "downJ": upsampling_call_kwargs.get("config", {}).get("downJ"),
+                        },
+                        "upsampling_kwargs": upsampling_call_kwargs,
                     },
                     metadata={
                         "pairs": upsampling.get("pairs", []),

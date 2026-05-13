@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -7,6 +9,23 @@ torch = pytest.importorskip("torch")
 
 import wsi_pipeline.registration.symmetric as symmetric_module
 import wsi_pipeline.registration.upsample as upsample_module
+
+
+def _fake_interp(x, image, phii, interp2d=False, **kwargs):
+    image_t = torch.as_tensor(image)
+    phii_t = torch.as_tensor(phii)
+    return torch.zeros(
+        (image_t.shape[0], *phii_t.shape[1:]),
+        device=phii_t.device,
+        dtype=image_t.dtype,
+    )
+
+
+def _fake_symmetric_backend(multiscale=None):
+    return SimpleNamespace(
+        emlddmm_multiscale=multiscale or (lambda **kwargs: None),
+        interp=_fake_interp,
+    )
 
 
 def _axes(z_values, size_y=2, size_x=2):
@@ -40,6 +59,77 @@ def _fake_img_helper(xI, I, xJ, J, W0=None, **config):
         "det_jac_phi_I": det,
         "det_jac_phi_J": det,
     }
+
+
+def test_pair_registration_inputs_are_2d_and_identity_downsampling(monkeypatch):
+    calls = []
+
+    def fake_pair_helper(xI, I, xJ, J, W0=None, **config):
+        calls.append(
+            {
+                "xI_type": type(xI),
+                "xJ_type": type(xJ),
+                "xI_lengths": [len(axis) for axis in xI],
+                "I_shape": tuple(np.asarray(I).shape),
+                "J_shape": tuple(np.asarray(J).shape),
+                "W0_shape": None if W0 is None else tuple(np.asarray(W0).shape),
+                "config": dict(config),
+            }
+        )
+        assert len(xI) == 2
+        assert len(xJ) == 2
+        assert np.asarray(I).shape == (1, 3, 4)
+        assert np.asarray(J).shape == (1, 3, 4)
+        assert np.asarray(W0).shape == (3, 4)
+        nt = int(config["nt"])
+        It = np.ones((nt, 1, 3, 4), dtype=np.float32)
+        det = np.ones((nt, 3, 4), dtype=np.float32)
+        return {
+            "It": It,
+            "det_jac_phi_I": det,
+            "det_jac_phi_J": det,
+        }
+
+    monkeypatch.setattr(
+        upsample_module,
+        "emlddmm_multiscale_symmetric_N",
+        fake_pair_helper,
+    )
+
+    xJ = _axes(np.array([0.0, 1.0, 2.0], dtype=np.float32), size_y=3, size_x=4)
+    J = np.zeros((1, 3, 3, 4), dtype=np.float32)
+    J[:, 0] = 1.0
+    J[:, 2] = 2.0
+    W = np.ones((3, 3, 4), dtype=np.float32)
+    present_mask = np.array([True, False, True], dtype=bool)
+
+    upsample_module.upsample_between_slices(
+        xJ,
+        J,
+        W=W,
+        present_mask=present_mask,
+        mode="seg",
+        config={"nt": 2},
+        parallel=False,
+    )
+
+    assert len(calls) == 2
+    assert all(call["xI_type"] is tuple for call in calls)
+    assert all(call["xI_lengths"] == [3, 4] for call in calls)
+    assert all(call["I_shape"] == (1, 3, 4) for call in calls)
+    assert all(call["W0_shape"] == (3, 4) for call in calls)
+    assert all(call["config"]["downI"] == [[1, 1]] for call in calls)
+    assert all(call["config"]["downJ"] == [[1, 1]] for call in calls)
+    assert all(call["config"]["local_contrast"] == [None] for call in calls)
+    assert all(call["config"]["up_vector"] == [None] for call in calls)
+    assert all(call["config"]["n_draw"] == 0 for call in calls)
+    assert all(call["config"]["dtype"] == "float32" for call in calls)
+    assert all(np.allclose(call["config"]["A"], np.eye(4, dtype=np.float32)) for call in calls)
+    assert all(call["config"]["A2d"] is None for call in calls)
+    assert all(call["config"]["Amode"] == 0 for call in calls)
+    assert all(call["config"]["eA"] == [0.0] for call in calls)
+    assert all(call["config"]["eA2d"] == [0.0] for call in calls)
+    assert all(call["config"]["slice_matching"] == [False] for call in calls)
 
 
 def test_segmentation_gap_fill_on_global_grid(monkeypatch):
@@ -244,22 +334,132 @@ def test_present_mask_overrides_image_content(monkeypatch):
     assert out["pairs"] == [(0, 2)]
 
 
+def test_pair_registration_rejects_too_short_xy_axes():
+    xJ = [
+        np.array([0.0, 1.0, 2.0], dtype=np.float32),
+        np.array([0.0], dtype=np.float32),
+        np.array([0.0, 1.0], dtype=np.float32),
+    ]
+    J = np.zeros((1, 3, 1, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="at least two points"):
+        upsample_module.upsample_between_slices(
+            xJ,
+            J,
+            mode="seg",
+            config={"nt": 2},
+            parallel=False,
+        )
+
+
+def test_pair_registration_rejects_3d_downsampling_config():
+    xJ = _axes(np.array([0.0, 1.0, 2.0], dtype=np.float32))
+    J = np.zeros((1, 3, 2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match=r"downI.*2D"):
+        upsample_module.upsample_between_slices(
+            xJ,
+            J,
+            mode="seg",
+            config={"nt": 2, "downI": [[1, 1, 1]], "downJ": [[1, 1]]},
+            parallel=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("local_contrast", [[1, 16, 16]]),
+        ("up_vector", [[0.0, 0.0, -1.0]]),
+    ],
+)
+def test_pair_registration_rejects_3d_only_options(name, value):
+    xJ = _axes(np.array([0.0, 1.0, 2.0], dtype=np.float32))
+    J = np.zeros((1, 3, 2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match=rf"{name}.*not supported"):
+        upsample_module.upsample_between_slices(
+            xJ,
+            J,
+            mode="seg",
+            config={"nt": 2, name: value},
+            parallel=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"nt": 2, "eA": [1.0]},
+        {"nt": 2, "eA2d": [1.0]},
+        {"nt": 2, "Amode": 1},
+        {"nt": 2, "slice_matching": [True]},
+        {"nt": 2, "A": np.diag([1.0, 1.0, 1.0, 2.0]).astype(np.float32)},
+        {"nt": 2, "A2d": np.diag([1.0, 1.0, 2.0]).astype(np.float32)},
+    ],
+)
+def test_pair_registration_rejects_affine_settings(config):
+    xJ = _axes(np.array([0.0, 1.0, 2.0], dtype=np.float32))
+    J = np.zeros((1, 3, 2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="upsampling"):
+        upsample_module.upsample_between_slices(
+            xJ,
+            J,
+            mode="seg",
+            config=config,
+            parallel=False,
+        )
+
+
+def test_pair_registration_rejects_out_of_plane_false():
+    xJ = _axes(np.array([0.0, 1.0, 2.0], dtype=np.float32))
+    J = np.zeros((1, 3, 2, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="out_of_plane=False is not supported"):
+        upsample_module.upsample_between_slices(
+            xJ,
+            J,
+            mode="seg",
+            config={"nt": 2, "out_of_plane": False},
+            parallel=False,
+        )
+
+
 def test_symmetric_helper_returns_both_jacobian_keys(monkeypatch):
     nt = 4
 
     def fake_multiscale(**kwargs):
+        assert [axis.numel() for axis in kwargs["xI"]] == [2, 2, 2]
+        assert tuple(kwargs["I"].shape) == (1, 2, 2, 2)
         return {
-            "v": torch.zeros((nt, 2, 2, 2), dtype=torch.float32),
+            "v": torch.zeros((nt, 3, 2, 2, 2), dtype=torch.float32),
             "xv": [
+                torch.arange(2, dtype=torch.float32),
                 torch.arange(2, dtype=torch.float32),
                 torch.arange(2, dtype=torch.float32),
             ],
         }
 
-    def fake_integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_integrate_inverse_flow(
+        xv,
+        v,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         return torch.zeros((nt + 1, 2, 2, 2), dtype=torch.float32)
 
-    def fake_warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_warp_time_series(
+        x,
+        image,
+        phis,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         base = torch.arange(phis.shape[0], dtype=torch.float32)[:, None, None, None]
         channels = torch.as_tensor(image).shape[0]
         return base.expand(phis.shape[0], channels, 2, 2)
@@ -268,7 +468,11 @@ def test_symmetric_helper_returns_both_jacobian_keys(monkeypatch):
         base = torch.arange(phi.shape[0], dtype=torch.float32)[:, None, None]
         return base.expand(phi.shape[0], 2, 2)
 
-    monkeypatch.setattr(symmetric_module.emlddmm, "emlddmm_multiscale", fake_multiscale)
+    monkeypatch.setattr(
+        symmetric_module,
+        "_resolve_emlddmm_module",
+        lambda: _fake_symmetric_backend(fake_multiscale),
+    )
     monkeypatch.setattr(symmetric_module, "_integrate_inverse_flow", fake_integrate_inverse_flow)
     monkeypatch.setattr(symmetric_module, "_warp_time_series", fake_warp_time_series)
     monkeypatch.setattr(symmetric_module, "_calculate_determinant_of_jacobian", fake_det)
@@ -289,6 +493,110 @@ def test_symmetric_helper_returns_both_jacobian_keys(monkeypatch):
     assert out["ItAll"].shape[0] == nt + 1
 
 
+def test_symmetric_helper_passes_coordinate_axes_as_tuples(monkeypatch):
+    nt = 3
+    multiscale_calls = []
+
+    def fake_multiscale(**kwargs):
+        multiscale_calls.append(kwargs)
+        assert isinstance(kwargs["xI"], tuple)
+        assert isinstance(kwargs["xJ"], tuple)
+        assert [axis.numel() for axis in kwargs["xI"]] == [2, 3, 4]
+        assert [axis.numel() for axis in kwargs["xJ"]] == [2, 3, 4]
+        assert tuple(kwargs["I"].shape) == (1, 2, 3, 4)
+        assert kwargs["downI"] == [1, 1, 1]
+        assert kwargs["downJ"] == [1, 1, 1]
+        assert kwargs["out_of_plane"] is True
+        assert kwargs["eA"] == 0.0
+        assert kwargs["eA2d"] == 0.0
+        assert kwargs["slice_matching"] is False
+        assert kwargs["Amode"] == 0
+        assert torch.allclose(kwargs["A"], torch.eye(4))
+        assert kwargs["A2d"] is None
+        return {
+            "v": torch.zeros((nt, 3, 2, 3, 4), dtype=torch.float32),
+            "xv": [
+                torch.arange(2, dtype=torch.float32),
+                torch.arange(3, dtype=torch.float32),
+                torch.arange(4, dtype=torch.float32),
+            ],
+        }
+
+    def fake_integrate_inverse_flow(
+        xv,
+        v,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
+        return torch.zeros((nt + 1, 2, 3, 4), dtype=torch.float32)
+
+    def fake_warp_time_series(
+        x,
+        image,
+        phis,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
+        channels = torch.as_tensor(image).shape[0]
+        return torch.zeros((phis.shape[0], channels, 3, 4), dtype=torch.float32)
+
+    def fake_det(phi, spacing=None):
+        return torch.ones((phi.shape[0], 3, 4), dtype=torch.float32)
+
+    monkeypatch.setattr(
+        symmetric_module,
+        "_resolve_emlddmm_module",
+        lambda: _fake_symmetric_backend(fake_multiscale),
+    )
+    monkeypatch.setattr(symmetric_module, "_integrate_inverse_flow", fake_integrate_inverse_flow)
+    monkeypatch.setattr(symmetric_module, "_warp_time_series", fake_warp_time_series)
+    monkeypatch.setattr(symmetric_module, "_calculate_determinant_of_jacobian", fake_det)
+
+    symmetric_module.emlddmm_multiscale_symmetric_N(
+        xI=[np.arange(3, dtype=np.float32), np.arange(4, dtype=np.float32)],
+        I=np.ones((1, 3, 4), dtype=np.float32),
+        xJ=[
+            np.arange(3, dtype=np.float32) + 10.0,
+            np.arange(4, dtype=np.float32) + 20.0,
+        ],
+        J=np.ones((1, 3, 4), dtype=np.float32) * 2.0,
+        nt=nt,
+    )
+
+    assert len(multiscale_calls) == 2
+    assert all(isinstance(call["xI"], tuple) for call in multiscale_calls)
+    assert all(isinstance(call["xJ"], tuple) for call in multiscale_calls)
+
+
+def test_symmetric_helper_resamples_velocity_transform_to_image_grid():
+    xv = [
+        torch.linspace(0.0, 3.0, 5),
+        torch.linspace(0.0, 3.0, 5),
+    ]
+    x = [
+        torch.arange(4, dtype=torch.float32),
+        torch.arange(4, dtype=torch.float32),
+    ]
+    velocity_mesh = torch.stack(torch.meshgrid(xv, indexing="ij"))
+    phis = velocity_mesh[None].repeat(2, 1, 1, 1)
+
+    out = symmetric_module._resample_transform_to_domain(
+        xv,
+        phis,
+        x,
+        emlddmm_module=_fake_symmetric_backend(),
+        interp2d=True,
+    )
+
+    image_mesh = torch.stack(torch.meshgrid(x, indexing="ij"))
+    assert tuple(out.shape) == (2, 2, 4, 4)
+    assert torch.allclose(out[0], image_mesh)
+
+
 def test_symmetric_helper_uses_domain_specific_axes_and_spacing(monkeypatch):
     nt = 4
     warp_axes = []
@@ -296,17 +604,33 @@ def test_symmetric_helper_uses_domain_specific_axes_and_spacing(monkeypatch):
 
     def fake_multiscale(**kwargs):
         return {
-            "v": torch.zeros((nt, 2, 2, 2), dtype=torch.float32),
+            "v": torch.zeros((nt, 3, 2, 2, 2), dtype=torch.float32),
             "xv": [
+                torch.arange(2, dtype=torch.float32),
                 torch.arange(2, dtype=torch.float32),
                 torch.arange(2, dtype=torch.float32),
             ],
         }
 
-    def fake_integrate_inverse_flow(xv, v, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_integrate_inverse_flow(
+        xv,
+        v,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         return torch.zeros((nt + 1, 2, 2, 2), dtype=torch.float32)
 
-    def fake_warp_time_series(x, image, phis, *, interp2d=None, grid_sample_kwargs=None):
+    def fake_warp_time_series(
+        x,
+        image,
+        phis,
+        *,
+        emlddmm_module,
+        interp2d=None,
+        grid_sample_kwargs=None,
+    ):
         warp_axes.append([np.asarray(axis) for axis in x])
         channels = torch.as_tensor(image).shape[0]
         return torch.zeros((phis.shape[0], channels, 2, 2), dtype=torch.float32)
@@ -315,7 +639,11 @@ def test_symmetric_helper_uses_domain_specific_axes_and_spacing(monkeypatch):
         det_spacings.append(tuple(float(s) for s in spacing))
         return torch.ones((phi.shape[0], 2, 2), dtype=torch.float32)
 
-    monkeypatch.setattr(symmetric_module.emlddmm, "emlddmm_multiscale", fake_multiscale)
+    monkeypatch.setattr(
+        symmetric_module,
+        "_resolve_emlddmm_module",
+        lambda: _fake_symmetric_backend(fake_multiscale),
+    )
     monkeypatch.setattr(symmetric_module, "_integrate_inverse_flow", fake_integrate_inverse_flow)
     monkeypatch.setattr(symmetric_module, "_warp_time_series", fake_warp_time_series)
     monkeypatch.setattr(symmetric_module, "_calculate_determinant_of_jacobian", fake_det)

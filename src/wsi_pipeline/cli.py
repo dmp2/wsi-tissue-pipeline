@@ -235,22 +235,30 @@ def qc(
     no_master: bool,
 ):
     """Generate QC contact sheets for tissue images."""
-    from .qc_grid import build_qc_grids
+    from .qc_grid import run_qc_workflow
 
     console.print(f"[bold blue]Building QC grids for:[/] {input_dir}")
 
     # Parse columns
     cols = "auto" if columns == "auto" else int(columns)
 
-    paths = build_qc_grids(
-        input_dir,
-        output_dir,
+    result = run_qc_workflow(
+        input_dir=input_dir,
+        output_dir=output_dir,
         thumb_size=thumb_size,
+        padding=1,
         columns=cols,
-        create_master=not no_master,
+        label_mode="slice",
+        backend="pil",
+        write_master=not no_master,
+        write_per_slide=True,
+        write_stats=True,
     )
 
-    console.print(f"\n[bold green]Created {len(paths)} QC images")
+    n_outputs = len(result.artifacts.per_slide_grids) + int(
+        result.artifacts.master_contact_sheet is not None
+    )
+    console.print(f"\n[bold green]Created {n_outputs} QC images")
 
 
 @main.command()

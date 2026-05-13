@@ -45,13 +45,36 @@ segmentation:
   # Structuring element size for morphological operations
   # Larger = smoother boundaries but may merge close sections
   struct_elem_px: 5
+
+  # Optional H&E brightfield stain gate before morphology
+  stain_gate: false
+  stain_gate_mode: "fixed"  # or "adaptive-od"/"adaptive-he" for H&E datasets
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
+  stain_pre_open_px: 0
   
   # Whether to attempt splitting touching tissue sections
   split_touching: true
   
-  # Aspect ratio threshold for splitting elongated components
-  # Higher = only split very elongated shapes
-  r_split: 3.0
+  # Watershed seed erosion radius for splitting touching components
+  # Higher can split stronger bridges, but may fragment real sections
+  r_split: 3
+
+  # Optional safety-net when expected tissue count is known
+  keep_top_k: null
+
+  # Optional H&E-aware cleanup for low-stain peripheral appendages
+  appendage_refinement_enabled: false
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+
+  # Component-level artifact QC after segmentation
+  component_qc_enabled: true
+  component_qc_mode: "annotate"
+  component_qc_profile: "he_sections"
 ```
 
 #### Backend Details
@@ -68,7 +91,7 @@ segmentation:
 Control how tissue regions are extracted as individual tiles.
 
 ```yaml
-tile:
+tiles:
   # Chunk size for Dask processing
   # Larger = faster but more memory
   chunk_size: 4096
@@ -78,7 +101,7 @@ tile:
   pad_multiple: 16
   
   # Extra margin around detected tissue (in pixels at full resolution)
-  extra_margin_px: 100
+  extra_margin_px: 0
 ```
 
 ### Output Settings
@@ -274,6 +297,7 @@ Important fields:
 - `units.target_unit_scale`: scales target axes into micrometers. The notebook-aligned preset assumes the prepared target already uses micrometers, so the default is `1.0`.
 - `units.desired_resolution_um`: requested target preprocessing resolution. Under the default `resampling.policy = "sectioned-stack"`, this applies to in-plane target axes while preserving the target section axis.
 - `resampling.policy`: outer pre-resampling policy for step 5. `sectioned-stack` is the default and preserves target axis `0` for current serial-section stacks. `legacy-target-first` preserves the older all-axis target-first behavior for compatibility.
+- `self_alignment.extra_kwargs`: optional backend kwargs for atlas-free self-alignment. The workflow defaults self-alignment to backend `dtype = "float32"` for compatibility with the installed EM-LDDMM transform/interpolation path.
 - `orientation_from` and `orientation_to`: backend orientation codes used to derive the initial affine when `init_affine_path` is not supplied. These are validated before registration starts and must use one axis from each pair `{R/L}`, `{A/P}`, and `{S/I}`.
 - `transformation_graph.script_path`: explicit path to the external `emlddmm` package's `transformation_graph_v01.py`. If omitted, step 5 tries to resolve it automatically from the installed package and only falls back to workspace-local development copies.
 - `outputs.write_qc_report`: writes `registration_report.html` and `registration_report.json` in the step-5 output directory.
@@ -329,7 +353,7 @@ segmentation:
   min_area_px: 200
   split_touching: false
 
-tile:
+tiles:
   # Need more margin for registration
   extra_margin_px: 200
 ```
@@ -369,13 +393,28 @@ segmentation:
   target_long_side: 2000
   min_area_px: 500
   struct_elem_px: 5
+  stain_gate: false
+  stain_gate_mode: "fixed"
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
+  stain_pre_open_px: 0
   split_touching: true
-  r_split: 3.0
+  r_split: 3
+  keep_top_k: null
+  appendage_refinement_enabled: false
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+  component_qc_enabled: true
+  component_qc_mode: "annotate"
+  component_qc_profile: "he_sections"
 
-tile:
+tiles:
   chunk_size: 4096
   pad_multiple: 16
-  extra_margin_px: 100
+  extra_margin_px: 0
 
 output:
   format: "ome-zarr"

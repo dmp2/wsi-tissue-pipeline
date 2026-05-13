@@ -12,6 +12,11 @@ After `step4`, the prepared dataset root should contain:
 Use that directory as `--dataset-root` for `step5`.
 `-o/--output` still works as a deprecated compatibility alias, but the canonical name is `--dataset-root`.
 
+Docker path convention:
+- Notebook 01 writes Docker outputs to `/output/tissue_sections`.
+- Notebook 04 prepares the same directory as the EM-LDDMM dataset root.
+- In Docker examples below, use `/output/tissue_sections` as `--dataset-root` and put optional external resources such as atlases, labels, configs, and precomputed inputs under `/data/resources`.
+
 ## Step-5 Modes
 
 Atlas-free mode:
@@ -86,7 +91,7 @@ Orientation-derived initialization:
 
 Resolution order for `transformation_graph_v01.py`:
 1. `--transformation-graph-script`
-2. installed external `emlddmm` package
+2. external `emlddmm` checkout on `PYTHONPATH`
 3. workspace-local development fallback
 
 Important:
@@ -124,16 +129,16 @@ Atlas-free:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles
+  --dataset-root /output/tissue_sections
 ```
 
 Atlas registration from prepared slices:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles \
-  --atlas /data/atlas.vtk \
-  --label /data/atlas_labels.vtk \
+  --dataset-root /output/tissue_sections \
+  --atlas /data/resources/atlas.vtk \
+  --label /data/resources/atlas_labels.vtk \
   --orientation-from PIR \
   --orientation-to RIP
 ```
@@ -142,18 +147,18 @@ Precomputed target input:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles \
-  --target-source /data/precomputed_plate \
+  --dataset-root /output/tissue_sections \
+  --target-source /data/resources/precomputed_plate \
   --target-source-format precomputed \
-  --precomputed-manifest /data/tiles/emlddmm_dataset_manifest.json
+  --precomputed-manifest /output/tissue_sections/emlddmm_dataset_manifest.json
 ```
 
 Dry-run with QC report planning:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles \
-  --atlas /data/atlas.vtk \
+  --dataset-root /output/tissue_sections \
+  --atlas /data/resources/atlas.vtk \
   --orientation-from PIR \
   --orientation-to RIP \
   --write-qc-report \
@@ -164,8 +169,8 @@ Transformation-graph execution with explicit script path:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles \
-  --atlas /data/atlas.vtk \
+  --dataset-root /output/tissue_sections \
+  --atlas /data/resources/atlas.vtk \
   --orientation-from PIR \
   --orientation-to RIP \
   --run-transformation-graph \

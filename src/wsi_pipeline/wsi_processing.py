@@ -18,10 +18,24 @@ from scipy import ndimage as ndi
 from skimage import filters, measure, morphology
 from skimage.filters.rank import entropy as rank_entropy
 from skimage.morphology import disk
-from skimage.segmentation import watershed
-from skimage.transform import resize
 
 from .config import PipelineConfig, SegmentationConfig, TileConfig, load_config
+from .segmentation.appendage import refine_appendages
+from .segmentation.component_qc import filter_mask_by_labels, score_components
+from .segmentation.core import (
+    create_thumbnail as _shared_create_thumbnail,
+)
+from .segmentation.core import (
+    upsample_mask as _shared_upsample_mask,
+)
+from .segmentation.morphology import (
+    keep_largest_components as _shared_keep_largest_components,
+)
+from .segmentation.morphology import (
+    split_touching_components as _shared_split_touching_components,
+)
+from .segmentation.stain import he_stain_mask
+from .tiles.generator import generate_tissue_tiles
 
 logger = logging.getLogger(__name__)
 
@@ -73,21 +87,7 @@ def _create_thumbnail(
     scale : float
         Scale factor (thumbnail_size / original_size).
     """
-    if isinstance(img, da.Array):
-        H, W = int(img.shape[0]), int(img.shape[1])
-        arr = img.compute()
-    else:
-        H, W = img.shape[:2]
-        arr = img
-
-    if target_long_side and max(H, W) != target_long_side:
-        scale = target_long_side / max(H, W)
-        Ht = max(1, int(round(H * scale)))
-        Wt = max(1, int(round(W * scale)))
-        out = resize(arr, (Ht, Wt), order=1, preserve_range=True, anti_aliasing=True)
-        return out.astype(arr.dtype), scale
-
-    return arr, 1.0
+    return _shared_create_thumbnail(img, target_long_side)
 
 
 def _upsample_mask(
@@ -95,16 +95,16 @@ def _upsample_mask(
     target_shape: tuple[int, int],
 ) -> np.ndarray:
     """Upsample boolean mask using nearest-neighbor interpolation."""
-    H, W = target_shape
-    return resize(
-        mask_thumbnail.astype(np.uint8), (H, W), order=0, preserve_range=True
-    ).astype(bool)
+    return _shared_upsample_mask(mask_thumbnail, target_shape)
 
 
 def _entropy_mask(
     gray: np.ndarray | da.Array,
     struct_elem_px: int,
     min_area: int,
+    *,
+    stain_mask: np.ndarray | None = None,
+    pre_open_px: int = 0,
 ) -> np.ndarray:
     """
     Create tissue mask using local entropy.
@@ -117,6 +117,10 @@ def _entropy_mask(
         Structuring element radius.
     min_area : int
         Minimum object area in pixels.
+    stain_mask : np.ndarray, optional
+        Boolean stain-confidence mask to apply before morphology.
+    pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
 
     Returns
     -------
@@ -153,6 +157,11 @@ def _entropy_mask(
     thr = filters.threshold_otsu(ent_np)
     bw = ent_np > thr
 
+    if stain_mask is not None:
+        bw = bw & np.asarray(stain_mask, dtype=bool)
+    if pre_open_px > 0:
+        bw = morphology.opening(bw, footprint=disk(int(pre_open_px)))
+
     # Morphological cleanup
     bw = morphology.binary_closing(bw, footprint=fp)
     bw = ndi.binary_fill_holes(bw)
@@ -166,6 +175,9 @@ def _otsu_mask(
     gray: np.ndarray,
     struct_elem_px: int,
     min_area: int,
+    *,
+    stain_mask: np.ndarray | None = None,
+    pre_open_px: int = 0,
 ) -> np.ndarray:
     """Create tissue mask using global Otsu threshold."""
     # Gaussian blur
@@ -174,6 +186,11 @@ def _otsu_mask(
     # Otsu threshold (tissue is darker than background)
     thr = filters.threshold_otsu(sm)
     bw = sm < thr
+
+    if stain_mask is not None:
+        bw = bw & np.asarray(stain_mask, dtype=bool)
+    if pre_open_px > 0:
+        bw = morphology.opening(bw, footprint=disk(int(pre_open_px)))
 
     # Morphological cleanup
     fp = disk(struct_elem_px)
@@ -186,7 +203,7 @@ def _otsu_mask(
 
 def _split_touching_components(
     mask: np.ndarray,
-    r_split: int = 2,
+    r_split: int = 3,
     min_area: int = 256,
 ) -> np.ndarray:
     """
@@ -206,32 +223,7 @@ def _split_touching_components(
     mask : np.ndarray
         Mask with touching components separated.
     """
-    mask = np.asarray(mask, dtype=bool)
-    if not mask.any() or r_split <= 0:
-        return morphology.remove_small_objects(mask, min_size=min_area)
-
-    # Generate seeds by erosion
-    seeds = morphology.binary_erosion(mask, footprint=disk(r_split))
-    markers = measure.label(seeds, connectivity=2)
-
-    # Fallback if erosion removed all markers
-    if markers.max() == 0:
-        dist = ndi.distance_transform_edt(mask)
-        if dist.max() > 0:
-            peak = np.zeros_like(mask, dtype=bool)
-            peak[np.unravel_index(np.argmax(dist), dist.shape)] = True
-            markers = measure.label(peak, connectivity=2)
-
-    # Watershed
-    dist = ndi.distance_transform_edt(mask)
-    labels = watershed(-dist, markers=markers, mask=mask, watershed_line=True)
-    out = labels > 0
-
-    # Cleanup
-    min_area_post = max(64, min_area // 2)
-    out = morphology.remove_small_objects(out, min_size=min_area_post)
-
-    return out
+    return _shared_split_touching_components(mask, r_split=r_split, min_area=min_area)
 
 
 def _load_image(input_path: Path) -> np.ndarray:
@@ -282,8 +274,20 @@ def segment_tissue(
     target_long_side: int = 1800,
     min_area_px: int = 3000,
     struct_elem_px: int = 4,
+    stain_gate: bool = False,
+    stain_gate_mode: str = "fixed",
+    stain_min_saturation: float = 0.08,
+    stain_min_od: float = 0.35,
+    stain_min_he_signal: float = 0.0,
+    stain_od_bg_percentile: float = 0.80,
+    stain_od_mad_multiplier: float = 4.0,
+    stain_pre_open_px: int = 0,
     split_touching: bool = True,
-    r_split: int = 2,
+    r_split: int = 3,
+    keep_top_k: int | None = None,
+    appendage_refinement_enabled: bool = False,
+    appendage_refinement_mode: str = "trim",
+    appendage_refinement_profile: str = "he_sections",
     diagnostics: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """
@@ -301,10 +305,34 @@ def segment_tissue(
         Minimum tissue area in pixels (at thumbnail scale).
     struct_elem_px : int
         Structuring element radius.
+    stain_gate : bool
+        Apply an H&E stain-confidence gate before morphology.
+    stain_gate_mode : str
+        H&E gate mode: "fixed", "adaptive-od", or "adaptive-he".
+    stain_min_saturation : float
+        Minimum HSV saturation for fixed stain-confidence gating.
+    stain_min_od : float
+        Minimum summed optical density, or adaptive mode floor.
+    stain_min_he_signal : float
+        Optional minimum HED hematoxylin+eosin signal for stain rescue.
+    stain_od_bg_percentile : float
+        Brightness percentile for adaptive background optical-density estimation.
+    stain_od_mad_multiplier : float
+        Robust MAD multiplier for adaptive optical-density gating.
+    stain_pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
     split_touching : bool
         Whether to split touching tissue sections.
     r_split : int
         Radius for splitting.
+    keep_top_k : int, optional
+        Keep only the K largest connected components after splitting.
+    appendage_refinement_enabled : bool
+        Trim or annotate weakly stained peripheral appendages before tile extraction.
+    appendage_refinement_mode : str
+        Appendage refinement mode: "trim" or "annotate".
+    appendage_refinement_profile : str
+        Appendage refinement profile. Currently only "he_sections" is supported.
     diagnostics : bool
         Enable diagnostic output.
 
@@ -329,25 +357,75 @@ def segment_tissue(
     thumb, scale = _create_thumbnail(img, target_long_side)
     Ht, Wt = thumb.shape[:2]
 
-    # Scale parameters
-    area_scale = (Ht * Wt) / (H * W) if H > 0 and W > 0 else 1.0
-    min_area_scaled = max(64, int(min_area_px * area_scale))
-    struct_elem_scaled = max(2, int(struct_elem_px * scale))
+    # Segmentation parameters are defined at thumbnail scale.  Keeping them
+    # stable across source sizes avoids admitting tiny background components
+    # when a large slide is downsampled for mask generation.
+    min_area_scaled = max(64, int(min_area_px))
+    struct_elem_scaled = max(2, int(struct_elem_px))
 
     # Convert to grayscale
     gray = _to_gray(thumb)
+    stain_mask_t = None
+    stain_info: dict[str, Any] = {}
+    if stain_gate:
+        stain_mask_t, stain_info = he_stain_mask(
+            thumb,
+            mode=stain_gate_mode,
+            min_saturation=stain_min_saturation,
+            min_od=stain_min_od,
+            min_he_signal=stain_min_he_signal,
+            od_bg_percentile=stain_od_bg_percentile,
+            od_mad_multiplier=stain_od_mad_multiplier,
+            return_info=True,
+        )
 
     # Segment based on backend
     if backend == "local-entropy":
-        mask_t = _entropy_mask(gray, struct_elem_scaled, min_area_scaled)
+        mask_t = _entropy_mask(
+            gray,
+            struct_elem_scaled,
+            min_area_scaled,
+            stain_mask=stain_mask_t,
+            pre_open_px=stain_pre_open_px,
+        )
     elif backend == "local-otsu":
-        mask_t = _otsu_mask(gray, struct_elem_scaled, min_area_scaled)
+        mask_t = _otsu_mask(
+            gray,
+            struct_elem_scaled,
+            min_area_scaled,
+            stain_mask=stain_mask_t,
+            pre_open_px=stain_pre_open_px,
+        )
     else:
         raise ValueError(f"Unsupported backend: {backend}")
 
     # Split touching components
     if split_touching:
         mask_t = _split_touching_components(mask_t, r_split, min_area_scaled)
+
+    appendage_info: dict[str, Any] = {
+        "enabled": appendage_refinement_enabled,
+        "mode": appendage_refinement_mode,
+        "profile": appendage_refinement_profile,
+        "n_appendages_flagged": 0,
+        "flagged_area_px": 0,
+        "n_appendages_trimmed": 0,
+        "trimmed_area_px": 0,
+        "trimmed_fraction": 0.0,
+        "appendage_reason": "",
+        "records": [],
+    }
+    if appendage_refinement_enabled:
+        mask_t, appendage_info = refine_appendages(
+            thumb,
+            mask_t,
+            mode=appendage_refinement_mode,
+            profile=appendage_refinement_profile,
+            min_area_px=min_area_scaled,
+            he_mask=stain_mask_t if stain_gate and stain_gate_mode == "adaptive-he" else None,
+        )
+
+    mask_t = _shared_keep_largest_components(mask_t, keep_top_k)
 
     # Count components
     labeled, n_components = measure.label(mask_t, return_num=True, connectivity=2)
@@ -359,14 +437,27 @@ def segment_tissue(
         "scale": scale,
         "struct_elem_px": struct_elem_scaled,
         "min_area": min_area_scaled,
+        "stain_gate": stain_gate,
+        "stain_gate_mode": stain_gate_mode,
+        "stain_min_saturation": stain_min_saturation,
+        "stain_min_od": stain_min_od,
+        "stain_min_he_signal": stain_min_he_signal,
+        "stain_od_bg_percentile": stain_od_bg_percentile,
+        "stain_od_mad_multiplier": stain_od_mad_multiplier,
+        "stain_od_threshold": stain_info.get("od_threshold"),
+        "stain_he_threshold": stain_info.get("he_threshold"),
+        "stain_pre_open_px": stain_pre_open_px,
+        "appendage_refinement": appendage_info,
         "n_components": n_components,
+        "keep_top_k": keep_top_k,
     }
 
     if diagnostics:
         logger.debug(
             "[segmenter] backend=%s size_t=(%d, %d) struct_elem_px=%s min_area=%s "
-            "r_split=%s CCs: %s",
-            backend, Ht, Wt, struct_elem_scaled, min_area_scaled, r_split, n_components
+            "stain_gate=%s r_split=%s CCs: %s",
+            backend, Ht, Wt, struct_elem_scaled, min_area_scaled, stain_gate,
+            r_split, n_components
         )
 
     # Upsample mask to full resolution
@@ -383,7 +474,13 @@ def extract_tissue_tiles(
     extra_margin_px: int = 0,
 ) -> list[da.Array]:
     """
-    Extract individual tissue tiles from image using mask.
+    Extract individual tissue tiles from image using a segmentation mask.
+
+    This is the notebook/CLI-facing wrapper around
+    :func:`wsi_pipeline.tiles.generator.generate_tissue_tiles`.  The mask may be
+    a full-resolution upsampled mask or a lower-resolution thumbnail mask; the
+    output tiles are centered, square, and share one common side length for the
+    source image.
 
     Parameters
     ----------
@@ -401,78 +498,28 @@ def extract_tissue_tiles(
     Returns
     -------
     tiles : list of dask.array.Array
-        List of tissue tiles.
+        List of centered square tissue tiles in ``(Y, X, C)`` order.
     """
-    # Label connected components
-    labeled, n_labels = measure.label(mask, return_num=True, connectivity=2)
+    if isinstance(img, da.Array):
+        img_da = img
+    else:
+        img_da = da.from_array(img, chunks=(chunk_size, chunk_size, -1))
 
-    tiles = []
-    for i in range(1, n_labels + 1):
-        # Create component mask
-        component_mask = labeled == i
+    if img_da.ndim != 3:
+        raise ValueError("Expected image with shape (Y, X, C) or (C, Y, X).")
 
-        # Fill holes within component
-        component_mask = ndi.binary_fill_holes(component_mask)
+    if img_da.shape[0] in (1, 3) and img_da.shape[-1] not in (1, 3):
+        s0_cyx = img_da
+    else:
+        s0_cyx = da.moveaxis(img_da, -1, 0)
 
-        # Find bounding box
-        rows = np.any(component_mask, axis=1)
-        cols = np.any(component_mask, axis=0)
-
-        if not rows.any() or not cols.any():
-            continue
-
-        y_idx = np.where(rows)[0]
-        x_idx = np.where(cols)[0]
-        y0, y1 = int(y_idx[0]), int(y_idx[-1]) + 1
-        x0, x1 = int(x_idx[0]), int(x_idx[-1]) + 1
-
-        # Add margin
-        if extra_margin_px > 0:
-            H, W = mask.shape
-            y0 = max(0, y0 - extra_margin_px)
-            y1 = min(H, y1 + extra_margin_px)
-            x0 = max(0, x0 - extra_margin_px)
-            x1 = min(W, x1 + extra_margin_px)
-
-        # Extract tile
-        if isinstance(img, da.Array):
-            tile = img[y0:y1, x0:x1, :]
-        else:
-            tile = da.from_array(img[y0:y1, x0:x1, :], chunks=(chunk_size, chunk_size, -1))
-
-        # Apply mask (set background to 0)
-        mask_region = component_mask[y0:y1, x0:x1]
-        if isinstance(tile, da.Array):
-            mask_da = da.from_array(mask_region[..., np.newaxis], chunks=tile.chunks[:2] + ((1,),))
-            tile = da.where(mask_da, tile, 0)
-        else:
-            tile = np.where(mask_region[..., np.newaxis], tile, 0)
-
-        # Pad to multiple
-        if pad_multiple > 1:
-            h, w = tile.shape[:2]
-            new_h = ((h + pad_multiple - 1) // pad_multiple) * pad_multiple
-            new_w = ((w + pad_multiple - 1) // pad_multiple) * pad_multiple
-
-            if new_h > h or new_w > w:
-                if isinstance(tile, da.Array):
-                    pad_h = new_h - h
-                    pad_w = new_w - w
-                    tile = da.pad(
-                        tile,
-                        ((0, pad_h), (0, pad_w), (0, 0)),
-                        mode="constant",
-                        constant_values=0,
-                    )
-                else:
-                    tile = np.pad(
-                        tile,
-                        ((0, new_h - h), (0, new_w - w), (0, 0)),
-                        mode="constant",
-                    )
-
-        tiles.append(tile)
-
+    tiles, _tile_dim = generate_tissue_tiles(
+        s0_cyx=s0_cyx,
+        low_res_filled=np.asarray(mask, dtype=bool),
+        chunk=chunk_size,
+        pad_multiple=pad_multiple,
+        extra_margin_px=extra_margin_px,
+    )
     return tiles
 
 
@@ -536,10 +583,53 @@ def process_wsi(
         target_long_side=segmentation_config.target_long_side,
         min_area_px=segmentation_config.min_area_px,
         struct_elem_px=segmentation_config.struct_elem_px,
+        stain_gate=segmentation_config.stain_gate,
+        stain_gate_mode=segmentation_config.stain_gate_mode,
+        stain_min_saturation=segmentation_config.stain_min_saturation,
+        stain_min_od=segmentation_config.stain_min_od,
+        stain_min_he_signal=segmentation_config.stain_min_he_signal,
+        stain_od_bg_percentile=segmentation_config.stain_od_bg_percentile,
+        stain_od_mad_multiplier=segmentation_config.stain_od_mad_multiplier,
+        stain_pre_open_px=segmentation_config.stain_pre_open_px,
         split_touching=segmentation_config.split_touching,
         r_split=segmentation_config.r_split,
+        keep_top_k=segmentation_config.keep_top_k,
+        appendage_refinement_enabled=segmentation_config.appendage_refinement_enabled,
+        appendage_refinement_mode=segmentation_config.appendage_refinement_mode,
+        appendage_refinement_profile=segmentation_config.appendage_refinement_profile,
         diagnostics=segmentation_config.diagnostics,
     )
+
+    component_qc_records: list[dict[str, Any]] = []
+    component_qc_by_tile: dict[int, dict[str, Any]] = {}
+    if segmentation_config.component_qc_enabled:
+        component_qc_records = [
+            record.to_dict()
+            for record in score_components(
+                img,
+                mask,
+                profile=segmentation_config.component_qc_profile,
+            )
+        ]
+
+        if segmentation_config.component_qc_mode == "drop_artifacts":
+            labels_to_keep = {
+                int(record["component_label"])
+                for record in component_qc_records
+                if not bool(record["artifact_likely"])
+            }
+            mask = filter_mask_by_labels(mask, labels_to_keep)
+            component_qc_records = [
+                record for record in component_qc_records
+                if int(record["component_label"]) in labels_to_keep
+            ]
+            for new_idx, record in enumerate(component_qc_records):
+                record["tile_index_on_source"] = new_idx
+
+        component_qc_by_tile = {
+            int(record["tile_index_on_source"]): record
+            for record in component_qc_records
+        }
 
     # Extract tiles
     tiles = extract_tissue_tiles(
@@ -554,6 +644,7 @@ def process_wsi(
     import imageio.v3 as iio
 
     output_paths = []
+    tile_records = []
     for i, tile in enumerate(tiles):
         if isinstance(tile, da.Array):
             tile_np = tile.compute()
@@ -573,6 +664,16 @@ def process_wsi(
         output_path = output_dir / output_name
         iio.imwrite(output_path, tile_np)
         output_paths.append(output_path)
+        tile_records.append(
+            {
+                "source_image": input_path.name,
+                "tile_index_on_source": i,
+                "path": str(output_path),
+                "width": int(tile_np.shape[1]),
+                "height": int(tile_np.shape[0]),
+                "component_qc": component_qc_by_tile.get(i),
+            }
+        )
 
     # Save metadata
     metadata = {
@@ -580,7 +681,15 @@ def process_wsi(
         "output_dir": str(output_dir),
         "n_tiles": len(tiles),
         "segmentation": seg_info,
+        "appendage_refinement": seg_info.get("appendage_refinement"),
+        "component_qc": {
+            "enabled": segmentation_config.component_qc_enabled,
+            "mode": segmentation_config.component_qc_mode,
+            "profile": segmentation_config.component_qc_profile,
+            "records": component_qc_records,
+        },
         "output_paths": [str(p) for p in output_paths],
+        "tile_records": tile_records,
     }
 
     metadata_path = output_dir / f"{input_path.stem}_metadata.json"

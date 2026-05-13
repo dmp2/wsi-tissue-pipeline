@@ -88,6 +88,8 @@ mlflow = [
 visualization = [
     "neuroglancer>=2.37",
     "matplotlib>=3.7.0",
+    "pyvista>=0.43.0",
+    "vtk>=9.2.0",
 ]
 
 cloudvolume = [
@@ -101,8 +103,8 @@ bioformats = [
 ]
 
 torch = [
-    "torch>=2.0.0",
-    "torchvision>=0.15.0",
+    "torch>=2.0.0,<2.11",
+    "torchvision>=0.15.0,<0.26",
 ]
 
 pathology = [

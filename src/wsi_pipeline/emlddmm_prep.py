@@ -19,10 +19,13 @@ Functions that require it will raise a clear error if it is not installed.
 from __future__ import annotations
 
 import csv
+import importlib.util
 import json
 import logging
 import os
 import re
+import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +36,77 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _looks_like_emlddmm_checkout(path: Path) -> bool:
+    return (path / "histsetup.py").is_file() and (path / "emlddmm.py").is_file()
+
+
+def resolve_emlddmm_checkout(
+    extra_candidates: Iterable[str | os.PathLike[str]] | None = None,
+) -> Path | None:
+    """Find a source checkout of the upstream ``emlddmm`` repository.
+
+    Local notebooks may run from the repository root or from ``notebooks/``.
+    This resolver accepts both layouts for a sibling ``../emlddmm`` checkout,
+    plus explicit ``EMLDDMM_HOME`` / ``EMLDDMM_REPO`` environment overrides.
+    """
+    candidates: list[Path] = []
+
+    for env_var in ("EMLDDMM_HOME", "EMLDDMM_REPO"):
+        env_value = os.environ.get(env_var)
+        if env_value:
+            candidates.append(Path(env_value).expanduser())
+
+    if extra_candidates is not None:
+        candidates.extend(Path(path).expanduser() for path in extra_candidates)
+
+    cwd = Path.cwd().resolve()
+    for root in (cwd, *list(cwd.parents)[:3]):
+        candidates.append(root / "emlddmm")
+
+    package_root = Path(__file__).resolve().parents[2]
+    candidates.extend(
+        [
+            package_root / "emlddmm",
+            package_root.parent / "emlddmm",
+        ]
+    )
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        expanded_candidates = [candidate]
+        if candidate.name != "emlddmm":
+            expanded_candidates.append(candidate / "emlddmm")
+
+        for expanded in expanded_candidates:
+            resolved = expanded.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if _looks_like_emlddmm_checkout(resolved):
+                return resolved
+
+    return None
+
+
+def ensure_emlddmm_on_path(
+    required_module: str = "histsetup",
+    extra_candidates: Iterable[str | os.PathLike[str]] | None = None,
+) -> Path | None:
+    """Add a local upstream ``emlddmm`` checkout to ``sys.path`` if needed."""
+    if importlib.util.find_spec(required_module) is not None:
+        return None
+
+    checkout = resolve_emlddmm_checkout(extra_candidates=extra_candidates)
+    if checkout is None:
+        return None
+
+    checkout_str = str(checkout)
+    if checkout_str not in sys.path:
+        sys.path.insert(0, checkout_str)
+    return checkout
+
 
 def _detect_img_ext(fnames: list[str]) -> str:
     """Auto-detect the most common image extension from a list of filenames.
@@ -541,13 +615,19 @@ def set_up_hist_for_emlddmm(config: dict) -> None:
     ImportError
         If the ``histsetup`` module (from the ``emlddmm`` package) is not installed.
     """
+    ensure_emlddmm_on_path("histsetup")
     try:
         import histsetup as hs
     except ImportError as err:
         raise ImportError(
             "The 'histsetup' module from the 'emlddmm' package is required "
-            "for set_up_hist_for_emlddmm(). Install it with:\n"
-            "  pip install emlddmm\n"
+            "for set_up_hist_for_emlddmm(). Set it up with:\n"
+            "  git clone https://github.com/twardlab/emlddmm.git ../emlddmm\n"
+            '  python -m pip install -c constraints.txt "h5py>=3.10" "nibabel>=5.0"\n'
+            "  python -m pip install --index-url https://download.pytorch.org/whl/cpu "
+            '"torch==2.10.0+cpu"\n'
+            "  export PYTHONPATH=\"$(cd ../emlddmm && pwd):${PYTHONPATH}\"\n"
+            "Alternatively set EMLDDMM_HOME=/path/to/emlddmm before starting Jupyter, "
             "or add it to sys.path manually."
         ) from err
 

@@ -16,12 +16,35 @@ segmentation:
   
   # Structuring element size for morphological operations
   struct_elem_px: 5
+
+  # Optional H&E brightfield stain gate before morphology
+  stain_gate: false
+  stain_gate_mode: "fixed"
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
+  stain_pre_open_px: 0
   
   # Whether to split touching tissue sections
   split_touching: true
   
-  # Ratio threshold for splitting elongated components
-  r_split: 3.0
+  # Watershed seed erosion radius for splitting touching components
+  r_split: 3
+
+  # Optional safety-net: keep only the largest K components when expected count is known
+  keep_top_k: null
+
+  # Optional H&E-aware cleanup for low-stain peripheral appendages
+  appendage_refinement_enabled: false
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+
+  # Component-level artifact QC after segmentation
+  component_qc_enabled: true
+  component_qc_mode: "annotate"
+  component_qc_profile: "he_sections"
 
 # Tile extraction settings
 tiles:
@@ -32,7 +55,7 @@ tiles:
   pad_multiple: 16
   
   # Extra margin around detected tissue (pixels at full resolution)
-  extra_margin_px: 100
+  extra_margin_px: 0
 
 # Output format settings
 output:

@@ -13,7 +13,14 @@ from skimage.filters.rank import entropy as rank_entropy
 from skimage.morphology import disk
 
 
-def entropy_mask(gray: np.ndarray | da.Array, struct_elem_px: int, min_area: int) -> np.ndarray:
+def entropy_mask(
+    gray: np.ndarray | da.Array,
+    struct_elem_px: int,
+    min_area: int,
+    *,
+    stain_mask: np.ndarray | None = None,
+    pre_open_px: int = 0,
+) -> np.ndarray:
     """
     Local-entropy tissue mask that works with either NumPy (thumbnail) or Dask arrays.
 
@@ -31,6 +38,10 @@ def entropy_mask(gray: np.ndarray | da.Array, struct_elem_px: int, min_area: int
         Structuring element radius.
     min_area : int
         Minimum object area in pixels.
+    stain_mask : np.ndarray, optional
+        Boolean stain-confidence mask to apply before morphology.
+    pre_open_px : int
+        Optional opening radius applied after stain gating and before closing.
 
     Returns
     -------
@@ -75,6 +86,11 @@ def entropy_mask(gray: np.ndarray | da.Array, struct_elem_px: int, min_area: int
 
     thr = filters.threshold_otsu(ent_np)
     bw = ent_np > thr
+
+    if stain_mask is not None:
+        bw = bw & np.asarray(stain_mask, dtype=bool)
+    if pre_open_px > 0:
+        bw = morphology.opening(bw, footprint=disk(int(pre_open_px)))
 
     # morphology to get solid sections
     bw = morphology.binary_closing(bw, footprint=fp)

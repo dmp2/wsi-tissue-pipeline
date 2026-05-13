@@ -86,7 +86,7 @@ def sample_config() -> dict:
             "min_area_px": 100,
             "struct_elem_px": 3,
             "split_touching": False,
-            "r_split": 3.0,
+            "r_split": 3,
         },
         "tiles": {
             "chunk_size": 512,

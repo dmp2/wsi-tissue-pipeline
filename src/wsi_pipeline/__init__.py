@@ -47,7 +47,7 @@ from wsi_pipeline.config import PipelineConfig, load_config
 from wsi_pipeline.etsfile import ETSFile, ETSFileError
 
 # Quality control
-from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids
+from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids, run_qc_workflow
 
 # Segmentation (high-level)
 from wsi_pipeline.segmentation import WSISegmenter, segment_mask
@@ -90,4 +90,5 @@ __all__ = [
     # Quality control
     "QCGridBuilder",
     "build_qc_grids",
+    "run_qc_workflow",
 ]

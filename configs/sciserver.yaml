@@ -8,14 +8,29 @@ segmentation:
   target_long_side: 2000
   min_area_px: 500
   struct_elem_px: 5
+  stain_gate: false
+  stain_gate_mode: "fixed"
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
+  stain_pre_open_px: 0
   split_touching: true
-  r_split: 3.0
+  r_split: 3
+  keep_top_k: null
+  appendage_refinement_enabled: false
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+  component_qc_enabled: true
+  component_qc_mode: "annotate"
+  component_qc_profile: "he_sections"
 
 tiles:
   # Optimize for server-class hardware
   chunk_size: 8192
   pad_multiple: 32
-  extra_margin_px: 100
+  extra_margin_px: 0
 
 output:
   format: "ome-zarr"

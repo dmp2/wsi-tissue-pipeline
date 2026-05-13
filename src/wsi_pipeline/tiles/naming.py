@@ -7,8 +7,12 @@ including support for coordinate-based naming conventions.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
+from typing import Any
+
+from PIL import Image
 
 
 def normalize_ext(ext: str) -> str:
@@ -67,6 +71,107 @@ def add_overall_suffix(p: Path, label: str, pad: int) -> Path:
     return p.with_name(f"{stem}_{label}{p.suffix}")
 
 
+def _strip_overall_suffix(name: str, pad: int) -> str:
+    path = Path(name)
+    stem = re.sub(rf"(_\d{{{pad}}})$", "", path.stem)
+    return f"{stem}{path.suffix}"
+
+
+def _infer_source_image_and_tile_index(path: Path, pad: int) -> tuple[str, int]:
+    stem = re.sub(rf"(_\d{{{pad}}})$", "", path.stem)
+    match = re.match(r"^(?P<source>.+)_(?P<tile>\d+)$", stem)
+    if match:
+        return match.group("source"), int(match.group("tile"))
+    return stem, 0
+
+
+def _load_tile_metadata(output_dir: Path, pad: int) -> dict[str, dict[str, Any]]:
+    lookup: dict[str, dict[str, Any]] = {}
+    for metadata_path in sorted(output_dir.glob("*_metadata.json")):
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        source_image = Path(payload.get("input_path", "")).name or metadata_path.name.replace("_metadata.json", "")
+
+        tile_records = payload.get("tile_records") or []
+        if tile_records:
+            for record in tile_records:
+                path = Path(record["path"])
+                entry = {
+                    "source_image": record.get("source_image", source_image),
+                    "tile_index_on_source": int(record.get("tile_index_on_source", 0)),
+                    "width": int(record.get("width", 0)),
+                    "height": int(record.get("height", 0)),
+                    "component_qc": record.get("component_qc"),
+                }
+                lookup[path.name] = entry
+                lookup[_strip_overall_suffix(path.name, pad)] = entry
+            continue
+
+        for idx, path_str in enumerate(payload.get("output_paths", [])):
+            path = Path(path_str)
+            entry = {
+                "source_image": source_image,
+                "tile_index_on_source": idx,
+                "width": 0,
+                "height": 0,
+                "component_qc": None,
+            }
+            lookup[path.name] = entry
+            lookup[_strip_overall_suffix(path.name, pad)] = entry
+
+    return lookup
+
+
+def _build_manifest_record(
+    output_dir: Path,
+    path: Path,
+    overall_label_text: str,
+    pad: int,
+    metadata_lookup: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    metadata = (
+        metadata_lookup.get(path.name)
+        or metadata_lookup.get(_strip_overall_suffix(path.name, pad))
+        or {}
+    )
+    source_image, tile_index_on_source = _infer_source_image_and_tile_index(path, pad)
+    source_image = str(metadata.get("source_image", source_image))
+    tile_index_on_source = int(metadata.get("tile_index_on_source", tile_index_on_source))
+
+    width = int(metadata.get("width", 0))
+    height = int(metadata.get("height", 0))
+    if width <= 0 or height <= 0:
+        with Image.open(path) as img:
+            width = img.width
+            height = img.height
+
+    return {
+        "relative_path": str(path.relative_to(output_dir)),
+        "filename": path.name,
+        "source_image": source_image,
+        "tile_index_on_source": tile_index_on_source,
+        "overall_index": int(overall_label_text),
+        "overall_label": overall_label_text,
+        "width": width,
+        "height": height,
+        "component_qc": metadata.get("component_qc"),
+    }
+
+
+def _write_tile_manifest(
+    output_dir: Path,
+    manifest_records: list[dict[str, Any]],
+) -> Path:
+    manifest_path = output_dir / "tile_manifest.json"
+    payload = {
+        "version": 1,
+        "input_dir": str(output_dir.resolve()),
+        "generated_by": "wsi_pipeline.tiles.naming.rename_outputs_by_overall_index",
+        "records": manifest_records,
+    }
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return manifest_path
+
+
 
 def rename_outputs_by_overall_index(
     output_dir: Path | str,
@@ -95,7 +200,9 @@ def rename_outputs_by_overall_index(
         p for p in all_paths if p.suffix.lower() in permissible_exts),
         key=lambda p: parse_xx_yy_from_name(p.name, rx_xy)
     )
+    metadata_lookup = _load_tile_metadata(output_dir, pad)
     renames: list[tuple[Path, Path]] = []
+    manifest_records: list[dict[str, Any]] = []
     for rank, p in enumerate(files):
         label = overall_label(rank, spacing=spacing, pad=pad, start=start)
         new_p = add_overall_suffix(p, label, pad)
@@ -105,5 +212,23 @@ def rename_outputs_by_overall_index(
             except FileNotFoundError:
                 new_p = p
         renames.append((p, new_p))
+
+        if dry_run:
+            continue
+
+        manifest_target = new_p if new_p.exists() else p
+        if manifest_target.exists():
+            manifest_records.append(
+                _build_manifest_record(
+                    output_dir,
+                    manifest_target,
+                    label,
+                    pad,
+                    metadata_lookup,
+                )
+            )
+
+    if not dry_run:
+        _write_tile_manifest(output_dir, manifest_records)
 
     return renames

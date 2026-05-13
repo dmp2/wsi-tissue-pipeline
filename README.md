@@ -56,13 +56,54 @@ This pipeline processes large whole-slide images (potentially 0.5 TB+ per specim
 git clone https://github.com/dmp2/wsi-tissue-pipeline.git
 cd wsi-tissue-pipeline
 
+# Optional but recommended for local bind mounts:
+# keep machine-specific settings in your untracked .env
+cp .env.example .env
+# then set DATA_DIR / OUTPUT_DIR to absolute host paths outside this repo,
+# and set APP_UID / APP_GID from: id -u ; id -g
+
 # Build and run with Docker Compose
-docker-compose -f docker/docker-compose.yml up --build
+docker compose -f docker/docker-compose.yml up --build
 
 # Access services:
 # - Jupyter Lab: http://localhost:8888
 # - MLflow UI: http://localhost:5000
 ```
+
+Docker directory contract:
+
+| Host path in `.env` | Container path to use in notebooks/CLI | Purpose |
+|---|---|---|
+| `DATA_DIR=/absolute/path/outside/repo/wsi-data` | `/data` | Read-mostly input tree |
+| `$DATA_DIR/input` | `/data/input` | Raw WSI/flat image inputs used by notebooks |
+| `$DATA_DIR/resources` | `/data/resources` | Optional atlas, labels, configs, precomputed inputs, or jars |
+| `OUTPUT_DIR=/absolute/path/outside/repo/wsi-output` | `/output` | Writable outputs and durable notebook artifacts |
+| `$OUTPUT_DIR/tissue_sections` | `/output/tissue_sections` | Default notebook and staged-runner dataset root |
+
+Create the host directories before starting Docker, for example:
+
+```bash
+mkdir -p /absolute/path/outside/repo/wsi-data/input
+mkdir -p /absolute/path/outside/repo/wsi-data/resources
+mkdir -p /absolute/path/outside/repo/wsi-output
+```
+
+Inside Docker, always pass the in-container paths (`/data/...`, `/output/...`) to notebooks and CLI commands. Keeping `DATA_DIR` and `OUTPUT_DIR` outside the git checkout avoids putting private slide data in the repository. If a bind-mount source path is missing, Docker may create it on the host, sometimes with ownership that your user cannot write.
+
+Notebook defaults in Docker:
+- `notebooks/01_wsi_to_tissue_sections.ipynb`, `02_quality_control.ipynb`, and `04_emlddmm_preparation.ipynb` use `/data` and `/output`.
+- Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty.
+- Notebook 03 is separate from the TIFF tile workflow and auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty.
+- Docker clones `https://github.com/twardlab/emlddmm.git`, adds it to `PYTHONPATH`, and installs the extra runtime dependencies notebook 04 needs without requiring the full pinned upstream requirements set.
+- Jupyter starts in `/home/appuser/app`, and the repo notebooks are mounted there. Save durable executed notebooks, logs, and scratch files under `/output/notebook_runs` rather than in repo-internal paths.
+- To smoke-test notebook 02 non-interactively after notebook 01 populates `/output/tissue_sections`, run:
+  `docker compose -f docker/docker-compose.yml run --rm pipeline jupyter nbconvert --to notebook --execute /home/appuser/app/notebooks/02_quality_control.ipynb --output 02_quality_control.executed.ipynb --output-dir /output/notebook_runs`
+
+Local Docker notes:
+- `.env` is ignored by git, so keep host-specific values there rather than in tracked files.
+- Set `APP_UID` and `APP_GID` locally when you want the container's non-root user to match your host user for writable bind mounts.
+- `DATA_DIR` and `OUTPUT_DIR` are host paths. `/data` and `/output` are the matching in-container paths.
+- The tracked Compose and Dockerfiles keep generic defaults and do not require committing personal UID/GID values.
 
 ### Option 3: Local Installation
 
@@ -182,6 +223,7 @@ wsi-tissue-pipeline/
 |   |-- 02_quality_control.ipynb
 |   |-- 03_neuroglancer_visualization.ipynb
 |   |-- 04_emlddmm_preparation.ipynb
+|   |-- 05_emlddmm_registration.ipynb
 |   `-- colab_setup.py
 |
 |-- configs/
@@ -223,7 +265,7 @@ The pipeline is organized into focused submodules:
 | `neuroglancer` | Neuroglancer state, server, and viewer | `NeuroglancerViewer`, `emit_ng_state_for_ngff_plate`, `open_neuroglancer_plate_view` |
 | `sciserver` | SciServer deployment (optional) | `SciServerPipeline`, `setup_sciserver_tracking` |
 
-**Canonical API:** Prefer standalone functions (`process_wsi`, `process_specimen`, `build_qc_grids`) for scripting. Use `WSIProcessor` and `QCGridBuilder` classes when you want to configure once and call multiple times.
+**Canonical API:** Prefer standalone functions (`process_wsi`, `process_specimen`, `run_qc_workflow`, `build_qc_grids`) for scripting. Use `WSIProcessor` and `QCGridBuilder` classes when you want to configure once and call multiple times.
 
 ### Import Examples
 
@@ -286,13 +328,31 @@ segmentation:
   target_long_side: 1800
   min_area_px: 3000
   struct_elem_px: 4
+  stain_gate: false
+  stain_gate_mode: "fixed"  # or "adaptive-od"/"adaptive-he" for H&E datasets
+  stain_min_saturation: 0.08
+  stain_min_od: 0.35
+  stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
+  stain_pre_open_px: 0
   split_touching: true
-  r_split: 2
+  r_split: 3
+  keep_top_k: null
+  appendage_refinement_enabled: false
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+  component_qc_enabled: true
+  component_qc_mode: "annotate"
+  component_qc_profile: "he_sections"
 
 output:
   format: "ome-zarr"  # or "tiff"
   chunk_size: 512
   compression: "zstd"
+
+tiles:
+  extra_margin_px: 0
 
 mlflow:
   tracking_uri: "sqlite:///mlflow.db"
@@ -345,16 +405,16 @@ Example atlas-free run:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles
+  --dataset-root /output/tissue_sections
 ```
 
 Example atlas-registration run from prepared slices:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles \
-  --atlas /data/atlas.vtk \
-  --label /data/atlas_labels.vtk \
+  --dataset-root /output/tissue_sections \
+  --atlas /data/resources/atlas.vtk \
+  --label /data/resources/atlas_labels.vtk \
   --orientation-from PIR \
   --orientation-to RIP
 ```
@@ -363,18 +423,18 @@ Example atlas-free run from Neuroglancer precomputed data:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles \
-  --target-source /data/precomputed_plate \
+  --dataset-root /output/tissue_sections \
+  --target-source /data/resources/precomputed_plate \
   --target-source-format precomputed \
-  --precomputed-manifest /data/tiles/emlddmm_dataset_manifest.json
+  --precomputed-manifest /output/tissue_sections/emlddmm_dataset_manifest.json
 ```
 
 Example dry-run plan resolution:
 
 ```bash
 python scripts/run_pipeline.py step5 \
-  --dataset-root /data/tiles \
-  --atlas /data/atlas.vtk \
+  --dataset-root /output/tissue_sections \
+  --atlas /data/resources/atlas.vtk \
   --orientation-from PIR \
   --orientation-to RIP \
   --write-qc-report \

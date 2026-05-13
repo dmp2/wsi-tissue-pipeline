@@ -34,6 +34,18 @@ Backend = Literal[
 
 # Core utilities
 # Deprecated aliases -- kept for backward compatibility, will be removed in v1.0
+from .appendage import (
+    AppendageRecord,
+    refine_appendages,
+)
+from .component_qc import (
+    ComponentQCMode,
+    ComponentQCProfile,
+    ComponentQCRecord,
+    filter_mask_by_labels,
+    label_components_left_to_right,
+    score_components,
+)
 from .core import (  # deprecated
     _thumb,
     _to_gray,
@@ -51,6 +63,7 @@ from .morphology import (  # deprecated
     _remove_small_objects,
     _split_touching_components,
     binary_closing,
+    keep_largest_components,
     remove_small_objects,
     split_touching_components,
 )
@@ -58,6 +71,7 @@ from .otsu import _otsu_mask, otsu_mask  # _otsu_mask deprecated
 
 # High-level segmenter
 from .segmenter import WSISegmenter, make_lowres_mask, segment_mask
+from .stain import HEFeatures, he_features, he_stain_mask
 
 __all__ = [
     # Type
@@ -69,9 +83,21 @@ __all__ = [
     # Algorithms
     "entropy_mask",
     "otsu_mask",
+    "he_stain_mask",
+    "HEFeatures",
+    "he_features",
+    "AppendageRecord",
+    "refine_appendages",
+    "ComponentQCMode",
+    "ComponentQCProfile",
+    "ComponentQCRecord",
+    "score_components",
+    "filter_mask_by_labels",
+    "label_components_left_to_right",
     "remove_small_objects",
     "binary_closing",
     "split_touching_components",
+    "keep_largest_components",
     # High-level
     "WSISegmenter",
     "segment_mask",

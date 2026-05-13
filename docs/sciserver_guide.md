@@ -133,7 +133,7 @@ segmentation:
   target_long_side: 2000
   min_area_px: 500
 
-tile:
+tiles:
   chunk_size: 8192  # Larger for server hardware
   pad_multiple: 32
 

@@ -44,10 +44,47 @@ pip install -e .
 ### Option 3: Docker
 
 ```bash
-# Build and run with Docker Compose
-cd docker
-docker-compose up --build
+# Build and run from the repository root
+cp .env.example .env
+# Set DATA_DIR and OUTPUT_DIR in .env to absolute host paths outside this repo.
+# Optional for writable local bind mounts: set APP_UID and APP_GID from `id -u` and `id -g`.
+docker compose -f docker/docker-compose.yml up --build
+
+# Open Jupyter Lab
+# http://localhost:8888
 ```
+
+#### Docker directory contract
+
+Docker uses two path namespaces:
+- Host paths in `.env`, such as `DATA_DIR` and `OUTPUT_DIR`.
+- In-container paths used by notebooks and commands, such as `/data` and `/output`.
+
+Recommended host layout:
+
+```text
+/absolute/path/outside/repo/wsi-data/input       # raw WSI or flat image inputs
+/absolute/path/outside/repo/wsi-data/resources   # optional atlas, labels, configs, jars, precomputed inputs
+/absolute/path/outside/repo/wsi-output           # writable pipeline outputs
+```
+
+Recommended `.env` values:
+
+```bash
+DATA_DIR=/absolute/path/outside/repo/wsi-data
+OUTPUT_DIR=/absolute/path/outside/repo/wsi-output
+APP_UID=<your id -u>
+APP_GID=<your id -g>
+```
+
+Inside the container:
+- `/data/input` is the default notebook input directory.
+- `/data/resources` is the recommended location for optional external resources.
+- `/output` is the writable output root.
+- `/output/tissue_sections` is the default notebook and staged-runner dataset root.
+- `/output/notebook_runs` is a good durable location for executed notebook copies and scratch artifacts.
+
+Create the host directories before `docker compose up`. If a bind-mount source path does not exist, Docker may create it on the host, sometimes with ownership that your user cannot write. Keep private WSI data outside the git checkout; the repo ignores `data/` and `output/`, but ignored files are still easy to move, copy, or expose by mistake.
 
 ## Detailed Installation
 
@@ -108,10 +145,21 @@ rich>=12.0.0
 
 This extra enables `get_vsi_metadata(..., metadata_backend="auto")` to pull physical pixel sizes and related VSI metadata through Bio-Formats.
 
-### Step-5 EM-LDDMM Dependencies
+### EM-LDDMM Dependencies for Notebooks 04-05
+
+Notebook 04 uses upstream `histsetup.py` from `emlddmm` to generate JSON sidecars.
+Notebook 05 / `step5` uses EM-LDDMM for registration.
+
+The upstream repository is a source checkout, not a standard PyPI package in this workflow:
+- Install this pipeline with `pip install -e .`.
+- Clone `https://github.com/twardlab/emlddmm.git` next to this repository.
+- Do not install the upstream pinned `requirements.txt`; those pins target an older stack and can downgrade this pipeline.
+- Install the few modern runtime dependencies listed below. Use `constraints.txt`,
+  not `requirements.txt`, for `pip -c` because `requirements.txt` includes extras.
+- Add the upstream checkout directory to `PYTHONPATH`, or add it to `sys.path` in the notebook.
 
 `step5` uses a hybrid backend resolver for registration:
-- First choice: the installed external `emlddmm` package.
+- First choice: the external `emlddmm` checkout on `PYTHONPATH`.
 - Fallback: the vendored legacy compatibility code in this repository.
 
 Important step-5 extras:
@@ -119,10 +167,19 @@ Important step-5 extras:
 - `transformation_graph_v01.py` is treated as part of the external `emlddmm` package, not this repository.
 - `--run-transformation-graph` will fail early unless that external script can be resolved or `--transformation-graph-script` points to it explicitly.
 
-Recommended install when you plan to use step 5 with precomputed targets and transformation-graph execution:
+Recommended local setup:
 
 ```bash
-pip install tensorstore emlddmm
+git clone https://github.com/twardlab/emlddmm.git ../emlddmm
+python -m pip install -c constraints.txt "h5py>=3.10" "nibabel>=5.0"
+python -m pip install --index-url https://download.pytorch.org/whl/cpu "torch==2.10.0+cpu"
+export PYTHONPATH="$(cd ../emlddmm && pwd):${PYTHONPATH}"
+
+# GPU option: uncomment only on an NVIDIA system with a compatible CUDA 12.8 driver.
+# python -m pip install --index-url https://download.pytorch.org/whl/cu128 "torch==2.10.0+cu128"
+
+# Optional when using precomputed targets in step 5
+python -m pip install tensorstore
 ```
 
 ### Platform-Specific Instructions
@@ -199,8 +256,10 @@ pip install -e ".[bioformats]"
 ##### Docker
 
 - `docker/Dockerfile` installs `openjdk-17-jre-headless`.
-- The image also installs `.[all]`, which now includes the Bio-Formats extra.
+- The image also installs `.[all]`, explicit `jupyterlab` / `ipywidgets`, clones `https://github.com/twardlab/emlddmm.git`, installs modern EM-LDDMM runtime dependencies, and adds that checkout to `PYTHONPATH`.
 - This is the recommended fully managed local runtime when you want the pipeline environment curated end to end.
+- The Docker Jupyter command disables auth tokens for the documented local workflow, so `http://localhost:8888` opens directly after `docker compose up`.
+- Notebook defaults use `/data/input` for raw inputs and `/output` for outputs. Notebook 01 auto-generates demo PNG inputs in `/data/input` when that directory is empty, notebook 03 auto-generates a tiny demo NGFF plate when `/output/per_tissue_ngff` is empty, and notebook 04 runs without an extra `pip install` inside Docker.
 
 #### Environment overrides
 
@@ -235,7 +294,7 @@ write_ngff_from_mips(
 ```bash
 # Install CUDA toolkit (see NVIDIA docs)
 # Then install PyTorch with CUDA
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+python -m pip install --index-url https://download.pytorch.org/whl/cu128 "torch==2.10.0+cu128"
 
 # Verify GPU access
 python -c "import torch; print(torch.cuda.is_available())"
@@ -245,7 +304,7 @@ python -c "import torch; print(torch.cuda.is_available())"
 
 ```bash
 # Ensure nvidia-docker is installed
-docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.gpu.yml up --build
 ```
 
 ## Verification
@@ -291,16 +350,18 @@ brew install openslide
 
 Reduce chunk size in configuration:
 ```yaml
-tile:
+tiles:
   chunk_size: 2048  # Reduce from default 4096
 ```
 
 #### Permission denied errors in Docker
 
 ```bash
-# Fix permissions
-sudo chown -R $USER:$USER ./data ./output
+# Fix ownership on the host paths you mounted through DATA_DIR and OUTPUT_DIR.
+sudo chown -R "$USER:$USER" "$DATA_DIR" "$OUTPUT_DIR"
 ```
+
+On Linux, set `APP_UID` and `APP_GID` in `.env` to match `id -u` and `id -g` before building the image. Avoid relying on Docker to create missing bind-mount source directories; create them yourself first so ownership is predictable.
 
 #### Java runtime not found
 
@@ -337,7 +398,7 @@ git pull origin main
 pip install -e .
 
 # Or rebuild Docker
-docker-compose build --no-cache
+docker compose build --no-cache
 ```
 
 ## Uninstalling
@@ -350,5 +411,5 @@ pip uninstall wsi-tissue-pipeline
 conda env remove -n wsi-pipeline
 
 # Remove Docker images
-docker-compose down --rmi all
+docker compose down --rmi all
 ```

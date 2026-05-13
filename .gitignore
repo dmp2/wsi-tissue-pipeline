@@ -116,6 +116,7 @@ Thumbs.db
 
 # Project-specific
 data/
+output/
 outputs/
 *.zarr/
 *.ome.zarr/
@@ -150,3 +151,4 @@ temp/
 .env.*.local
 secrets/
 credentials/
+.codex
