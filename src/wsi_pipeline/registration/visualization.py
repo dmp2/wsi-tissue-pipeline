@@ -7,12 +7,13 @@ import math
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 from urllib.parse import urlparse
 
 import numpy as np
 
 from wsi_pipeline.neuroglancer import RGB_SHADER_PLAIN, start_cors_server
+from wsi_pipeline.precomputed import write_precomputed_raw_volume
 
 _PRESENT_STATUSES = {"present", "true", "1"}
 _VTK_TO_DTYPE: dict[str, str] = {
@@ -40,6 +41,30 @@ void main() {
 }
 """
 
+ORIGINAL_SLICE_SHADER = r"""
+#uicontrol invlerp contrast
+#uicontrol float opacity slider(default=0.55, min=0.0, max=1.0)
+void main() {
+    float r = contrast(toNormalized(getDataValue(0)));
+    float g = contrast(toNormalized(getDataValue(1)));
+    float b = contrast(toNormalized(getDataValue(2)));
+    float v = max(max(r, g), b);
+    emitRGBA(vec4(0.0, v, v, v * opacity));
+}
+"""
+
+REGISTERED_SLICE_SHADER = r"""
+#uicontrol invlerp contrast
+#uicontrol float opacity slider(default=0.55, min=0.0, max=1.0)
+void main() {
+    float r = contrast(toNormalized(getDataValue(0)));
+    float g = contrast(toNormalized(getDataValue(1)));
+    float b = contrast(toNormalized(getDataValue(2)));
+    float v = max(max(r, g), b);
+    emitRGBA(vec4(v, 0.0, v, v * opacity));
+}
+"""
+
 
 @dataclass(frozen=True)
 class VtkStructuredPoints:
@@ -58,11 +83,13 @@ class RegistrationVisualizationArtifacts:
     """Resolved registration artifacts used to build visualization outputs."""
 
     registration_output: Path
-    base_vtk: Path
+    aligned_vtk: Path
+    input_vtk: Path | None
     registered_vtk: Path | None
     template_vtk: Path | None
+    filled_vtk: Path | None
     manifest_path: Path | None
-    base_kind: str
+    aligned_kind: str
 
 
 @dataclass(frozen=True)
@@ -70,11 +97,14 @@ class RegistrationNeuroglancerBundle:
     """Paths and metadata for a prepared registration Neuroglancer bundle."""
 
     root: Path
-    base_precomputed: Path
-    overlay_precomputed: Path | None
+    aligned_precomputed: Path | None
+    original_precomputed: Path | None
+    registered_precomputed: Path | None
+    tissue_mask_precomputed: Path | None
     state_path: Path
     metadata_path: Path
-    base_vtk: Path
+    aligned_vtk: Path | None
+    input_vtk: Path | None
     registered_vtk: Path | None
     manifest_path: Path | None
 
@@ -120,18 +150,19 @@ def resolve_registration_visualization_artifacts(
     registration_output = Path(registration_output).expanduser().resolve()
     self_images = registration_output / "self_alignment" / "images"
     filled_vtk = registration_output / "upsampling" / "filled_volume.vtk"
+    input_vtk = self_images / "input_target.vtk"
     registered_vtk = self_images / "target_registered.vtk"
     template_vtk = self_images / "atlas_free_template.vtk"
 
     if filled_vtk.exists():
-        base_vtk = filled_vtk
-        base_kind = "upsampled_filled_volume"
-    elif registered_vtk.exists():
-        base_vtk = registered_vtk
-        base_kind = "registered_target"
+        aligned_vtk = filled_vtk
+        aligned_kind = "upsampled_filled_volume"
     elif template_vtk.exists():
-        base_vtk = template_vtk
-        base_kind = "atlas_free_template"
+        aligned_vtk = template_vtk
+        aligned_kind = "atlas_free_template"
+    elif registered_vtk.exists():
+        aligned_vtk = registered_vtk
+        aligned_kind = "registered_target_fallback"
     else:
         raise FileNotFoundError(
             "No visualization-ready EM-LDDMM VTK output was found. Expected one of: "
@@ -140,11 +171,13 @@ def resolve_registration_visualization_artifacts(
 
     return RegistrationVisualizationArtifacts(
         registration_output=registration_output,
-        base_vtk=base_vtk,
+        aligned_vtk=aligned_vtk,
+        input_vtk=input_vtk if input_vtk.exists() else None,
         registered_vtk=registered_vtk if registered_vtk.exists() else None,
         template_vtk=template_vtk if template_vtk.exists() else None,
+        filled_vtk=filled_vtk if filled_vtk.exists() else None,
         manifest_path=_registration_manifest_path(registration_output),
-        base_kind=base_kind,
+        aligned_kind=aligned_kind,
     )
 
 
@@ -310,82 +343,155 @@ def _mask_to_present_slices(data_czyx: np.ndarray, present_mask: np.ndarray | No
     return masked
 
 
-def _write_precomputed_raw(
-    *,
-    path: Path,
+def _as_tissue_mask_uint32(
     data_czyx: np.ndarray,
-    spacing_xyz_um: tuple[float, float, float],
-    chunk_size_xyz: tuple[int, int, int] = (64, 64, 64),
-) -> None:
-    data = np.asarray(data_czyx, dtype=np.uint8)
-    if data.ndim != 4:
-        raise ValueError(f"Expected CZYX data, got shape {data.shape}")
-    channels, z_size, y_size, x_size = data.shape
-
-    path.mkdir(parents=True, exist_ok=True)
-    key = "0"
-    scale_dir = path / key
-    scale_dir.mkdir(parents=True, exist_ok=True)
-
-    info = {
-        "@type": "neuroglancer_multiscale_volume",
-        "data_type": "uint8",
-        "num_channels": int(channels),
-        "type": "image",
-        "scales": [
-            {
-                "chunk_sizes": [list(map(int, chunk_size_xyz))],
-                "encoding": "raw",
-                "key": key,
-                "resolution": [int(round(float(value) * 1000.0)) for value in spacing_xyz_um],
-                "size": [int(x_size), int(y_size), int(z_size)],
-                "voxel_offset": [0, 0, 0],
-            }
-        ],
-    }
-    _write_json(path / "info", info)
-
-    chunk_x, chunk_y, chunk_z = chunk_size_xyz
-    for z0 in range(0, z_size, chunk_z):
-        z1 = min(z0 + chunk_z, z_size)
-        for y0 in range(0, y_size, chunk_y):
-            y1 = min(y0 + chunk_y, y_size)
-            for x0 in range(0, x_size, chunk_x):
-                x1 = min(x0 + chunk_x, x_size)
-                chunk_czyx = data[:, z0:z1, y0:y1, x0:x1]
-                chunk_xyzc = np.transpose(chunk_czyx, (3, 2, 1, 0))
-                chunk_path = scale_dir / f"{x0}-{x1}_{y0}-{y1}_{z0}-{z1}"
-                chunk_path.write_bytes(np.asfortranarray(chunk_xyzc).tobytes(order="F"))
+    *,
+    present_mask: np.ndarray | None,
+    fill_sparse_stack: bool,
+) -> np.ndarray:
+    intensity = np.mean(np.asarray(data_czyx, dtype=np.float32), axis=0)
+    finite = intensity[np.isfinite(intensity)]
+    if finite.size == 0:
+        mask_zyx = np.zeros(intensity.shape, dtype=bool)
+    else:
+        positive = finite[finite > 0]
+        threshold = float(np.percentile(positive, 5.0)) if positive.size else float(np.max(finite))
+        mask_zyx = intensity > threshold
+    if present_mask is not None and present_mask.shape == (mask_zyx.shape[0],):
+        mask_zyx[~present_mask] = False
+        if fill_sparse_stack and np.any(present_mask):
+            present_indices = np.flatnonzero(present_mask)
+            filled = np.zeros_like(mask_zyx)
+            for z_idx in range(mask_zyx.shape[0]):
+                nearest = present_indices[np.argmin(np.abs(present_indices - z_idx))]
+                filled[z_idx] = mask_zyx[nearest]
+            mask_zyx = filled
+    return mask_zyx[None].astype(np.uint32)
 
 
-def _write_state(path: Path, *, base_source: str, overlay_source: str | None) -> Path:
-    layers: list[dict[str, Any]] = [
-        {
-            "type": "image",
-            "name": "aligned_volume",
-            "source": base_source,
-            "shader": RGB_SHADER_PLAIN,
-        }
-    ]
-    if overlay_source is not None:
-        layers.append(
-            {
-                "type": "image",
-                "name": "registered_slices",
-                "source": overlay_source,
-                "shader": OVERLAY_SHADER,
-                "opacity": 0.75,
-            }
+def _layer_source(path: Path) -> str:
+    return f"precomputed://file://{path.as_posix()}"
+
+
+def _layer_cache_matches(path: Path, source_vtk: Path, *, layer_type: str) -> bool:
+    metadata = _load_json(path / "source.json")
+    return bool(
+        metadata
+        and metadata.get("source_vtk") == str(source_vtk)
+        and metadata.get("layer_type") == layer_type
+        and (path / "info").exists()
+    )
+
+
+def _write_image_layer_from_vtk(
+    *,
+    vtk_path: Path,
+    output_dir: Path,
+    present_mask: np.ndarray | None,
+    mask_missing_slices: bool,
+    overwrite: bool,
+) -> Path:
+    if overwrite or not _layer_cache_matches(output_dir, vtk_path, layer_type="image"):
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        vtk = read_vtk_structured_points(vtk_path)
+        data_uint8 = _as_display_uint8(vtk.data_czyx, vtk.scalar_names)
+        if mask_missing_slices:
+            data_uint8 = _mask_to_present_slices(data_uint8, present_mask)
+        write_precomputed_raw_volume(
+            output_dir,
+            data_uint8,
+            voxel_size_um=vtk.spacing_xyz,
+            layer_type="image",
         )
+        _write_json(
+            output_dir / "source.json",
+            {"source_vtk": str(vtk_path), "layer_type": "image"},
+        )
+    return output_dir
+
+
+def _write_mask_layer_from_vtk(
+    *,
+    vtk_path: Path,
+    output_dir: Path,
+    present_mask: np.ndarray | None,
+    fill_sparse_stack: bool,
+    overwrite: bool,
+) -> Path:
+    if overwrite or not _layer_cache_matches(output_dir, vtk_path, layer_type="segmentation"):
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        vtk = read_vtk_structured_points(vtk_path)
+        mask = _as_tissue_mask_uint32(
+            vtk.data_czyx,
+            present_mask=present_mask,
+            fill_sparse_stack=fill_sparse_stack,
+        )
+        write_precomputed_raw_volume(
+            output_dir,
+            mask,
+            voxel_size_um=vtk.spacing_xyz,
+            layer_type="segmentation",
+        )
+        _write_json(
+            output_dir / "source.json",
+            {
+                "source_vtk": str(vtk_path),
+                "layer_type": "segmentation",
+                "fill_sparse_stack": fill_sparse_stack,
+            },
+        )
+    return output_dir
+
+
+def _write_state(path: Path, *, layers: list[dict[str, Any]]) -> Path:
     state = {
         "layers": layers,
         "layout": "4panel",
         "showSlices": True,
         "crossSectionScale": 1.0,
         "projectionScale": 200000.0,
-        "selectedLayer": {"visible": True, "layer": layers[-1]["name"]},
+        "selectedLayer": {"visible": True, "layer": layers[-1]["name"]} if layers else {},
     }
     return _write_json(path, state)
+
+
+def _image_layer(name: str, source_path: Path, *, visible: bool = True) -> dict[str, Any]:
+    return {
+        "type": "image",
+        "name": name,
+        "source": _layer_source(source_path),
+        "shader": RGB_SHADER_PLAIN,
+        "visible": visible,
+    }
+
+
+def _overlay_layer(
+    name: str,
+    source_path: Path,
+    *,
+    shader: str,
+    visible: bool = True,
+) -> dict[str, Any]:
+    return {
+        "type": "image",
+        "name": name,
+        "source": _layer_source(source_path),
+        "shader": shader,
+        "opacity": 0.75,
+        "visible": visible,
+    }
+
+
+def _segmentation_layer(name: str, source_path: Path, *, visible: bool = True) -> dict[str, Any]:
+    return {
+        "type": "segmentation",
+        "name": name,
+        "source": _layer_source(source_path),
+        "segments": [1],
+        "visible": visible,
+    }
 
 
 def prepare_registration_neuroglancer_bundle(
@@ -397,72 +503,109 @@ def prepare_registration_neuroglancer_bundle(
 
     artifacts = resolve_registration_visualization_artifacts(registration_output)
     bundle_root = artifacts.registration_output / "visualization"
-    base_dir = bundle_root / "aligned_volume"
-    overlay_dir = bundle_root / "registered_slices"
+    aligned_dir = bundle_root / "aligned_volume"
+    original_dir = bundle_root / "original_slices"
+    registered_dir = bundle_root / "registered_slices"
+    mask_dir = bundle_root / "tissue_mask"
     metadata_path = bundle_root / "registration_visualization.json"
     state_path = bundle_root / "neuroglancer_state.json"
 
-    if overwrite and bundle_root.exists():
-        shutil.rmtree(bundle_root)
+    aligned_path: Path | None = None
+    original_path: Path | None = None
+    registered_path: Path | None = None
+    mask_path: Path | None = None
 
-    if not base_dir.exists():
-        base_vtk = read_vtk_structured_points(artifacts.base_vtk)
-        base_uint8 = _as_display_uint8(base_vtk.data_czyx, base_vtk.scalar_names)
-        _write_precomputed_raw(
-            path=base_dir,
-            data_czyx=base_uint8,
-            spacing_xyz_um=base_vtk.spacing_xyz,
-        )
-    else:
-        base_vtk = read_vtk_structured_points(artifacts.base_vtk)
-
-    overlay_path: Path | None = None
-    if artifacts.registered_vtk is not None:
-        if not overlay_dir.exists():
-            registered_vtk = read_vtk_structured_points(artifacts.registered_vtk)
-            registered_uint8 = _as_display_uint8(
-                registered_vtk.data_czyx,
-                registered_vtk.scalar_names,
-            )
-            present_mask = _present_mask_from_manifest(
-                artifacts.manifest_path,
-                registered_uint8.shape[1],
-            )
-            registered_uint8 = _mask_to_present_slices(registered_uint8, present_mask)
-            _write_precomputed_raw(
-                path=overlay_dir,
-                data_czyx=registered_uint8,
-                spacing_xyz_um=registered_vtk.spacing_xyz,
-            )
-        overlay_path = overlay_dir
-
-    _write_state(
-        state_path,
-        base_source=f"precomputed://file://{base_dir.as_posix()}",
-        overlay_source=(
-            f"precomputed://file://{overlay_dir.as_posix()}" if overlay_path is not None else None
-        ),
+    layers: list[dict[str, Any]] = []
+    aligned_path = _write_image_layer_from_vtk(
+        vtk_path=artifacts.aligned_vtk,
+        output_dir=aligned_dir,
+        present_mask=None,
+        mask_missing_slices=False,
+        overwrite=overwrite,
     )
+    layers.append(_image_layer("aligned_volume", aligned_path, visible=True))
+
+    z_count = read_vtk_structured_points(artifacts.aligned_vtk).data_czyx.shape[1]
+    present_mask = _present_mask_from_manifest(artifacts.manifest_path, z_count)
+
+    if artifacts.input_vtk is not None:
+        original_path = _write_image_layer_from_vtk(
+            vtk_path=artifacts.input_vtk,
+            output_dir=original_dir,
+            present_mask=present_mask,
+            mask_missing_slices=True,
+            overwrite=overwrite,
+        )
+        layers.append(
+            _overlay_layer(
+                "original_slices",
+                original_path,
+                shader=ORIGINAL_SLICE_SHADER,
+                visible=True,
+            )
+        )
+
+    if artifacts.registered_vtk is not None:
+        registered_path = _write_image_layer_from_vtk(
+            vtk_path=artifacts.registered_vtk,
+            output_dir=registered_dir,
+            present_mask=present_mask,
+            mask_missing_slices=True,
+            overwrite=overwrite,
+        )
+        layers.append(
+            _overlay_layer(
+                "registered_slices",
+                registered_path,
+                shader=REGISTERED_SLICE_SHADER,
+                visible=True,
+            )
+        )
+
+    mask_source = artifacts.filled_vtk or artifacts.registered_vtk or artifacts.aligned_vtk
+    if mask_source is not None:
+        mask_path = _write_mask_layer_from_vtk(
+            vtk_path=mask_source,
+            output_dir=mask_dir,
+            present_mask=present_mask,
+            fill_sparse_stack=artifacts.filled_vtk is None,
+            overwrite=overwrite,
+        )
+        layers.append(_segmentation_layer("tissue_mask", mask_path, visible=True))
+
+    _write_state(state_path, layers=layers)
     _write_json(
         metadata_path,
         {
-            "base_vtk": str(artifacts.base_vtk),
-            "base_kind": artifacts.base_kind,
+            "aligned_vtk": str(artifacts.aligned_vtk),
+            "aligned_kind": artifacts.aligned_kind,
+            "input_vtk": str(artifacts.input_vtk) if artifacts.input_vtk else None,
             "registered_vtk": str(artifacts.registered_vtk) if artifacts.registered_vtk else None,
             "template_vtk": str(artifacts.template_vtk) if artifacts.template_vtk else None,
+            "filled_vtk": str(artifacts.filled_vtk) if artifacts.filled_vtk else None,
             "manifest_path": str(artifacts.manifest_path) if artifacts.manifest_path else None,
-            "base_precomputed": str(base_dir),
-            "overlay_precomputed": str(overlay_path) if overlay_path else None,
+            "aligned_precomputed": str(aligned_path) if aligned_path else None,
+            "original_precomputed": str(original_path) if original_path else None,
+            "registered_precomputed": str(registered_path) if registered_path else None,
+            "tissue_mask_precomputed": str(mask_path) if mask_path else None,
             "state_path": str(state_path),
+            "note": (
+                "original_slices is available only for runs that wrote "
+                "self_alignment/images/input_target.vtk. Rerun Step 6 with the current "
+                "pipeline code if this layer is missing."
+            ),
         },
     )
     return RegistrationNeuroglancerBundle(
         root=bundle_root,
-        base_precomputed=base_dir,
-        overlay_precomputed=overlay_path,
+        aligned_precomputed=aligned_path,
+        original_precomputed=original_path,
+        registered_precomputed=registered_path,
+        tissue_mask_precomputed=mask_path,
         state_path=state_path,
         metadata_path=metadata_path,
-        base_vtk=artifacts.base_vtk,
+        aligned_vtk=artifacts.aligned_vtk,
+        input_vtk=artifacts.input_vtk,
         registered_vtk=artifacts.registered_vtk,
         manifest_path=artifacts.manifest_path,
     )
@@ -524,131 +667,16 @@ def open_registration_neuroglancer_view(
             source = layer.get("source")
             name = layer.get("name")
             if isinstance(source, str) and isinstance(name, str):
-                s.layers[name] = ng.ImageLayer(
-                    source=source,
-                    shader=layer.get("shader", RGB_SHADER_PLAIN),
-                )
+                if layer.get("type") == "segmentation":
+                    s.layers[name] = ng.SegmentationLayer(source=source)
+                    s.layers[name].segments = set(layer.get("segments", [1]))
+                else:
+                    s.layers[name] = ng.ImageLayer(
+                        source=source,
+                        shader=layer.get("shader", RGB_SHADER_PLAIN),
+                    )
+                if layer.get("visible") is False:
+                    s.layers[name].visible = False
         s.layout = state.get("layout", "4panel")
     return viewer, httpd
 
-
-def prepare_registration_surface_mesh(
-    registration_output: str | Path,
-    *,
-    output_path: str | Path | None = None,
-    threshold: float | Literal["auto"] = "auto",
-    smooth: bool = True,
-) -> Path:
-    """Extract a lightweight surface mesh from the selected registration volume."""
-
-    try:
-        import pyvista as pv
-    except ImportError as exc:
-        raise ImportError(
-            "PyVista/VTK are not installed. Install with: "
-            'pip install -e ".[visualization]"'
-        ) from exc
-
-    artifacts = resolve_registration_visualization_artifacts(registration_output)
-    vtk = read_vtk_structured_points(artifacts.base_vtk)
-    intensity_zyx = np.mean(np.asarray(vtk.data_czyx, dtype=np.float32), axis=0)
-    finite = intensity_zyx[np.isfinite(intensity_zyx)]
-    if finite.size == 0:
-        raise ValueError(f"Cannot mesh empty volume: {artifacts.base_vtk}")
-    positive = finite[finite > 0]
-    if threshold == "auto" and positive.size:
-        level = float(np.percentile(positive, 5.0))
-    else:
-        level = float(np.percentile(finite, 50.0)) if threshold == "auto" else float(threshold)
-    if not np.isfinite(level) or level <= 0:
-        level = float(np.percentile(finite, 50.0))
-
-    # PyVista ImageData expects point scalars in XYZ order.
-    x_size, y_size, z_size = vtk.dimensions_xyz
-    grid = pv.ImageData(dimensions=(x_size, y_size, z_size))
-    grid.origin = vtk.origin_xyz
-    grid.spacing = vtk.spacing_xyz
-    grid.point_data["intensity"] = np.asarray(
-        np.transpose(intensity_zyx, (2, 1, 0)),
-        dtype=np.float32,
-        order="F",
-    ).ravel(order="F")
-    mesh = grid.contour([level], scalars="intensity")
-    if smooth and mesh.n_points > 0:
-        mesh = mesh.smooth(n_iter=20, relaxation_factor=0.05)
-    if output_path is None:
-        output_path = artifacts.registration_output / "visualization" / "surface_mesh.vtp"
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    mesh.save(output_path)
-    return output_path
-
-
-def show_registration_pyvista_scene(
-    bundle: RegistrationNeuroglancerBundle | str | Path,
-    *,
-    max_slices: int | None = 24,
-):
-    """Show a compact PyVista volume/slice scene for a prepared bundle."""
-
-    try:
-        import pyvista as pv
-    except ImportError as exc:
-        raise ImportError(
-            "PyVista/VTK are not installed. Install with: "
-            'pip install -e ".[visualization]"'
-        ) from exc
-
-    if not isinstance(bundle, RegistrationNeuroglancerBundle):
-        metadata = _load_json(Path(bundle) / "registration_visualization.json")
-        if metadata is None:
-            raise FileNotFoundError(f"No registration_visualization.json found in {bundle}")
-        base_vtk = Path(metadata["base_vtk"])
-        registered_vtk = Path(metadata["registered_vtk"]) if metadata.get("registered_vtk") else None
-        manifest_path = Path(metadata["manifest_path"]) if metadata.get("manifest_path") else None
-    else:
-        base_vtk = bundle.base_vtk
-        registered_vtk = bundle.registered_vtk
-        manifest_path = bundle.manifest_path
-
-    base = read_vtk_structured_points(base_vtk)
-    intensity_zyx = np.mean(np.asarray(base.data_czyx, dtype=np.float32), axis=0)
-    x_size, y_size, z_size = base.dimensions_xyz
-    grid = pv.ImageData(dimensions=(x_size, y_size, z_size))
-    grid.origin = base.origin_xyz
-    grid.spacing = base.spacing_xyz
-    grid.point_data["intensity"] = np.asarray(
-        np.transpose(intensity_zyx, (2, 1, 0)),
-        dtype=np.float32,
-        order="F",
-    ).ravel(order="F")
-
-    plotter = pv.Plotter()
-    plotter.add_volume(grid, scalars="intensity", opacity="sigmoid_5", cmap="gray")
-    if registered_vtk is not None:
-        registered = read_vtk_structured_points(registered_vtk)
-        present_mask = _present_mask_from_manifest(manifest_path, registered.data_czyx.shape[1])
-        z_indices = (
-            np.flatnonzero(present_mask)
-            if present_mask is not None and np.any(present_mask)
-            else np.arange(registered.data_czyx.shape[1])
-        )
-        if max_slices is not None and z_indices.size > max_slices:
-            keep = np.linspace(0, z_indices.size - 1, num=max_slices).round().astype(int)
-            z_indices = z_indices[keep]
-        for z_idx in z_indices:
-            z_um = registered.origin_xyz[2] + float(z_idx) * registered.spacing_xyz[2]
-            plane = pv.Plane(
-                center=(
-                    registered.origin_xyz[0] + registered.spacing_xyz[0] * (registered.dimensions_xyz[0] - 1) / 2,
-                    registered.origin_xyz[1] + registered.spacing_xyz[1] * (registered.dimensions_xyz[1] - 1) / 2,
-                    z_um,
-                ),
-                direction=(0, 0, 1),
-                i_size=registered.spacing_xyz[0] * max(registered.dimensions_xyz[0] - 1, 1),
-                j_size=registered.spacing_xyz[1] * max(registered.dimensions_xyz[1] - 1, 1),
-            )
-            plotter.add_mesh(plane, color="tomato", opacity=0.18)
-    plotter.add_axes()
-    plotter.show()
-    return plotter

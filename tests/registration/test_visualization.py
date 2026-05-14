@@ -10,7 +10,6 @@ import pytest
 from wsi_pipeline.registration.visualization import (
     open_registration_neuroglancer_view,
     prepare_registration_neuroglancer_bundle,
-    prepare_registration_surface_mesh,
     read_vtk_structured_points,
     resolve_registration_visualization_artifacts,
 )
@@ -95,23 +94,30 @@ def test_resolve_registration_visualization_artifacts_prefers_upsampled_volume(t
 
     artifacts = resolve_registration_visualization_artifacts(registration_output)
 
-    assert artifacts.base_vtk == filled.resolve()
-    assert artifacts.base_kind == "upsampled_filled_volume"
+    assert artifacts.aligned_vtk == filled.resolve()
+    assert artifacts.aligned_kind == "upsampled_filled_volume"
     assert artifacts.registered_vtk == registered.resolve()
 
 
 def test_prepare_registration_neuroglancer_bundle_writes_precomputed_layers(tmp_path):
     registration_output = tmp_path / "emlddmm"
+    _write_vtk(registration_output / "self_alignment" / "images" / "input_target.vtk")
     _write_vtk(registration_output / "self_alignment" / "images" / "target_registered.vtk")
+    _write_vtk(registration_output / "self_alignment" / "images" / "atlas_free_template.vtk")
     manifest_path = _write_manifest(tmp_path / "emlddmm_dataset_manifest.json")
     _write_plan(registration_output, manifest_path)
 
     bundle = prepare_registration_neuroglancer_bundle(registration_output)
 
-    assert bundle.base_precomputed.exists()
-    assert bundle.overlay_precomputed is not None
-    assert bundle.overlay_precomputed.exists()
-    info = json.loads((bundle.base_precomputed / "info").read_text())
+    assert bundle.aligned_precomputed is not None
+    assert bundle.aligned_precomputed.exists()
+    assert bundle.original_precomputed is not None
+    assert bundle.original_precomputed.exists()
+    assert bundle.registered_precomputed is not None
+    assert bundle.registered_precomputed.exists()
+    assert bundle.tissue_mask_precomputed is not None
+    assert bundle.tissue_mask_precomputed.exists()
+    info = json.loads((bundle.aligned_precomputed / "info").read_text())
     assert info["num_channels"] == 3
     assert info["scales"][0]["size"] == [4, 3, 2]
     assert info["scales"][0]["resolution"] == [2000, 3000, 4000]
@@ -119,10 +125,13 @@ def test_prepare_registration_neuroglancer_bundle_writes_precomputed_layers(tmp_
     state = json.loads(bundle.state_path.read_text())
     assert [layer["name"] for layer in state["layers"]] == [
         "aligned_volume",
+        "original_slices",
         "registered_slices",
+        "tissue_mask",
     ]
+    assert state["layers"][-1]["type"] == "segmentation"
 
-    chunk_path = bundle.overlay_precomputed / "0" / "0-4_0-3_0-2"
+    chunk_path = bundle.registered_precomputed / "0" / "0-4_0-3_0-2"
     chunk = np.frombuffer(chunk_path.read_bytes(), dtype=np.uint8).reshape(
         (4, 3, 2, 3),
         order="F",
@@ -130,6 +139,10 @@ def test_prepare_registration_neuroglancer_bundle_writes_precomputed_layers(tmp_
     assert np.any(chunk[:, :, 0, :])
     assert not np.any(chunk[:, :, 1, :])
     assert tuple(chunk[0, 0, 0, :]) == (1, 2, 3)
+
+    mask_info = json.loads((bundle.tissue_mask_precomputed / "info").read_text())
+    assert mask_info["type"] == "segmentation"
+    assert mask_info["data_type"] == "uint32"
 
 
 def test_open_registration_neuroglancer_view_reports_missing_dependency(tmp_path, monkeypatch):
@@ -140,13 +153,4 @@ def test_open_registration_neuroglancer_view_reports_missing_dependency(tmp_path
 
     with pytest.raises(ImportError, match="Neuroglancer is not installed"):
         open_registration_neuroglancer_view(bundle)
-
-
-def test_prepare_registration_surface_mesh_reports_missing_dependency(tmp_path, monkeypatch):
-    registration_output = tmp_path / "emlddmm"
-    _write_vtk(registration_output / "self_alignment" / "images" / "target_registered.vtk")
-    monkeypatch.setitem(sys.modules, "pyvista", None)
-
-    with pytest.raises(ImportError, match="PyVista/VTK are not installed"):
-        prepare_registration_surface_mesh(registration_output)
 
