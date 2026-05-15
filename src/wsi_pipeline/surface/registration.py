@@ -14,7 +14,7 @@ from wsi_pipeline.registration.visualization import (
     read_vtk_structured_points,
     resolve_registration_visualization_artifacts,
 )
-from wsi_pipeline.surface.io import write_surface
+from wsi_pipeline.surface.io import _require_pyvista, write_surface
 from wsi_pipeline.surface.surface_generation import restricted_delaunay_from_image
 
 _PRESENT_STATUSES = {"present", "true", "1"}
@@ -38,17 +38,6 @@ def _present_mask_from_manifest(manifest_path: Path | None, z_count: int) -> np.
         [str(entry.get("status", "")).strip().lower() in _PRESENT_STATUSES for entry in entries],
         dtype=bool,
     )
-
-
-def _require_pyvista():
-    try:
-        import pyvista as pv
-    except ImportError as exc:
-        raise ImportError(
-            "PyVista/VTK are not installed. Install with: "
-            'pip install -e ".[visualization]"'
-        ) from exc
-    return pv
 
 
 def _intensity_zyx(vtk: VtkStructuredPoints) -> np.ndarray:
@@ -127,7 +116,9 @@ def _surface_mask_from_vtk(
     if smooth_sigma and smooth_sigma > 0:
         from scipy.ndimage import gaussian_filter
 
-        sigma = (0.0, float(smooth_sigma), float(smooth_sigma)) if sparse_stack else float(smooth_sigma)
+        sigma = (
+            (0.0, float(smooth_sigma), float(smooth_sigma)) if sparse_stack else float(smooth_sigma)
+        )
         mask = gaussian_filter(mask, sigma=sigma)
         if sparse_stack and present_mask is not None and present_mask.shape == (mask.shape[0],):
             mask[~present_mask] = 0.0
@@ -153,6 +144,9 @@ def prepare_registration_surface_mesh(
 ) -> Path:
     """Create a surface mesh from Step-5 registered slice outputs."""
 
+    if method != "restricted_delaunay":
+        raise ValueError("Only method='restricted_delaunay' is supported")
+
     artifacts = resolve_registration_visualization_artifacts(registration_output)
     source_vtk, sparse_stack = _resolve_surface_vtk(artifacts, source)
     vtk = read_vtk_structured_points(source_vtk)
@@ -168,9 +162,6 @@ def prepare_registration_surface_mesh(
         sparse_stack=sparse_stack,
         smooth_sigma=smooth_sigma,
     )
-    if method != "restricted_delaunay":
-        raise ValueError("Only method='restricted_delaunay' is supported")
-
     min_distance_value = (
         _auto_min_distance(vtk.spacing_xyz) if min_distance == "auto" else float(min_distance)
     )

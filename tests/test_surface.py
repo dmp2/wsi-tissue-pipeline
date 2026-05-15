@@ -6,10 +6,11 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from wsi_pipeline.surface import prepare_registration_surface_mesh
 from wsi_pipeline.surface import registration as surface_registration
+from wsi_pipeline.surface import visualization as surface_visualization
+from wsi_pipeline.surface.io import read_surface, write_surface
 
 
 def _write_vtk(
@@ -70,6 +71,37 @@ def _write_plan(registration_output: Path, manifest_path: Path) -> None:
     )
 
 
+def _read_vtk_polydata(path: Path):
+    payload = path.read_bytes()
+    offset = 0
+
+    def read_line() -> str:
+        nonlocal offset
+        newline = payload.index(b"\n", offset)
+        line = payload[offset:newline].decode("ascii")
+        offset = newline + 1
+        return line
+
+    header = [read_line() for _ in range(5)]
+    point_count = int(header[4].split()[1])
+    point_bytes = point_count * 3 * np.dtype(">f4").itemsize
+    points = np.frombuffer(payload[offset : offset + point_bytes], dtype=">f4").reshape(
+        point_count,
+        3,
+    )
+    offset += point_bytes
+    assert payload[offset : offset + 1] == b"\n"
+    offset += 1
+    polygons_line = read_line()
+    polygon_count = int(polygons_line.split()[1])
+    polygon_bytes = polygon_count * 4 * np.dtype(">i4").itemsize
+    polygons = np.frombuffer(payload[offset : offset + polygon_bytes], dtype=">i4").reshape(
+        polygon_count,
+        4,
+    )
+    return header, points, polygons
+
+
 def _patch_mesher_and_writer(monkeypatch):
     calls = {}
 
@@ -112,6 +144,92 @@ def test_surface_modules_import_without_optional_visualization_dependencies(monk
         importlib.import_module(module_name)
 
 
+def test_write_surface_writes_legacy_vtk_polydata_without_pyvista(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, "pyvista", None)
+    vertices = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ],
+        dtype=np.float64,
+    )
+    faces = np.array([[0, 1, 2]], dtype=np.int64)
+
+    output_path = write_surface(vertices, faces, tmp_path / "surface.vtk")
+
+    header, points, polygons = _read_vtk_polydata(output_path)
+    assert header == [
+        "# vtk DataFile Version 3.0",
+        "surface_mesh",
+        "BINARY",
+        "DATASET POLYDATA",
+        "POINTS 3 float",
+    ]
+    assert np.allclose(points, vertices)
+    assert np.array_equal(polygons, [[3, 0, 1, 2]])
+
+    read_vertices, read_faces = read_surface(output_path)
+    assert np.allclose(read_vertices, vertices)
+    assert np.array_equal(read_faces, faces)
+
+
+def test_plot_surface_accepts_vtk_path_with_pyvista_backend(tmp_path, monkeypatch):
+    vertices = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+        ],
+        dtype=np.float64,
+    )
+    faces = np.array([[0, 1, 2]], dtype=np.int64)
+    output_path = write_surface(vertices, faces, tmp_path / "surface.vtk")
+
+    class FakePolyData:
+        def __init__(self, points, cells):
+            self.points = np.asarray(points).copy()
+            self.cells = np.asarray(cells).copy()
+
+    class FakePlotter:
+        def __init__(self):
+            self.mesh = None
+            self.shown = False
+
+        def add_mesh(self, mesh, **_kwargs):
+            self.mesh = mesh
+
+        def add_axes(self):
+            pass
+
+        def show_bounds(self):
+            pass
+
+        def show(self, **kwargs):
+            self.show_kwargs = dict(kwargs)
+            self.shown = True
+
+    class FakePyVista:
+        PolyData = FakePolyData
+        Plotter = FakePlotter
+
+    monkeypatch.setattr(surface_visualization, "_require_pyvista", lambda: FakePyVista)
+
+    plotter = surface_visualization.plot_surface(output_path, backend="pyvista", show=False)
+
+    assert np.allclose(plotter.mesh.points, vertices)
+    assert np.array_equal(plotter.mesh.cells.reshape(-1, 4), [[3, 0, 1, 2]])
+    assert plotter.shown is False
+
+    plotter = surface_visualization.plot_surface(
+        output_path,
+        backend="pyvista",
+        jupyter_backend="html",
+    )
+    assert plotter.shown is True
+    assert plotter.show_kwargs == {"jupyter_backend": "html"}
+
+
 def test_prepare_registration_surface_mesh_prefers_filled_volume(tmp_path, monkeypatch):
     registration_output = tmp_path / "emlddmm"
     _write_vtk(
@@ -151,11 +269,14 @@ def test_prepare_registration_surface_mesh_falls_back_to_registered_without_z_fi
 ):
     registration_output = tmp_path / "emlddmm"
     _write_vtk(registration_output / "self_alignment" / "images" / "target_registered.vtk")
-    manifest_path = _write_manifest(tmp_path / "emlddmm_dataset_manifest.json", [
-        "present",
-        "missing",
-        "present",
-    ])
+    manifest_path = _write_manifest(
+        tmp_path / "emlddmm_dataset_manifest.json",
+        [
+            "present",
+            "missing",
+            "present",
+        ],
+    )
     _write_plan(registration_output, manifest_path)
     calls = _patch_mesher_and_writer(monkeypatch)
 
@@ -168,14 +289,16 @@ def test_prepare_registration_surface_mesh_falls_back_to_registered_without_z_fi
     assert np.allclose(calls["options"]["dx"], [2.0, 3.0, 4.0])
 
 
-def test_prepare_registration_surface_mesh_reports_missing_pyvista_at_write(
+def test_prepare_registration_surface_mesh_does_not_require_pyvista_to_write(
     tmp_path,
     monkeypatch,
 ):
     registration_output = tmp_path / "emlddmm"
     _write_vtk(registration_output / "self_alignment" / "images" / "target_registered.vtk")
+    calls = {"mesher": 0}
 
     def fake_mesher(_image, _options):
+        calls["mesher"] += 1
         faces = np.array([[0, 1, 2]], dtype=np.int64)
         vertices_zyx = np.array(
             [
@@ -189,5 +312,14 @@ def test_prepare_registration_surface_mesh_reports_missing_pyvista_at_write(
     monkeypatch.setattr(surface_registration, "restricted_delaunay_from_image", fake_mesher)
     monkeypatch.setitem(sys.modules, "pyvista", None)
 
-    with pytest.raises(ImportError, match="PyVista/VTK are not installed"):
-        prepare_registration_surface_mesh(registration_output)
+    def missing_pyvista():
+        raise ImportError(
+            'PyVista/VTK are not installed. Install with: pip install -e ".[visualization]"'
+        )
+
+    monkeypatch.setattr(surface_registration, "_require_pyvista", missing_pyvista)
+
+    output_path = prepare_registration_surface_mesh(registration_output)
+
+    assert output_path.exists()
+    assert calls["mesher"] == 1

@@ -131,7 +131,7 @@ Optional install extras:
 | Feature | Command |
 |---|---|
 | VSI metadata via Bio-Formats | `pip install -e ".[bioformats]"` |
-| Visualization tools | `pip install -e ".[visualization]"` |
+| Visualization tools, including PyVista notebook widgets | `pip install -e ".[visualization]"` |
 | Development tools | `pip install -e ".[dev]"` |
 | Full optional stack | `pip install -e ".[all]"` |
 

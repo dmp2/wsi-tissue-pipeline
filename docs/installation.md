@@ -119,7 +119,7 @@ rich>=12.0.0
 #### Visualization (`pip install -e ".[visualization]"`)
 - `neuroglancer`: 3D visualization server
 - `matplotlib`: Plotting and QC images
-- `napari`: Interactive viewer
+- `pyvista[jupyter]`: Interactive surface mesh viewer in notebooks
 
 #### GPU Acceleration (`pip install -e ".[torch]"`)
 - `torch`: PyTorch for GPU processing

@@ -88,7 +88,7 @@ mlflow = [
 visualization = [
     "neuroglancer>=2.37",
     "matplotlib>=3.7.0",
-    "pyvista>=0.43.0",
+    "pyvista[jupyter]>=0.43.0",
     "vtk>=9.2.0",
 ]
 

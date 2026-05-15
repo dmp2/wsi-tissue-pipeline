@@ -27,8 +27,9 @@ def restricted_delaunay(image, points, isoval, dx, verbose=True):
     image = np.asarray(image, dtype=np.float64)
     points = np.asarray(points, dtype=np.float64)
     dx = np.asarray(dx, dtype=np.float64)
-    delaunay_options = "Qt Qbb Qc"
-    voronoi_options = "Qbb"
+    N = 3 # The dimensions of our points
+    delaunay_options = 'Qt Qbb Qc' if N <= 3 else 'Qt Qbb Qc Qx' # Set the QHull options
+    voronoi_options = 'Qbb' if N <= 3 else 'Qbb Qx' # Set the QHull options
 
     x_axis = np.arange(image.shape[2], dtype=np.float64) * dx[0]
     y_axis = np.arange(image.shape[1], dtype=np.float64) * dx[1]
