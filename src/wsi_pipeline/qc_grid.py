@@ -16,6 +16,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import zarr
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 logger = logging.getLogger(__name__)
@@ -254,11 +255,80 @@ def load_thumbnail(
     PIL.Image
         Thumbnail image.
     """
+    if _is_ome_zarr_path(path):
+        return _load_ngff_thumbnail(path, size=size, mode=mode)
+
     with Image.open(path) as img:
         if img.mode != mode:
             img = img.convert(mode)
         img.thumbnail((size, size), Image.BICUBIC)
         return img.copy()
+
+
+def _is_ome_zarr_path(path: Path) -> bool:
+    return path.is_dir() and path.name.endswith(".ome.zarr")
+
+
+def _ngff_dataset_paths(path: Path) -> list[str]:
+    root = zarr.open_group(str(path), mode="r")
+    multiscales = root.attrs.get("multiscales")
+    if not isinstance(multiscales, list) or not multiscales:
+        raise ValueError(f"{path} is not a readable OME-Zarr image group.")
+    datasets = multiscales[0].get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        raise ValueError(f"{path} does not contain NGFF datasets.")
+    return [str(dataset["path"]) for dataset in datasets]
+
+
+def _array_yx_shape(shape: tuple[int, ...]) -> tuple[int, int]:
+    if len(shape) == 2:
+        return int(shape[0]), int(shape[1])
+    if len(shape) != 3:
+        raise ValueError(f"Expected 2D or 3D image array, got shape {shape}.")
+    if shape[0] in (1, 3, 4) and shape[-1] not in (1, 3, 4):
+        return int(shape[1]), int(shape[2])
+    return int(shape[0]), int(shape[1])
+
+
+def _to_display_uint8(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr)
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+        arr = np.moveaxis(arr, 0, -1)
+    if arr.ndim == 3 and arr.shape[-1] == 1:
+        arr = arr[:, :, 0]
+
+    if arr.dtype == np.uint8:
+        return arr
+    if np.issubdtype(arr.dtype, np.integer):
+        info = np.iinfo(arr.dtype)
+        return (arr.astype(np.float32) / max(1, info.max) * 255.0).clip(0, 255).astype(np.uint8)
+
+    arr_f = arr.astype(np.float32)
+    finite = np.isfinite(arr_f)
+    if finite.any() and float(np.nanmax(arr_f)) <= 1.0:
+        arr_f = arr_f * 255.0
+    return np.nan_to_num(arr_f, nan=0.0).clip(0, 255).astype(np.uint8)
+
+
+def _load_ngff_level_array(path: Path, *, preferred_size: int = 512) -> np.ndarray:
+    dataset_paths = _ngff_dataset_paths(path)
+    chosen = dataset_paths[-1]
+    for dataset_path in reversed(dataset_paths):
+        arr = zarr.open_array(str(path / dataset_path), mode="r")
+        y, x = _array_yx_shape(tuple(arr.shape))
+        if max(y, x) >= preferred_size:
+            chosen = dataset_path
+            break
+    return np.asarray(zarr.open_array(str(path / chosen), mode="r")[...])
+
+
+def _load_ngff_thumbnail(path: Path, *, size: int, mode: str) -> Image.Image:
+    arr = _to_display_uint8(_load_ngff_level_array(path, preferred_size=size))
+    img = Image.fromarray(arr)
+    if img.mode != mode:
+        img = img.convert(mode)
+    img.thumbnail((size, size), Image.BICUBIC)
+    return img.copy()
 
 
 def annotate_image(
@@ -443,7 +513,10 @@ def _resolve_manifest_path(input_dir: str | Path, manifest_path: str | Path | No
         return chosen if chosen.exists() else None
 
     default_manifest = _default_manifest_path(input_dir)
-    return default_manifest if default_manifest.exists() else None
+    if default_manifest.exists():
+        return default_manifest
+    derivative_manifest = Path(input_dir) / "manifest.json"
+    return derivative_manifest if derivative_manifest.exists() else None
 
 
 def _normalize_backend(backend: str) -> str:
@@ -455,6 +528,11 @@ def _normalize_backend(backend: str) -> str:
 
 
 def _image_size(path: Path) -> tuple[int, int]:
+    if _is_ome_zarr_path(path):
+        dataset_path = _ngff_dataset_paths(path)[0]
+        arr = zarr.open_array(str(path / dataset_path), mode="r")
+        y, x = _array_yx_shape(tuple(arr.shape))
+        return x, y
     with Image.open(path) as img:
         return img.width, img.height
 
@@ -465,8 +543,62 @@ def _legacy_source_image(parsed: dict[str, str | int]) -> str:
     return f"{prefix}_{slide_label}"
 
 
+def _derivative_source_image(payload: dict[str, Any]) -> str:
+    for key in ("source_vsi", "source_ome_zarr", "source_ets"):
+        value = payload.get(key)
+        if value:
+            return Path(str(value)).name
+    return "unknown_source"
+
+
+def _record_from_derivative_manifest(
+    input_dir: Path,
+    manifest_path: Path,
+    payload: dict[str, Any],
+    *,
+    fallback_overall_index: int,
+) -> QCRecord | None:
+    tissue_dir = manifest_path.parent
+    if not tissue_dir.exists():
+        logger.warning("Skipping derivative manifest with missing tissue directory: %s", manifest_path)
+        return None
+    try:
+        relative_path = str(tissue_dir.relative_to(input_dir))
+    except ValueError:
+        relative_path = str(tissue_dir)
+    if relative_path == "":
+        relative_path = "."
+
+    try:
+        tissue_index = int(payload.get("tissue_index", fallback_overall_index - 1))
+    except (TypeError, ValueError):
+        tissue_index = fallback_overall_index - 1
+    width, height = _image_size(tissue_dir)
+    overall_index = tissue_index + 1
+    return _make_qc_record(
+        relative_path=relative_path,
+        filename=tissue_dir.name,
+        source_image=_derivative_source_image(payload),
+        tile_index_on_source=tissue_index,
+        overall_index=overall_index,
+        overall_label=f"{overall_index:04d}",
+        width=width,
+        height=height,
+        component_qc=None,
+    )
+
+
 def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecord]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload.get("role") == "derivative":
+        record = _record_from_derivative_manifest(
+            input_dir,
+            manifest_path,
+            payload,
+            fallback_overall_index=1,
+        )
+        return [record] if record is not None else []
+
     records = []
     for item in payload.get("records", []):
         record = _make_qc_record(
@@ -484,6 +616,42 @@ def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecor
             records.append(record)
         else:
             logger.warning("Skipping manifest record for missing QC image: %s", record.relative_path)
+    return records
+
+
+def _load_derivative_manifest_records(input_dir: Path) -> list[QCRecord]:
+    if _is_ome_zarr_path(input_dir):
+        manifest_paths = [input_dir / "tissue_manifest.json"]
+    else:
+        manifest_paths = sorted(input_dir.glob("*.ome.zarr/tissue_manifest.json"))
+
+    records: list[QCRecord] = []
+    for ordinal, manifest_path in enumerate(manifest_paths, start=1):
+        if not manifest_path.exists():
+            continue
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            logger.warning("Skipping malformed derivative manifest %s: %s", manifest_path, exc)
+            continue
+        if payload.get("role") != "derivative":
+            continue
+        record = _record_from_derivative_manifest(
+            input_dir,
+            manifest_path,
+            payload,
+            fallback_overall_index=ordinal,
+        )
+        if record is not None and record.path(input_dir).exists():
+            records.append(record)
+
+    records.sort(
+        key=lambda record: (
+            record.source_image,
+            record.tile_index_on_source,
+            record.filename,
+        )
+    )
     return records
 
 
@@ -610,6 +778,9 @@ def load_qc_records(
     metadata_records = _load_processing_metadata_records(input_dir)
     if metadata_records:
         return metadata_records
+    derivative_records = _load_derivative_manifest_records(input_dir)
+    if derivative_records:
+        return derivative_records
     return _load_legacy_qc_records(input_dir, pattern=pattern)
 
 
@@ -643,7 +814,29 @@ def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataF
     input_dir = Path(input_dir)
     rows: list[dict[str, Any]] = []
     for record in records:
-        with Image.open(record.path(input_dir)) as img:
+        path = record.path(input_dir)
+        if _is_ome_zarr_path(path):
+            arr = _to_display_uint8(_load_ngff_level_array(path, preferred_size=512))
+            rows.append(
+                {
+                    "relative_path": record.relative_path,
+                    "filename": record.filename,
+                    "source_image": record.source_image,
+                    "tile_index_on_source": record.tile_index_on_source,
+                    "overall_index": record.overall_index,
+                    "overall_label": record.overall_label,
+                    "width": record.width,
+                    "height": record.height,
+                    "area_px": record.width * record.height,
+                    "image_mean_intensity": float(arr.mean()),
+                    "image_std_intensity": float(arr.std()),
+                    "artifact_likely": _record_artifact_likely(record),
+                    "artifact_reason": _record_artifact_reason(record),
+                }
+            )
+            continue
+
+        with Image.open(path) as img:
             arr = np.asarray(img)
             rows.append(
                 {

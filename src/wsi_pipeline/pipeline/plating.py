@@ -3,6 +3,7 @@
 # ---------------------------
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -16,6 +17,7 @@ import dask.config
 import numpy as np
 import zarr
 
+from ..config import SegmentationConfig, TileConfig
 from ..omezarr.metadata import (
     _get_multiscales_paths,
     _phys_xy_um,
@@ -25,7 +27,8 @@ from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
 from ..omezarr.streaming import write_ngff_from_tile_streaming_ome, write_ngff_from_tile_ts
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
 from ..precomputed.plate_writer import PlatePrecomputedWriter
-from ..tiles.generator import generate_tissue_tiles
+from ..segmentation.segmenter import make_lowres_mask
+from ..tiles.generator import TissueTileRecord, generate_tissue_tile_records
 
 logger = logging.getLogger(__name__)
 
@@ -119,12 +122,180 @@ def _tile_ngff_metadata_or_none(
         )
         return None
 
+
+def _clean_ome_zarr_stem(path: Path) -> str:
+    """Return a readable source name, stripping the compound OME-Zarr suffix."""
+    name = path.name
+    return name[: -len(".ome.zarr")] if name.endswith(".ome.zarr") else path.stem
+
+
+def _resolve_level_path(
+    ds_paths: list[str],
+    level: int | str | None,
+    *,
+    default_index: int,
+    label: str,
+) -> tuple[int, str]:
+    """Resolve an integer multiscales index or dataset path to ``(index, path)``."""
+    if not ds_paths:
+        raise ValueError("OME-Zarr source does not contain any multiscales datasets.")
+    if level is None:
+        idx = default_index
+    elif isinstance(level, str):
+        if level not in ds_paths:
+            raise ValueError(
+                f"{label} dataset path {level!r} was not found in multiscales datasets {ds_paths}."
+            )
+        idx = ds_paths.index(level)
+    else:
+        idx = int(level)
+        if idx < 0:
+            idx = len(ds_paths) + idx
+    if idx < 0 or idx >= len(ds_paths):
+        raise ValueError(f"{label} level {level!r} is out of range for {len(ds_paths)} datasets.")
+    return idx, ds_paths[idx]
+
+
+def _segmentation_kwargs(
+    segmentation_config: SegmentationConfig | None,
+    *,
+    min_size: int,
+    struct_elem_px: int,
+) -> dict[str, Any]:
+    """Translate notebook-style segmentation config into the low-res mask API."""
+    if segmentation_config is None:
+        return {
+            "dynamic_threshold": True,
+            "fixed_threshold": 0.7,
+            "min_size": min_size,
+            "struct_elem_px": struct_elem_px,
+            "additional_smooth": False,
+            "output_images": False,
+        }
+
+    return {
+        "dynamic_threshold": True,
+        "fixed_threshold": 0.7,
+        "min_size": segmentation_config.min_area_px,
+        "struct_elem_px": segmentation_config.struct_elem_px,
+        "additional_smooth": False,
+        "output_images": False,
+        "keep_top_k": segmentation_config.keep_top_k,
+        "stain_gate": segmentation_config.stain_gate,
+        "stain_gate_mode": segmentation_config.stain_gate_mode,
+        "stain_min_saturation": segmentation_config.stain_min_saturation,
+        "stain_min_od": segmentation_config.stain_min_od,
+        "stain_min_he_signal": segmentation_config.stain_min_he_signal,
+        "stain_od_bg_percentile": segmentation_config.stain_od_bg_percentile,
+        "stain_od_mad_multiplier": segmentation_config.stain_od_mad_multiplier,
+        "stain_pre_open_px": segmentation_config.stain_pre_open_px,
+        "split_touching": segmentation_config.split_touching,
+        "r_split": segmentation_config.r_split,
+        "appendage_refinement_enabled": segmentation_config.appendage_refinement_enabled,
+        "appendage_refinement_mode": segmentation_config.appendage_refinement_mode,
+        "appendage_refinement_profile": segmentation_config.appendage_refinement_profile,
+        "diagnostics": segmentation_config.diagnostics,
+        "return_diag": segmentation_config.diagnostics,
+    }
+
+
+def _source_context_path(
+    source_context: Mapping[str, Any] | None,
+    *keys: str,
+) -> str | None:
+    if source_context is None:
+        return None
+    for key in keys:
+        value = source_context.get(key)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _source_vsi_from_context(source_context: Mapping[str, Any] | None) -> str | None:
+    if source_context is None:
+        return None
+    for key in ("source_vsi", "vsi_path"):
+        value = source_context.get(key)
+        if value is not None:
+            return str(value)
+    source_kind = str(source_context.get("source_kind") or "").lower()
+    source_path = source_context.get("source_path")
+    if source_kind == "vsi" and source_path is not None:
+        return str(source_path)
+    return None
+
+
+def _write_tissue_manifest(
+    ngff_dir: Path,
+    *,
+    record: TissueTileRecord,
+    source_context: Mapping[str, Any] | None,
+    source_ome_zarr: Path,
+    source_level: int,
+    segmentation_level: int,
+    phys_xy_um: tuple[float, float],
+) -> Path:
+    """Write the minimal chopped-derivative manifest next to a tissue OME-Zarr."""
+    px_um, py_um = map(float, phys_xy_um)
+    payload = {
+        "role": "derivative",
+        "derivative_type": "tissue_crop_ome_zarr",
+        "source_vsi": _source_vsi_from_context(source_context),
+        "source_ets": _source_context_path(source_context, "source_ets", "ets_path"),
+        "source_ome_zarr": _source_context_path(source_context, "source_ome_zarr")
+        or str(source_ome_zarr),
+        "source_level": int(source_level),
+        "segmentation_level": int(segmentation_level),
+        "tissue_index": int(record.tissue_index),
+        "crop_bounds_source_level": list(record.crop_bounds_source_level),
+        "crop_bounds_segmentation_level": list(record.crop_bounds_segmentation_level),
+        "physical_pixel_size": {"x": px_um, "y": py_um, "unit": "micrometer"},
+        "operations": [
+            "read_ets_pyramid",
+            "segment_lowres",
+            "extract_tissue",
+            "write_ome_zarr",
+        ],
+    }
+    manifest_path = ngff_dir / "tissue_manifest.json"
+    manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return manifest_path
+
+
+def _record_written_tissue(
+    out_paths: list[Path],
+    ngff_dir: Path,
+    *,
+    record: TissueTileRecord,
+    source_context: Mapping[str, Any] | None,
+    source_ome_zarr: Path,
+    source_level: int,
+    segmentation_level: int,
+    phys_xy_um: tuple[float, float],
+) -> None:
+    _write_tissue_manifest(
+        ngff_dir,
+        record=record,
+        source_context=source_context,
+        source_ome_zarr=source_ome_zarr,
+        source_level=source_level,
+        segmentation_level=segmentation_level,
+        phys_xy_um=phys_xy_um,
+    )
+    out_paths.append(ngff_dir)
+
+
 def process_slide_with_plating(
     zarr_root_path: os.PathLike,
     out_ngff_dir: os.PathLike,                      # where to write tissue_region_*.zarr
     *,
     # Coarse segmentation function preprocess() options
-    segment_fn,                                     # callable(dask_arr)->(filled_mask_bool, _)
+    segment_fn=None,                                # callable(dask_arr)->(filled_mask_bool, _)
+    source_level: int | str = 0,
+    segmentation_level: int | str | None = None,
+    segmentation_config: SegmentationConfig | None = None,
+    tile_config: TileConfig | None = None,
     struct_elem_px: int = 9,                         # structuring element radius in pixels
     min_size: int = 2000,
     # Plate options
@@ -143,30 +314,15 @@ def process_slide_with_plating(
     ) -> list[Path]:
     """
     Pipeline for ONE slide root (OME-Zarr):
-        1) Run segmentation on coarsest level (sL) -> boolean mask with N labels after filling.
-        2) Build **Dask** tiles at s0 (one per tissue) with ROI upsampling & HR masking.
+        1) Run segmentation on the selected pyramid level -> boolean mask with N labels after filling.
+        2) Build **Dask** tiles at the selected source level with ROI upsampling & HR masking.
         3) For each tile: compute -> build tinybrain mips (once) -> write per-tissue NGFF.
         4) Optionally append each tissue as a Z-slice into a single Precomputed plate.
     Returns: list of per-tissue NGFF output directories.
 
-    Processes tissue regions at the highest resolution, generates pyramids, and writes OME-Zarr files.
-    Upsample `low_res_mask` => highest-res, cut out 3 square regions, build a pyramid for each and
-    (optionally) write them as separate OME-Zarr NGFF datasets.
-
-    1) If low_res_mask is None, run your preprocess() on the coarsest level to get it.
-    2) Build a **list** of high-res tissue tiles (Y,X,C) via generate_tissue_tiles().
-    3) For each tile, build a multiscale pyramid and write one OME-Zarr group.
-
-    Parameters:
-    - zarr_path: Path to the highest-resolution OME-Zarr image.
-    - low_res_mask: Binary mask of tissue regions, assumed to be the lowest resolution. If None, generate the mask.
-    - target_dim: Target square dimensions for each tissue region at the highest resolution.
-    - tile_extra_margin_px: Extra high-resolution pixels to include around each tissue before
-      rounding all tiles to a common square side.
-    - source_context: Optional source metadata hints. Supported keys:
-      ``source_kind`` (``"vsi"``, ``"ome-tiff"``, ``"ome-zarr"``, ``"unknown"``),
-      ``source_path``, ``ngff_metadata``, ``metadata_backend`` (``"auto"``, ``"bioformats"``, ``"ets_only"``),
-      and ``metadata_schema`` (``"latest"``, ``"v0.4"``, ``"0.4"``).
+    ``source_level`` and ``segmentation_level`` accept either multiscales indices
+    or dataset paths such as ``"s7"``. ``segmentation_config`` and
+    ``tile_config`` mirror the notebook configuration objects.
 
     Returns
     -------
@@ -178,20 +334,38 @@ def process_slide_with_plating(
     # Make the output directory if it doesn't already exist
     out_ngff_dir = Path(out_ngff_dir)
     out_ngff_dir.mkdir(parents=True, exist_ok=True)
+    if tile_config is not None:
+        plate_chunk_xy = tile_config.chunk_size
+        tile_extra_margin_px = tile_config.extra_margin_px
+        tile_pad_multiple = tile_config.pad_multiple
+    else:
+        tile_pad_multiple = plate_chunk_xy
 
     # Step 1: Load the NGFF root, find image and metadata for the levels
     logger.info("Loading the NGFF root.")
 
     root = zarr.open_group(str(zarr_root_path), mode = 'r')
     ds_paths = _get_multiscales_paths(root)        # e.g. ["s0","s1","s2","s3"]
-    # Fix the level of the highest resolution you want to use: default should be 0 for the highest resolution
-    L_idx = 0 # s0 is the highest resolution
-    # L_idx = -2 # testing the pipeline with a lower resolution image
-    L_path = ds_paths[L_idx]
-    sL_path = ds_paths[-1]
-
-    # Must read physical pixel size from that level, not hard coded
-    L_idx = ds_paths.index(L_path)            # robust in case ordering changes
+    L_idx, L_path = _resolve_level_path(
+        ds_paths,
+        source_level,
+        default_index=0,
+        label="source",
+    )
+    sL_idx, sL_path = _resolve_level_path(
+        ds_paths,
+        segmentation_level,
+        default_index=len(ds_paths) - 1,
+        label="segmentation",
+    )
+    logger.info(
+        "Resolved OME-Zarr levels for %s: source level %d -> %s; segmentation level %d -> %s.",
+        zarr_root_path.name,
+        L_idx,
+        L_path,
+        sL_idx,
+        sL_path,
+    )
 
     # Load arrays which are stored (C,Y,X) with parallelization; give unique and stable names to prevent collisions in the graph
     RUN_UID = f"{int(time.time())}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
@@ -200,6 +374,11 @@ def process_slide_with_plating(
     coarse_name= f"ngff-{dataset_id}-{sL_path}-{RUN_UID}"
     base_cyx = da.from_zarr(str(zarr_root_path / L_path), name=base_name)  # (C, H, W)
     sL = da.from_zarr(str(zarr_root_path / sL_path), name=coarse_name)
+    logger.info(
+        "Using source shape %s and segmentation shape %s.",
+        tuple(map(int, base_cyx.shape)),
+        tuple(map(int, sL.shape)),
+    )
 
     # # If the source is of modest size, persist once so that all dowstream tiles share one graph; otherwise, avoid entirely, and slice lazily.
     # base_cyx = base_cyx.persist()
@@ -232,29 +411,27 @@ def process_slide_with_plating(
     if sL.ndim == 3 and sL.shape[-1] in (1,3) and sL.shape[0] not in (1,3):
         sL = da.moveaxis(sL, -1, 0) # (C, Y, X)
 
-    # Get the tissue masks by labeling connected components then filling holes per region
-    filled_lr, _ = segment_fn(
-        sL, # coarsest image
-        dynamic_threshold=True, # adaptive thresholding using Otsu's method
-        fixed_threshold=0.7, # only used if dynamic_threshold=False
-        min_size=min_size, # minimum size of objects to retain (depends on pyramid level)
-        struct_elem_px=struct_elem_px, # radius of the closing disk
-        additional_smooth=False, # apply an additional smoothing operation for smoother edges
-        output_images=False # output tissue images
+    if segment_fn is None:
+        segment_fn = make_lowres_mask
+    seg_kwargs = _segmentation_kwargs(
+        segmentation_config,
+        min_size=min_size,
+        struct_elem_px=struct_elem_px,
     )
+    filled_lr, _ = segment_fn(sL, **seg_kwargs)
 
 
     # Step 2: upsample the low-resolution mask to the high-resolution image
-    # Build LIST of HR tiles (Y,X,C), ordered left->right
-    tiles_yxc, tile_dim = generate_tissue_tiles(
+    # Build LIST of HR tile records (Y,X,C), ordered left->right
+    tile_records, tile_dim = generate_tissue_tile_records(
         s0_cyx=base_cyx,
         low_res_filled=filled_lr.astype(bool),
         chunk=plate_chunk_xy,
-        pad_multiple=plate_chunk_xy,  # or another multiple, if we prefer
+        pad_multiple=tile_pad_multiple,
         extra_margin_px=tile_extra_margin_px
     )
     # Break out early if there are no tissue sections
-    if not tiles_yxc:
+    if not tile_records:
         logger.warning("[%s] no tissue regions found.", zarr_root_path.name)
         return []
 
@@ -265,7 +442,7 @@ def process_slide_with_plating(
             precomp_path=precomputed_plate_path,
             width=tile_dim,
             height=tile_dim,
-            z_slices=len(tiles_yxc),
+            z_slices=len(tile_records),
             voxel_size_um=(px_um, py_um, 1.0),
             chunk_xy=plate_chunk_xy,
             min_side_for_mips=min_side_for_mips,
@@ -283,9 +460,17 @@ def process_slide_with_plating(
     item_size_threshold = 1_500_000_000
     bytes_per_px = np.dtype(dtype if dtype else np.uint8).itemsize
     # nbytes_est = np.prod(np.squeeze(tiles_yxc[0].shape)) * bytes_per_px
-    any_big = any(_is_big_tile(tile_da=t, bytes_per_px=bytes_per_px, min_side=big_tile_threshold, max_bytes=item_size_threshold) for t in tiles_yxc)
+    any_big = any(
+        _is_big_tile(
+            tile_da=record.tile,
+            bytes_per_px=bytes_per_px,
+            min_side=big_tile_threshold,
+            max_bytes=item_size_threshold,
+        )
+        for record in tile_records
+    )
     n_tiles_threshold = 16
-    n_tiles = len(tiles_yxc)
+    n_tiles = len(tile_records)
     # If any tile is huge, avoid distributed 'compute-then-write' path
     use_distributed = bool(parallel) and (n_tiles >= n_tiles_threshold) and not any_big
 
@@ -324,11 +509,12 @@ def process_slide_with_plating(
             # Submit in batches so we do not flood scheduler/RAM
             batch_size = 8
             for start in range(0, n_tiles, batch_size):
-                batch = tiles_yxc[start:start+batch_size]
-                fmap = {client.compute(t): (start+i) for i, t in enumerate(batch)}
+                batch = tile_records[start:start+batch_size]
+                fmap = {client.compute(record.tile): (start+i) for i, record in enumerate(batch)}
 
                 for fut in as_completed(fmap):
                     z_idx = fmap.pop(fut)
+                    record = tile_records[z_idx]
                     tile = fut.result()                     # stores (Y,X,C) numpy array as soon as one tile finishes
                     # dtype policy (optional)
                     if dtype and tile.dtype != np.uint8:
@@ -340,7 +526,7 @@ def process_slide_with_plating(
                             tile = (tile * 255.0).clip(0,255).astype(np.uint16)
 
                     # Write per-tissue NGFF
-                    name = f"{zarr_root_path.stem}_tissue_{z_idx+1:02d}"
+                    name = f"{_clean_ome_zarr_stem(zarr_root_path)}_tissue_{record.tissue_index:02d}"
                     ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
                     if any_big:
                         # STREAM the NGFF pyramid from base tile via TensorStore
@@ -369,6 +555,16 @@ def process_slide_with_plating(
                         # Plate: let your writer auto-stream based on its own gate
                         if plate is not None:
                             plate.write_slice(z_idx, tile)
+                        _record_written_tissue(
+                            out_paths,
+                            ngff_dir,
+                            record=record,
+                            source_context=source_context,
+                            source_ome_zarr=zarr_root_path,
+                            source_level=L_idx,
+                            segmentation_level=sL_idx,
+                            phys_xy_um=(px_um, py_um),
+                        )
                     else:
                         # Small/medium: keep your fast path (build mips once in RAM)
                         ms = compute_num_mips_min_side(tile.shape[1], tile.shape[0],
@@ -400,7 +596,16 @@ def process_slide_with_plating(
                         # name=name,
                         # chunks_xy=plate_chunk_xy,
                         # dtype=mips[0].dtype)
-                        out_paths.append(ngff_dir)
+                        _record_written_tissue(
+                            out_paths,
+                            ngff_dir,
+                            record=record,
+                            source_context=source_context,
+                            source_ome_zarr=zarr_root_path,
+                            source_level=L_idx,
+                            segmentation_level=sL_idx,
+                            phys_xy_um=(px_um, py_um),
+                        )
                         if plate is not None:
                             plate.write_slice(z_idx, mips)
 
@@ -420,9 +625,10 @@ def process_slide_with_plating(
         _safe_close_existing_client()
 
         with dask.config.set(scheduler="threads"):
-            for z_idx, tile_dask in enumerate(tiles_yxc, start=0):
+            for z_idx, record in enumerate(tile_records, start=0):
+                tile_dask = record.tile
                 # Write per-tissue NGFF
-                name = f"{zarr_root_path.stem}_tissue_{z_idx+1:02d}"
+                name = f"{_clean_ome_zarr_stem(zarr_root_path)}_tissue_{record.tissue_index:02d}"
                 ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
                 logger.debug("tile %d: %s, big=%s", z_idx, tuple(map(int, tile_dask.shape)), _is_big_tile(tile_dask, bytes_per_px))
                 tile = None
@@ -471,6 +677,16 @@ def process_slide_with_plating(
                     if plate is not None:
                         # plate.write_slice(z_idx, tlazy)   # accepts dask arrays, streams blocks
                         plate.write_slice(z_idx, tile_dask.astype(np.uint8) if tile_dask.dtype != np.uint8 else tile_dask)   # accepts dask arrays, streams blocks
+                    _record_written_tissue(
+                        out_paths,
+                        ngff_dir,
+                        record=record,
+                        source_context=source_context,
+                        source_ome_zarr=zarr_root_path,
+                        source_level=L_idx,
+                        segmentation_level=sL_idx,
+                        phys_xy_um=(px_um, py_um),
+                    )
 
                 else:
                     tile = tile_dask.compute()                  # numpy (Y,X,C); ok for small/medium arrays
@@ -516,7 +732,16 @@ def process_slide_with_plating(
                     #                     name=name,
                     #                     chunks_xy=plate_chunk_xy,
                     #                     dtype=mips[0].dtype)
-                    out_paths.append(ngff_dir)
+                    _record_written_tissue(
+                        out_paths,
+                        ngff_dir,
+                        record=record,
+                        source_context=source_context,
+                        source_ome_zarr=zarr_root_path,
+                        source_level=L_idx,
+                        segmentation_level=sL_idx,
+                        phys_xy_um=(px_um, py_um),
+                    )
 
                     # Append to precomputed plate (optional)
                     if plate is not None:

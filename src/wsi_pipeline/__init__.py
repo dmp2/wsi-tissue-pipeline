@@ -48,6 +48,7 @@ from wsi_pipeline.etsfile import ETSFile, ETSFileError
 
 # Quality control
 from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids, run_qc_workflow
+from wsi_pipeline.pipeline import process_vsi_directory_with_plating, vsi_to_source_ome_zarr
 
 # Segmentation (high-level)
 from wsi_pipeline.segmentation import WSISegmenter, segment_mask
@@ -84,6 +85,8 @@ __all__ = [
     "process_wsi",
     "process_directory",
     "process_specimen",
+    "process_vsi_directory_with_plating",
+    "vsi_to_source_ome_zarr",
     # Segmentation
     "WSISegmenter",
     "segment_mask",

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import inspect
+import json
 from pathlib import Path
 
 import dask.array as da
 import numpy as np
-import zarr
 
 import wsi_pipeline.vsi_converter as vsi_converter
 from wsi_pipeline.pipeline import plating as plating_mod
@@ -104,29 +105,25 @@ def _make_metadata_payload(*, include_stage_origin: bool = False) -> dict[str, o
 
 def _make_source_root(path: Path) -> None:
     """Create a minimal NGFF root used by plating metadata tests."""
-    root = zarr.open_group(str(path), mode="w")
-    root.attrs.put(
-        {
-            "multiscales": [
-                {
-                    "datasets": [
-                        {
-                            "path": "s0",
-                            "coordinateTransformations": [
-                                {"type": "scale", "scale": [1.0, 0.5, 0.25]}
-                            ],
-                        },
-                        {
-                            "path": "s1",
-                            "coordinateTransformations": [
-                                {"type": "scale", "scale": [1.0, 1.0, 0.5]}
-                            ],
-                        },
-                    ]
-                }
-            ]
-        }
-    )
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _fake_ngff_root(dataset_count: int = 2):
+    datasets = []
+    for idx in range(dataset_count):
+        datasets.append(
+            {
+                "path": f"s{idx}",
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": [1.0, 0.5 * (2**idx), 0.25 * (2**idx)]}
+                ],
+            }
+        )
+
+    class _Root:
+        attrs = {"multiscales": [{"datasets": datasets}]}
+
+    return _Root()
 
 
 def _run_plating_capture(
@@ -139,6 +136,7 @@ def _run_plating_capture(
     source_root = tmp_path / "source.ome.zarr"
     _make_source_root(source_root)
     out_dir = tmp_path / "out"
+    monkeypatch.setattr(plating_mod.zarr, "open_group", lambda *args, **kwargs: _fake_ngff_root())
 
     def _fake_from_zarr(path, name=None):  # noqa: ARG001
         shape = (3, 16, 16) if str(path).endswith("s0") else (3, 8, 8)
@@ -148,8 +146,20 @@ def _run_plating_capture(
     monkeypatch.setattr(plating_mod.da, "from_zarr", _fake_from_zarr)
     monkeypatch.setattr(
         plating_mod,
-        "generate_tissue_tiles",
-        lambda **kwargs: ([da.from_array(np.ones((8, 8, 3), dtype=np.uint8), chunks=(8, 8, 3))], 8),
+        "generate_tissue_tile_records",
+        lambda **kwargs: (
+            [
+                plating_mod.TissueTileRecord(
+                    tile=da.from_array(np.ones((8, 8, 3), dtype=np.uint8), chunks=(8, 8, 3)),
+                    tissue_index=0,
+                    label_id=1,
+                    crop_bounds_source_level=(2, 4, 10, 12),
+                    crop_bounds_segmentation_level=(1, 2, 5, 6),
+                    tile_dim=8,
+                )
+            ],
+            8,
+        ),
     )
     monkeypatch.setattr(plating_mod, "compute_num_mips_min_side", lambda *args, **kwargs: 2)
     monkeypatch.setattr(
@@ -162,6 +172,7 @@ def _run_plating_capture(
     writer_calls: list[dict[str, object]] = []
 
     def _capture_writer(*args, **kwargs):
+        Path(kwargs["out_dir"]).mkdir(parents=True, exist_ok=True)
         writer_calls.append(kwargs)
 
     def _unexpected_writer(*args, **kwargs):  # noqa: ARG001
@@ -238,3 +249,120 @@ def test_plating_vsi_context_fetches_metadata_once(monkeypatch, tmp_path):
     assert len(calls) == 1
     assert calls[0]["metadata_schema"] == "v0.4"
     assert calls[0]["ngff_metadata"] is not None
+
+
+def test_plating_writes_derivative_manifest_and_forwards_config(monkeypatch, tmp_path):
+    from wsi_pipeline.config import SegmentationConfig, TileConfig
+
+    source_root = tmp_path / "source.ome.zarr"
+    _make_source_root(source_root)
+    monkeypatch.setattr(plating_mod.zarr, "open_group", lambda *args, **kwargs: _fake_ngff_root(3))
+
+    def _fake_from_zarr(path, name=None):  # noqa: ARG001
+        if str(path).endswith("s1"):
+            shape = (3, 12, 16)
+        elif str(path).endswith("s2"):
+            shape = (3, 6, 8)
+        else:
+            shape = (3, 24, 32)
+        return da.from_array(np.zeros(shape, dtype=np.uint8), chunks=shape)
+
+    segment_kwargs: dict[str, object] = {}
+
+    def _segment_fn(image, **kwargs):  # noqa: ARG001
+        segment_kwargs.update(kwargs)
+        mask = np.zeros((6, 8), dtype=bool)
+        mask[1:4, 2:6] = True
+        return mask, {"ok": True}
+
+    monkeypatch.setattr(plating_mod.da, "from_zarr", _fake_from_zarr)
+    monkeypatch.setattr(
+        plating_mod,
+        "generate_tissue_tile_records",
+        lambda **kwargs: (
+            [
+                plating_mod.TissueTileRecord(
+                    tile=da.from_array(np.ones((8, 8, 3), dtype=np.uint8), chunks=(4, 4, 3)),
+                    tissue_index=0,
+                    label_id=1,
+                    crop_bounds_source_level=(2, 4, 10, 12),
+                    crop_bounds_segmentation_level=(1, 2, 5, 6),
+                    tile_dim=8,
+                )
+            ],
+            8,
+        ),
+    )
+    monkeypatch.setattr(plating_mod, "compute_num_mips_min_side", lambda *args, **kwargs: 2)
+    monkeypatch.setattr(
+        plating_mod,
+        "build_mips_from_yxc",
+        lambda tile, levels: [tile, tile[::2, ::2, :]],
+    )
+    monkeypatch.setattr(plating_mod, "_safe_close_existing_client", lambda: None)
+
+    writer_calls: list[dict[str, object]] = []
+
+    def _capture_writer(*args, **kwargs):
+        Path(kwargs["out_dir"]).mkdir(parents=True, exist_ok=True)
+        writer_calls.append(kwargs)
+
+    monkeypatch.setattr(plating_mod, "write_ngff_from_mips_ngffzarr", _capture_writer)
+
+    paths = plating_mod.process_slide_with_plating(
+        source_root,
+        tmp_path / "out",
+        segment_fn=_segment_fn,
+        source_level=1,
+        segmentation_level="s2",
+        segmentation_config=SegmentationConfig(
+            min_area_px=123,
+            struct_elem_px=7,
+            stain_gate=True,
+            stain_gate_mode="adaptive-he",
+            split_touching=False,
+            keep_top_k=4,
+            appendage_refinement_enabled=True,
+        ),
+        tile_config=TileConfig(chunk_size=256, pad_multiple=512, extra_margin_px=9),
+        source_context={
+            "source_vsi": "/data/source.vsi",
+            "source_ets": "/data/_source_/stack10002/frame_t.ets",
+            "source_ome_zarr": str(source_root),
+        },
+    )
+
+    assert "expected_tissues" not in inspect.signature(
+        plating_mod.process_slide_with_plating
+    ).parameters
+    assert segment_kwargs["min_size"] == 123
+    assert segment_kwargs["struct_elem_px"] == 7
+    assert segment_kwargs["stain_gate"] is True
+    assert segment_kwargs["stain_gate_mode"] == "adaptive-he"
+    assert segment_kwargs["split_touching"] is False
+    assert segment_kwargs["keep_top_k"] == 4
+    assert segment_kwargs["appendage_refinement_enabled"] is True
+    assert len(writer_calls) == 1
+    assert writer_calls[0]["chunks_xy"] == 256
+    assert [path.name for path in paths] == ["source_tissue_00.ome.zarr"]
+
+    manifest = json.loads((paths[0] / "tissue_manifest.json").read_text(encoding="utf-8"))
+    assert manifest == {
+        "role": "derivative",
+        "derivative_type": "tissue_crop_ome_zarr",
+        "source_vsi": "/data/source.vsi",
+        "source_ets": "/data/_source_/stack10002/frame_t.ets",
+        "source_ome_zarr": str(source_root),
+        "source_level": 1,
+        "segmentation_level": 2,
+        "tissue_index": 0,
+        "crop_bounds_source_level": [2, 4, 10, 12],
+        "crop_bounds_segmentation_level": [1, 2, 5, 6],
+        "physical_pixel_size": {"x": 0.5, "y": 1.0, "unit": "micrometer"},
+        "operations": [
+            "read_ets_pyramid",
+            "segment_lowres",
+            "extract_tissue",
+            "write_ome_zarr",
+        ],
+    }

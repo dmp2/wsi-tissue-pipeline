@@ -8,6 +8,7 @@ including ROI upsampling and masking.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import dask.array as da
 import numpy as np
@@ -16,6 +17,18 @@ from scipy.ndimage import binary_fill_holes
 from skimage import measure
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TissueTileRecord:
+    """Lazy tissue tile plus its parent-coordinate crop metadata."""
+
+    tile: da.Array
+    tissue_index: int
+    label_id: int
+    crop_bounds_source_level: tuple[int, int, int, int]
+    crop_bounds_segmentation_level: tuple[int, int, int, int]
+    tile_dim: int
 
 
 def center_crop_pad_dask(yxc: da.Array, target_side: int) -> da.Array:
@@ -202,16 +215,16 @@ def sort_labels_left_to_right(filled_lr_lbl: np.ndarray) -> list[int]:
     return [p.label for p in sorted(props, key=lambda p: p.centroid[1])]
 
 
-def generate_tissue_tiles(
+def generate_tissue_tile_records(
     s0_cyx: da.Array,
     low_res_filled: np.ndarray,
     *,
     chunk: int = 512,
     pad_multiple: int | None = None,
     extra_margin_px: int = 0,
-) -> tuple[list[da.Array], int]:
+) -> tuple[list[TissueTileRecord], int]:
     """
-    Build one high-res (Y,X,C) Dask tile per tissue with a common square side.
+    Build one high-res (Y,X,C) Dask tile record per tissue.
 
     ``low_res_filled`` is segmented at thumbnail/coarse scale, then labels are
     mapped back onto the high-resolution image only for each output window.  All
@@ -234,8 +247,9 @@ def generate_tissue_tiles(
 
     Returns
     -------
-    tiles : list of da.Array
-        Per-tissue tiles (Y, X, C), rechunked to (chunk, chunk, C).
+    records : list of TissueTileRecord
+        Per-tissue tiles and source/segmentation crop bounds. Bounds are
+        ``(x0, y0, x1, y1)`` exclusive in their parent level.
     tile_dim : int
         The common square side length used for padding/cropping.
     """
@@ -306,9 +320,21 @@ def generate_tissue_tiles(
     tile_dim = _round_up(max_side, pad_multiple)
 
     # -------- Pass 2: build tiles lazily with common tile_dim --------
-    tiles: list[da.Array] = []
+    records: list[TissueTileRecord] = []
 
-    for (lid, _y0_lr, _y1_lr, _x0_lr, _x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, _H_hr, _W_hr) in roi_specs:
+    for tissue_index, (
+        lid,
+        _y0_lr,
+        _y1_lr,
+        _x0_lr,
+        _x1_lr,
+        y0_hr,
+        y1_hr,
+        x0_hr,
+        x1_hr,
+        _H_hr,
+        _W_hr,
+    ) in enumerate(roi_specs):
         center_y = (y0_hr + y1_hr) / 2.0
         center_x = (x0_hr + x1_hr) / 2.0
         tile_y0 = int(np.floor(center_y - tile_dim / 2.0))
@@ -364,6 +390,44 @@ def generate_tissue_tiles(
                 mode="constant",
             )
         tile = masked[:tile_dim, :tile_dim, :].rechunk((chunk, chunk, C))
-        tiles.append(tile)
+        records.append(
+            TissueTileRecord(
+                tile=tile,
+                tissue_index=tissue_index,
+                label_id=int(lid),
+                crop_bounds_source_level=(int(src_x0), int(src_y0), int(src_x1), int(src_y1)),
+                crop_bounds_segmentation_level=(
+                    int(lr_crop_x0),
+                    int(lr_crop_y0),
+                    int(lr_crop_x1),
+                    int(lr_crop_y1),
+                ),
+                tile_dim=int(tile_dim),
+            )
+        )
 
-    return tiles, tile_dim
+    return records, tile_dim
+
+
+def generate_tissue_tiles(
+    s0_cyx: da.Array,
+    low_res_filled: np.ndarray,
+    *,
+    chunk: int = 512,
+    pad_multiple: int | None = None,
+    extra_margin_px: int = 0,
+) -> tuple[list[da.Array], int]:
+    """
+    Build one high-res (Y,X,C) Dask tile per tissue with a common square side.
+
+    This compatibility wrapper preserves the historical return value. New
+    provenance-aware callers should use :func:`generate_tissue_tile_records`.
+    """
+    records, tile_dim = generate_tissue_tile_records(
+        s0_cyx=s0_cyx,
+        low_res_filled=low_res_filled,
+        chunk=chunk,
+        pad_multiple=pad_multiple,
+        extra_margin_px=extra_margin_px,
+    )
+    return [record.tile for record in records], tile_dim

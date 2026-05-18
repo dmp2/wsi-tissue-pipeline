@@ -331,6 +331,29 @@ class TestTileExtraction:
         assert shapes[0] == shapes[1]
         assert shapes[0][0] == shapes[0][1]
 
+    def test_generate_tissue_tile_records_include_parent_bounds(self):
+        """Tile records should preserve source and segmentation crop windows."""
+        from wsi_pipeline.tiles.generator import generate_tissue_tile_records
+
+        img = da.from_array(np.zeros((3, 80, 120), dtype=np.uint8), chunks=(3, 40, 40))
+        mask = np.zeros((8, 12), dtype=bool)
+        mask[2:5, 3:7] = True
+
+        records, tile_dim = generate_tissue_tile_records(
+            img,
+            mask,
+            chunk=16,
+            pad_multiple=16,
+            extra_margin_px=0,
+        )
+
+        assert len(records) == 1
+        assert records[0].tissue_index == 0
+        assert records[0].crop_bounds_source_level == (26, 11, 74, 59)
+        assert records[0].crop_bounds_segmentation_level == (2, 1, 8, 6)
+        assert records[0].tile.shape == (48, 48, 3)
+        assert tile_dim == 48
+
 
 class TestProcessWSI:
     """Test single WSI processing."""

@@ -27,6 +27,35 @@ def _write_manifest(input_dir: Path, records: list[dict[str, object]]) -> Path:
     return manifest_path
 
 
+def _write_tissue_ome_zarr(path: Path, *, value: int, tissue_index: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "tissue_manifest.json").write_text(
+        json.dumps(
+            {
+                "role": "derivative",
+                "derivative_type": "tissue_crop_ome_zarr",
+                "source_vsi": "/data/source.vsi",
+                "source_ets": "/data/source.ets",
+                "source_ome_zarr": "/data/source.ome.zarr",
+                "source_level": 0,
+                "segmentation_level": 7,
+                "tissue_index": tissue_index,
+                "crop_bounds_source_level": [0, 0, 20, 16],
+                "crop_bounds_segmentation_level": [0, 0, 10, 8],
+                "physical_pixel_size": {"x": 0.25, "y": 0.5, "unit": "micrometer"},
+                "operations": [
+                    "read_ets_pyramid",
+                    "segment_lowres",
+                    "extract_tissue",
+                    "write_ome_zarr",
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_process_wsi_metadata_includes_tile_records(sample_image: Path, temp_dir: Path):
     from wsi_pipeline.config import PipelineConfig
     from wsi_pipeline.wsi_processing import process_wsi
@@ -356,6 +385,66 @@ def test_run_qc_workflow_falls_back_to_processing_metadata(temp_dir: Path):
     assert result.artifacts.master_contact_sheet is not None
     assert result.artifacts.master_contact_sheet.exists()
     assert len(result.artifacts.per_slide_grids) == 2
+
+
+def test_run_qc_workflow_consumes_tissue_ome_zarr_manifests(monkeypatch, temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    input_dir = temp_dir / "per_tissue_ngff"
+    input_dir.mkdir()
+    output_dir = input_dir / "_qc_grids"
+
+    _write_tissue_ome_zarr(input_dir / "source_tissue_00.ome.zarr", value=80, tissue_index=0)
+    _write_tissue_ome_zarr(input_dir / "source_tissue_01.ome.zarr", value=130, tissue_index=1)
+
+    class _FakeRoot:
+        attrs = {
+            "multiscales": [
+                {
+                    "datasets": [
+                        {"path": "s0", "coordinateTransformations": []},
+                        {"path": "s1", "coordinateTransformations": []},
+                    ]
+                }
+            ]
+        }
+
+    class _FakeArray:
+        def __init__(self, path: str):
+            value = 80 if "source_tissue_00" in path else 130
+            self.data = np.full((3, 16, 20), value, dtype=np.uint8)
+            if path.endswith("s1"):
+                self.data = self.data[:, ::2, ::2]
+
+        @property
+        def shape(self):
+            return self.data.shape
+
+        def __getitem__(self, item):
+            return self.data[item]
+
+    monkeypatch.setattr(qc_grid.zarr, "open_group", lambda *args, **kwargs: _FakeRoot())
+    monkeypatch.setattr(qc_grid.zarr, "open_array", lambda path, **kwargs: _FakeArray(str(path)))
+
+    result = qc_grid.run_qc_workflow(input_dir, output_dir)
+
+    assert len(result.records) == 2
+    assert result.artifacts.records_manifest is None
+    assert [record.filename for record in result.records] == [
+        "source_tissue_00.ome.zarr",
+        "source_tissue_01.ome.zarr",
+    ]
+    assert [record.tile_index_on_source for record in result.records] == [0, 1]
+    assert [record.width for record in result.records] == [20, 20]
+    assert [record.height for record in result.records] == [16, 16]
+    assert result.artifacts.master_contact_sheet is not None
+    assert result.artifacts.master_contact_sheet.exists()
+    assert result.artifacts.stats_csv is not None
+    stats_df = pd.read_csv(result.artifacts.stats_csv)
+    assert set(stats_df["filename"]) == {
+        "source_tissue_00.ome.zarr",
+        "source_tissue_01.ome.zarr",
+    }
 
 
 def test_build_qc_grids_uses_pil_default_even_when_torch_available(
