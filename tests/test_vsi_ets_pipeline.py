@@ -4,6 +4,7 @@ import inspect
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 def test_vsi_to_source_ome_zarr_uses_ets_dask_levels(monkeypatch, tmp_path):
@@ -62,6 +63,30 @@ def test_vsi_to_source_ome_zarr_uses_ets_dask_levels(monkeypatch, tmp_path):
     assert writer_call["phys_xy_um"] == (0.25, 0.5)
     assert writer_call["chunks_xy"] == 256
     assert writer_call["ngff_metadata"] == metadata
+
+
+def test_vsi_to_source_ome_zarr_rejects_incomplete_cached_source(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+    output_path = tmp_path / "source.ome.zarr"
+    (output_path / "s0").mkdir(parents=True)
+    (output_path / "s0" / ".zarray").write_text("{}", encoding="utf-8")
+
+    metadata = {
+        "num_levels": 3,
+        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None},
+    }
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: metadata)
+
+    with pytest.raises(RuntimeError, match="appears incomplete"):
+        vsi_ets.vsi_to_source_ome_zarr(vsi_path, output_path, overwrite=False)
 
 
 def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(monkeypatch, tmp_path):

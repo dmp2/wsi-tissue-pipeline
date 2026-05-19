@@ -339,6 +339,27 @@ class TestVSIMetadata:
         assert metadata["metadata_sources"]["physical"] == "ets_only"
         assert any("Falling back to ETS-only metadata." in warning for warning in metadata["warnings"])
 
+    def test_get_vsi_metadata_auto_falls_back_when_jnius_import_raises_plain_exception(
+        self,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Auto mode should handle PyJNIus initialization failures that are not RuntimeError."""
+        from wsi_pipeline import vsi_converter
+
+        vsi_file, _ = _build_mock_vsi_tree(temp_dir)
+        monkeypatch.setattr(vsi_converter, "ETSFile", DummyETSFile)
+        monkeypatch.setattr(
+            vsi_converter,
+            "ensure_bioformats_jnius",
+            lambda: (_ for _ in ()).throw(Exception("Unable to find javac")),
+        )
+
+        metadata = vsi_converter.get_vsi_metadata(vsi_file, metadata_backend="auto")
+
+        assert metadata["metadata_sources"]["physical"] == "ets_only"
+        assert any("Falling back to ETS-only metadata." in warning for warning in metadata["warnings"])
+
     def test_get_vsi_metadata_bioformats_backend_is_strict(
         self,
         temp_dir: Path,

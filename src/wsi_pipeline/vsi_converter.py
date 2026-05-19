@@ -647,7 +647,10 @@ def _extract_vsi_physical_metadata(vsi_fname: str | Path) -> dict[str, Any]:
     ValueError
         If the VSI metadata describes an unsupported channel layout.
     """
-    jnius = ensure_bioformats_jnius()
+    try:
+        jnius = ensure_bioformats_jnius()
+    except Exception as exc:
+        raise RuntimeError("Bio-Formats/PyJNIus runtime could not be initialized.") from exc
 
     autoclass = getattr(jnius, "autoclass", None)
     if autoclass is None:

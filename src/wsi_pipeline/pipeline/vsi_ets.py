@@ -17,6 +17,42 @@ from .plating import process_slide_with_plating
 logger = logging.getLogger(__name__)
 
 
+def _expected_dataset_paths_from_metadata(metadata: dict[str, Any]) -> list[str]:
+    canonical = metadata.get("canonical_metadata")
+    if isinstance(canonical, dict):
+        dataset_paths = canonical.get("dataset_paths")
+        if isinstance(dataset_paths, list) and dataset_paths:
+            return [str(path) for path in dataset_paths]
+
+    for key in ("ngff", "ngff_v04", "ngff_latest"):
+        ngff = metadata.get(key)
+        if not isinstance(ngff, dict):
+            continue
+        multiscales = ngff.get("multiscales")
+        if not isinstance(multiscales, list) or not multiscales:
+            continue
+        datasets = multiscales[0].get("datasets")
+        if isinstance(datasets, list) and datasets:
+            paths = [dataset.get("path") for dataset in datasets if isinstance(dataset, dict)]
+            if all(path is not None for path in paths):
+                return [str(path) for path in paths]
+
+    num_levels = metadata.get("num_levels")
+    if num_levels is not None:
+        return [f"s{level}" for level in range(int(num_levels))]
+
+    return []
+
+
+def _missing_source_ome_zarr_arrays(output_path: Path, metadata: dict[str, Any]) -> list[str]:
+    missing: list[str] = []
+    for dataset_path in _expected_dataset_paths_from_metadata(metadata):
+        array_path = output_path / dataset_path
+        if not ((array_path / ".zarray").is_file() or (array_path / "zarr.json").is_file()):
+            missing.append(dataset_path)
+    return missing
+
+
 def _physical_xy_from_metadata(metadata: dict[str, Any]) -> tuple[float, float] | None:
     physical = metadata.get("physical_pixel_size_um")
     if isinstance(physical, dict):
@@ -64,6 +100,16 @@ def vsi_to_source_ome_zarr(
         raise RuntimeError(f"Unable to extract structural metadata for VSI {vsi_path}")
 
     if output_path.exists() and not overwrite:
+        missing = _missing_source_ome_zarr_arrays(output_path, metadata)
+        if missing:
+            preview = ", ".join(missing[:5])
+            if len(missing) > 5:
+                preview += f", ... ({len(missing)} missing total)"
+            raise RuntimeError(
+                f"Existing source OME-Zarr at {output_path} appears incomplete; "
+                f"missing dataset array(s): {preview}. "
+                "Rerun with overwrite_source=True or choose a fresh output directory."
+            )
         return output_path, Path(ets_path), metadata
 
     channel_labels = metadata.get("channel_labels")
