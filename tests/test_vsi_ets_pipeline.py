@@ -7,7 +7,55 @@ import numpy as np
 import pytest
 
 
-def test_vsi_to_source_ome_zarr_uses_ets_dask_levels(monkeypatch, tmp_path):
+def test_vsi_to_source_ome_zarr_uses_direct_writer_by_default(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+
+    metadata = {
+        "channel_labels": ["r", "g", "b"],
+        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None},
+    }
+    writer_call: dict[str, object] = {}
+
+    def _fake_direct_writer(ets, out_dir, **kwargs):
+        writer_call.update({"ets": Path(ets), "out_dir": Path(out_dir), **kwargs})
+        Path(out_dir).mkdir(parents=True)
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: metadata)
+    monkeypatch.setattr(vsi_ets, "write_ets_pyramid_to_ngff_zarr", _fake_direct_writer)
+    monkeypatch.setattr(
+        vsi_ets,
+        "ETSFile",
+        lambda *args, **kwargs: pytest.fail("default source writer should not use ETSFile.to_dask"),
+    )
+
+    out_path, resolved_ets, resolved_metadata = vsi_ets.vsi_to_source_ome_zarr(
+        vsi_path,
+        tmp_path / "source.ome.zarr",
+        metadata_backend="auto",
+        metadata_schema="v0.4",
+        chunks_xy=256,
+        overwrite=True,
+    )
+
+    assert out_path == tmp_path / "source.ome.zarr"
+    assert out_path.exists()
+    assert resolved_ets == ets_path
+    assert resolved_metadata == metadata
+    assert writer_call["ets"] == ets_path
+    assert writer_call["out_dir"].name == ".source.ome.zarr.incomplete"
+    assert writer_call["phys_xy_um"] == (0.25, 0.5)
+    assert writer_call["chunks_xy"] == 256
+    assert writer_call["ngff_metadata"] == metadata
+
+
+def test_vsi_to_source_ome_zarr_ngff_zarr_escape_hatch_uses_ets_dask_levels(monkeypatch, tmp_path):
     from wsi_pipeline.pipeline import vsi_ets
 
     vsi_path = tmp_path / "sample.vsi"
@@ -40,6 +88,7 @@ def test_vsi_to_source_ome_zarr_uses_ets_dask_levels(monkeypatch, tmp_path):
 
     def _fake_writer(**kwargs):
         writer_call.update(kwargs)
+        Path(kwargs["out_dir"]).mkdir(parents=True)
 
     monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
     monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: metadata)
@@ -53,6 +102,7 @@ def test_vsi_to_source_ome_zarr_uses_ets_dask_levels(monkeypatch, tmp_path):
         metadata_schema="v0.4",
         chunks_xy=256,
         overwrite=True,
+        source_writer="ngff-zarr",
     )
 
     assert out_path == tmp_path / "source.ome.zarr"
@@ -86,6 +136,47 @@ def test_vsi_to_source_ome_zarr_rejects_incomplete_cached_source(monkeypatch, tm
     monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: metadata)
 
     with pytest.raises(RuntimeError, match="appears incomplete"):
+        vsi_ets.vsi_to_source_ome_zarr(vsi_path, output_path, overwrite=False)
+
+
+def test_vsi_to_source_ome_zarr_rejects_stale_cached_source_shape(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+    output_path = tmp_path / "source.ome.zarr"
+    for level, shape in enumerate(([3, 10, 10], [3, 5, 5])):
+        array_path = output_path / f"s{level}"
+        array_path.mkdir(parents=True)
+        (array_path / ".zarray").write_text(f'{{"shape": {shape}}}', encoding="utf-8")
+
+    metadata = {
+        "num_levels": 2,
+        "channel_count": 3,
+        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None},
+    }
+
+    class _DummyETS:
+        def __init__(self, path):
+            assert Path(path) == ets_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(10, 10), (5, 6)][level]
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: metadata)
+    monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
+
+    with pytest.raises(RuntimeError, match="does not match the ETS pyramid"):
         vsi_ets.vsi_to_source_ome_zarr(vsi_path, output_path, overwrite=False)
 
 

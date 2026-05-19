@@ -9,6 +9,7 @@ import zarr
 
 from wsi_pipeline.omezarr import (
     materialize_ngff_root_attrs,
+    write_ets_pyramid_to_ngff_zarr,
     write_ngff_from_mips,
     write_ngff_from_mips_ngffzarr,
     write_ngff_from_tile_streaming_ome,
@@ -132,6 +133,82 @@ def _make_metadata_payload(
 def _root_attrs(path) -> dict:
     """Read root attrs from a written OME-Zarr group."""
     return dict(zarr.open_group(str(path), mode="r").attrs)
+
+
+class _FakeETS:
+    nlevels = 2
+    tile_xsize = 4
+    tile_ysize = 4
+
+    def level_shape(self, level: int) -> tuple[int, int]:
+        return [(5, 7), (3, 4)][level]
+
+    def level_ntiles(self, level: int) -> tuple[int, int]:
+        height, width = self.level_shape(level)
+        n_cols = (width + self.tile_xsize - 1) // self.tile_xsize
+        n_rows = (height + self.tile_ysize - 1) // self.tile_ysize
+        return n_cols, n_rows
+
+    def get_tile_decoded(self, level: int, col: int, row: int) -> np.ndarray:
+        base = level * 100 + row * 10 + col
+        tile = np.zeros((self.tile_ysize, self.tile_xsize, 3), dtype=np.uint8)
+        tile[..., 0] = base
+        tile[..., 1] = base + 1
+        tile[..., 2] = base + 2
+        return tile
+
+
+def test_write_ets_pyramid_to_ngff_zarr_streams_tiles_and_metadata(tmp_path, monkeypatch):
+    import wsi_pipeline.omezarr.ets_writer as ets_writer_mod
+
+    payload = _make_metadata_payload(dataset_count=2, name="direct-ets")
+    out_dir = tmp_path / "direct.ome.zarr"
+    group = type("FakeGroup", (), {"attrs": {}, "arrays": {}})()
+
+    class FakeArray:
+        def __init__(self, *, shape, chunks, dtype):
+            self.shape = shape
+            self.chunks = chunks
+            self.data = np.zeros(shape, dtype=dtype)
+            self.attrs = {}
+
+        def __setitem__(self, key, value):
+            self.data[key] = value
+
+        def __getitem__(self, key):
+            return self.data[key]
+
+    class FakeAttrs(dict):
+        def put(self, values):
+            self.update(values)
+
+    group.attrs = FakeAttrs()
+
+    def fake_create_group_array(root, name, **kwargs):
+        arr = FakeArray(shape=kwargs["shape"], chunks=kwargs["chunks"], dtype=kwargs["dtype"])
+        root.arrays[name] = arr
+        return arr
+
+    monkeypatch.setattr(ets_writer_mod.zarr, "open_group", lambda *args, **kwargs: group)
+    monkeypatch.setattr(ets_writer_mod, "create_group_array", fake_create_group_array)
+
+    write_ets_pyramid_to_ngff_zarr(
+        _FakeETS(),
+        out_dir,
+        phys_xy_um=(0.25, 0.5),
+        chunks_xy=4,
+        ngff_metadata=payload,
+        metadata_schema="v0.4",
+        progress_interval_s=0,
+    )
+
+    assert group.arrays["s0"].shape == (3, 5, 7)
+    assert group.arrays["s0"].chunks == (3, 4, 4)
+    assert group.arrays["s1"].shape == (3, 3, 4)
+    assert group.arrays["s0"][:, 0, 0].tolist() == [0, 1, 2]
+    assert group.arrays["s0"][:, 4, 6].tolist() == [11, 12, 13]
+    assert group.attrs["multiscales"] == materialize_ngff_root_attrs(payload, "v0.4")["multiscales"]
+    assert group.attrs["omero"]["channels"][0]["label"] == "label_0"
 
 
 def test_create_group_array_falls_back_to_create_dataset():

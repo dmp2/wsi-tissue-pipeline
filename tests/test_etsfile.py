@@ -53,6 +53,18 @@ def _build_mock_vsi_tree(temp_dir: Path) -> tuple[Path, Path]:
     return vsi_file, ets_file
 
 
+def test_level_shape_uses_ceil_downsampling_for_odd_dimensions():
+    from wsi_pipeline.etsfile import ETSFile
+
+    ets = object.__new__(ETSFile)
+    ets.npix_x = 180149
+    ets.npix_y = 93340
+
+    assert ets.level_shape(0) == (93340, 180149)
+    assert ets.level_shape(1) == (46670, 90075)
+    assert ets.level_shape(7) == (730, 1408)
+
+
 def _mock_vendor_metadata(
     *,
     size_c: int = 3,

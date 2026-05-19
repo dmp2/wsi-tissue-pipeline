@@ -20,6 +20,8 @@ write_ngff_from_tile_ts(tile_yxc, out_path, base_px_um_xy, ...)
     Streaming writer for large tiles -- no full in-RAM pyramid required.
 write_ngff_from_tile_streaming_ome(tile_yxc_da, out_dir, phys_xy_um, ...)
     Constant-memory block-wise OME-Zarr writer (alternative to TensorStore).
+write_ets_pyramid_to_ngff_zarr(ets, out_dir, phys_xy_um, ...)
+    Direct ETS tile-to-Zarr source pyramid writer.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from .pyramid import (
 )
 
 # Streaming writers (for large images)
+from .ets_writer import write_ets_pyramid_to_ngff_zarr
 from .streaming import (
     write_ngff_from_tile_streaming_ome,
     write_ngff_from_tile_ts,
@@ -61,6 +64,7 @@ __all__ = [
     # Streaming writers
     "write_ngff_from_tile_ts",
     "write_ngff_from_tile_streaming_ome",
+    "write_ets_pyramid_to_ngff_zarr",
     # Standard writers
     "write_ngff_from_mips",
     "write_ngff_from_mips_ngffzarr",

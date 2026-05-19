@@ -348,6 +348,93 @@ def init_tracking(tracking_uri: str, experiment: str):
 
 
 @main.command()
+@click.option(
+    "--strict",
+    is_flag=True,
+    help="Exit non-zero when Bio-Formats prerequisites are not ready.",
+)
+def doctor(strict: bool):
+    """Check optional runtime dependencies and Java/JDK setup."""
+    import os
+
+    from .bioformats_runtime import (
+        BIOFORMATS_DOWNLOAD_ENV,
+        BIOFORMATS_JAR_ENV,
+        _default_jar_path,
+        _verify_managed_jar,
+        discover_java_runtime,
+    )
+
+    failures: list[str] = []
+    table = Table(title="WSI Pipeline Doctor")
+    table.add_column("Check", style="cyan")
+    table.add_column("Status", style="green")
+    table.add_column("Details")
+
+    java_status = discover_java_runtime()
+    if java_status["is_jdk"]:
+        table.add_row("JDK", "[green]OK", f"JAVA_HOME={java_status['java_home']}")
+        table.add_row("java", "[green]OK", str(java_status["java"]))
+        table.add_row("javac", "[green]OK", str(java_status["javac"]))
+        if java_status.get("has_libjvm"):
+            table.add_row("libjvm", "[green]OK", str(java_status["jvm_path"]))
+        else:
+            table.add_row("libjvm", "[red]Missing", "Set JVM_PATH or install a full OpenJDK package.")
+            failures.append("libjvm")
+    else:
+        java_detail = str(java_status["java"] or "not found")
+        javac_detail = str(java_status["javac"] or "not found")
+        table.add_row("JDK", "[red]Missing", f"java={java_detail}; javac={javac_detail}")
+        failures.append("JDK with javac")
+
+    for module_name in ("jnius", "jnius_config"):
+        if importlib.util.find_spec(module_name) is None:
+            table.add_row(module_name, "[red]Missing", "Install with the bioformats extra.")
+            failures.append(module_name)
+        else:
+            table.add_row(module_name, "[green]OK", "importable")
+
+    jar_override = os.getenv(BIOFORMATS_JAR_ENV)
+    jar_path = Path(jar_override).expanduser() if jar_override else _default_jar_path()
+    if jar_path.exists():
+        if jar_override:
+            table.add_row("Bio-Formats jar", "[yellow]Custom", str(jar_path))
+        else:
+            try:
+                _verify_managed_jar(jar_path)
+            except RuntimeError as exc:
+                table.add_row("Bio-Formats jar", "[red]Invalid", str(exc))
+                failures.append("Bio-Formats jar")
+            else:
+                table.add_row("Bio-Formats jar", "[green]OK", str(jar_path))
+    else:
+        downloads_disabled = os.getenv(BIOFORMATS_DOWNLOAD_ENV, "").strip().lower() in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        status = "[red]Missing" if downloads_disabled else "[yellow]Not cached"
+        detail = (
+            f"{jar_path}; automatic downloads disabled"
+            if downloads_disabled
+            else f"{jar_path}; will download on first Bio-Formats use"
+        )
+        table.add_row("Bio-Formats jar", status, detail)
+        if downloads_disabled:
+            failures.append("Bio-Formats jar")
+
+    console.print(table)
+
+    if strict and failures:
+        console.print(
+            "[bold red]Doctor found missing prerequisites:[/] "
+            + ", ".join(sorted(set(failures)))
+        )
+        sys.exit(1)
+
+
+@main.command()
 def info():
     """Display pipeline information and configuration."""
     from . import __version__

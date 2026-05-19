@@ -18,6 +18,8 @@ def _reset_bioformats_runtime_state(monkeypatch):
     monkeypatch.delenv(bioformats_runtime.BIOFORMATS_JAR_ENV, raising=False)
     monkeypatch.delenv(bioformats_runtime.BIOFORMATS_CACHE_DIR_ENV, raising=False)
     monkeypatch.delenv(bioformats_runtime.BIOFORMATS_DOWNLOAD_ENV, raising=False)
+    monkeypatch.delenv("JAVA_HOME", raising=False)
+    monkeypatch.delenv("JVM_PATH", raising=False)
     monkeypatch.delitem(sys.modules, "jnius", raising=False)
 
 
@@ -109,6 +111,88 @@ def test_ensure_bioformats_jnius_sets_classpath_before_import(tmp_path, monkeypa
 
     assert result.autoclass("loci.formats.ImageReader") == "loci.formats.ImageReader"
     assert events == [f"set_classpath:{jar_path}", "import_jnius"]
+
+
+def _write_java_tool(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _write_libjvm(java_home: Path) -> Path:
+    libjvm = java_home / "lib" / "server" / bioformats_runtime._libjvm_name()
+    libjvm.parent.mkdir(parents=True, exist_ok=True)
+    libjvm.write_bytes(b"jvm")
+    return libjvm
+
+
+def test_discover_java_runtime_prefers_active_conda_jdk(tmp_path, monkeypatch):
+    conda_prefix = tmp_path / "env"
+    java_home = conda_prefix / "lib" / "jvm"
+    _write_java_tool(java_home / "bin" / "java")
+    _write_java_tool(java_home / "bin" / "javac")
+    libjvm = _write_libjvm(java_home)
+
+    monkeypatch.setenv("CONDA_PREFIX", str(conda_prefix))
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(bioformats_runtime, "_jdk_search_roots", lambda: [])
+    monkeypatch.setattr(bioformats_runtime.sys, "prefix", str(tmp_path / "python"))
+
+    status = bioformats_runtime.discover_java_runtime()
+
+    assert status["is_jdk"] is True
+    assert status["java_home"] == str(java_home)
+    assert status["javac"] == str(java_home / "bin" / "javac")
+    assert status["jvm_path"] == str(libjvm)
+    assert status["has_libjvm"] is True
+
+
+def test_validate_java_runtime_sets_java_home_from_discovered_jdk(tmp_path, monkeypatch):
+    root = tmp_path / "usr-lib-jvm"
+    jdk_home = root / "java-21-openjdk-amd64"
+    _write_java_tool(jdk_home / "bin" / "java")
+    _write_java_tool(jdk_home / "bin" / "javac")
+    libjvm = _write_libjvm(jdk_home)
+
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(bioformats_runtime, "_jdk_search_roots", lambda: [root])
+    monkeypatch.setattr(bioformats_runtime.sys, "prefix", str(tmp_path / "python"))
+
+    java = bioformats_runtime._validate_java_runtime()
+
+    assert java == jdk_home / "bin" / "java"
+    assert Path(bioformats_runtime.os.environ["JAVA_HOME"]) == jdk_home
+    assert Path(bioformats_runtime.os.environ["JVM_PATH"]) == libjvm
+
+
+def test_validate_java_runtime_rejects_jdk_without_libjvm(tmp_path, monkeypatch):
+    jdk_home = tmp_path / "jdk"
+    _write_java_tool(jdk_home / "bin" / "java")
+    _write_java_tool(jdk_home / "bin" / "javac")
+
+    monkeypatch.setenv("JAVA_HOME", str(jdk_home))
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr(bioformats_runtime, "_jdk_search_roots", lambda: [])
+    monkeypatch.setattr(bioformats_runtime.sys, "prefix", str(tmp_path / "python"))
+
+    with pytest.raises(RuntimeError, match="JVM shared library"):
+        bioformats_runtime._validate_java_runtime()
+
+
+def test_validate_java_runtime_rejects_jre_without_javac(tmp_path, monkeypatch):
+    java_bin = tmp_path / "jre" / "bin"
+    _write_java_tool(java_bin / "java")
+
+    monkeypatch.delenv("JAVA_HOME", raising=False)
+    monkeypatch.delenv("CONDA_PREFIX", raising=False)
+    monkeypatch.setenv("PATH", str(java_bin))
+    monkeypatch.setattr(bioformats_runtime, "_jdk_search_roots", lambda: [])
+    monkeypatch.setattr(bioformats_runtime.sys, "prefix", str(tmp_path / "python"))
+
+    with pytest.raises(RuntimeError, match="no JDK compiler"):
+        bioformats_runtime._validate_java_runtime()
 
 
 def test_ensure_bioformats_jnius_fails_if_jnius_already_imported(monkeypatch):

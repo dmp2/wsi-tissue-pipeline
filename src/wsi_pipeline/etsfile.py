@@ -271,7 +271,10 @@ class ETSFile:
             (height, width) at the specified level.
         """
         scale = 2 ** level
-        return (self.npix_y // scale, self.npix_x // scale)
+        return (
+            (self.npix_y + scale - 1) // scale,
+            (self.npix_x + scale - 1) // scale,
+        )
 
     def level_ntiles(self, level: int) -> tuple[int, int]:
         """

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ import numpy as np
 
 from ..config import SegmentationConfig, TileConfig
 from ..etsfile import ETSFile
+from ..omezarr.ets_writer import write_ets_pyramid_to_ngff_zarr
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
 from ..vsi_converter import find_ets_file, get_vsi_metadata
 from .plating import process_slide_with_plating
@@ -53,6 +56,57 @@ def _missing_source_ome_zarr_arrays(output_path: Path, metadata: dict[str, Any])
     return missing
 
 
+def _source_ome_zarr_shape_errors(
+    output_path: Path,
+    metadata: dict[str, Any],
+    ets_path: Path,
+) -> list[str]:
+    """Return dataset paths whose cached array shapes do not match the ETS pyramid."""
+    dataset_paths = _expected_dataset_paths_from_metadata(metadata)
+    if not dataset_paths:
+        return []
+
+    channel_count = 3
+    canonical = metadata.get("canonical_metadata")
+    if isinstance(canonical, dict) and canonical.get("channel_count") is not None:
+        channel_count = int(canonical["channel_count"])
+    elif metadata.get("channel_count") is not None:
+        channel_count = int(metadata["channel_count"])
+
+    errors: list[str] = []
+    with ETSFile(ets_path) as ets:
+        for level, dataset_path in enumerate(dataset_paths):
+            zarray_path = output_path / dataset_path / ".zarray"
+            if not zarray_path.is_file():
+                continue
+            try:
+                zarray = json.loads(zarray_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                errors.append(f"{dataset_path} (unreadable .zarray)")
+                continue
+
+            height, width = ets.level_shape(level)
+            expected_shape = [channel_count, int(height), int(width)]
+            actual_shape = zarray.get("shape")
+            if list(actual_shape) != expected_shape:
+                errors.append(
+                    f"{dataset_path} shape={actual_shape!r}, expected={expected_shape!r}"
+                )
+    return errors
+
+
+def _temporary_source_path(output_path: Path) -> Path:
+    """Return the hidden incomplete output path used for source conversion."""
+    return output_path.with_name(f".{output_path.name}.incomplete")
+
+
+def _promote_completed_source(temp_path: Path, output_path: Path) -> None:
+    """Replace a source OME-Zarr only after a complete temp tree exists."""
+    if output_path.exists():
+        shutil.rmtree(output_path)
+    temp_path.rename(output_path)
+
+
 def _physical_xy_from_metadata(metadata: dict[str, Any]) -> tuple[float, float] | None:
     physical = metadata.get("physical_pixel_size_um")
     if isinstance(physical, dict):
@@ -79,6 +133,7 @@ def vsi_to_source_ome_zarr(
     metadata_schema: str = "v0.4",
     chunks_xy: int = 512,
     overwrite: bool = False,
+    source_writer: str = "direct",
 ) -> tuple[Path, Path, dict[str, Any]]:
     """
     Convert a VSI/ETS pyramid to a source OME-Zarr pyramid without flat files.
@@ -110,6 +165,15 @@ def vsi_to_source_ome_zarr(
                 f"missing dataset array(s): {preview}. "
                 "Rerun with overwrite_source=True or choose a fresh output directory."
             )
+        shape_errors = _source_ome_zarr_shape_errors(output_path, metadata, Path(ets_path))
+        if shape_errors:
+            preview = "; ".join(shape_errors[:3])
+            if len(shape_errors) > 3:
+                preview += f"; ... ({len(shape_errors)} shape mismatches total)"
+            raise RuntimeError(
+                f"Existing source OME-Zarr at {output_path} does not match the ETS pyramid; "
+                f"{preview}. Rerun with overwrite_source=True or choose a fresh output directory."
+            )
         return output_path, Path(ets_path), metadata
 
     channel_labels = metadata.get("channel_labels")
@@ -121,16 +185,21 @@ def vsi_to_source_ome_zarr(
         )
         phys_xy_um = (1.0, 1.0)
 
-    ets = ETSFile(ets_path)
-    try:
-        levels_yxc = [ets.to_dask(level) for level in range(ets.nlevels)]
-        write_ngff_from_mips_ngffzarr(
-            mips_yxc=levels_yxc,
-            out_dir=output_path,
+    writer_name = source_writer.strip().lower().replace("_", "-")
+    if writer_name not in {"direct", "ngff-zarr"}:
+        raise ValueError("source_writer must be one of ['direct', 'ngff-zarr'].")
+
+    temp_output_path = _temporary_source_path(output_path)
+    if temp_output_path.exists():
+        shutil.rmtree(temp_output_path)
+
+    if writer_name == "direct":
+        write_ets_pyramid_to_ngff_zarr(
+            ets_path,
+            temp_output_path,
             phys_xy_um=phys_xy_um,
             name=vsi_path.stem,
             chunks_xy=chunks_xy,
-            version="0.4",
             overwrite=True,
             channel_labels=channel_labels if isinstance(channel_labels, list) else None,
             channel_colors=["FFFFFF"] * 3,
@@ -138,8 +207,28 @@ def vsi_to_source_ome_zarr(
             ngff_metadata=metadata,
             metadata_schema=metadata_schema,
         )
-    finally:
-        ets.close()
+    else:
+        ets = ETSFile(ets_path)
+        try:
+            levels_yxc = [ets.to_dask(level) for level in range(ets.nlevels)]
+            write_ngff_from_mips_ngffzarr(
+                mips_yxc=levels_yxc,
+                out_dir=temp_output_path,
+                phys_xy_um=phys_xy_um,
+                name=vsi_path.stem,
+                chunks_xy=chunks_xy,
+                version="0.4",
+                overwrite=True,
+                channel_labels=channel_labels if isinstance(channel_labels, list) else None,
+                channel_colors=["FFFFFF"] * 3,
+                add_omero=True,
+                ngff_metadata=metadata,
+                metadata_schema=metadata_schema,
+            )
+        finally:
+            ets.close()
+
+    _promote_completed_source(temp_output_path, output_path)
 
     return output_path, Path(ets_path), metadata
 
@@ -158,6 +247,7 @@ def process_vsi_directory_with_plating(
     metadata_backend: str = "auto",
     metadata_schema: str = "v0.4",
     overwrite_source: bool = False,
+    source_writer: str = "direct",
     parallel: bool = False,
     min_side_for_mips: int | None = None,
     dtype: np.dtype | None = "uint8",
@@ -191,6 +281,7 @@ def process_vsi_directory_with_plating(
             metadata_schema=metadata_schema,
             chunks_xy=chunk_xy,
             overwrite=overwrite_source,
+            source_writer=source_writer,
         )
         tissue_paths = process_slide_with_plating(
             source_ome_zarr,

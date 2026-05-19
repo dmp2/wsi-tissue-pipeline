@@ -72,10 +72,12 @@ def _to_v3_bytes_codec(compressor: Any) -> Any:
     )
 
 
-def compression_kwargs(compressor: Any | None) -> dict[str, Any]:
+def compression_kwargs(compressor: Any | None, *, zarr_format: int | None = None) -> dict[str, Any]:
     """Return zarr-version-appropriate compression kwargs for group array creation."""
     if compressor is None:
         return {}
+    if zarr_format == 2:
+        return {"compressor": compressor}
     if _zarr_major_version() >= 3:
         return {"compressors": [_to_v3_bytes_codec(compressor)]}
     return {"compressor": compressor}
@@ -90,6 +92,7 @@ def create_group_array(
     dtype: Any,
     compressor: Any | None = None,
     overwrite: bool = True,
+    zarr_format: int | None = None,
 ) -> Any:
     """
     Create an array on a zarr group across v2/v3 APIs.
@@ -102,7 +105,7 @@ def create_group_array(
         "dtype": dtype,
         "overwrite": overwrite,
     }
-    kwargs.update(compression_kwargs(compressor))
+    kwargs.update(compression_kwargs(compressor, zarr_format=zarr_format))
 
     create_array = getattr(group, "create_array", None)
     if callable(create_array):
