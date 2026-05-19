@@ -231,6 +231,8 @@ def test_write_ngff_from_mips_preserves_default_v04_root_attrs(tmp_path):
 
     write_ngff_from_mips(mips, out_dir, phys_xy_um=(0.25, 0.5))
 
+    assert (out_dir / ".zgroup").is_file()
+    assert (out_dir / ".zattrs").is_file()
     attrs = _root_attrs(out_dir)
     assert attrs["multiscales"][0]["version"] == "0.4"
     assert attrs["multiscales"][0]["axes"][0]["name"] == "c^"

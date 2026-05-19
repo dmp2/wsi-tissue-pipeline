@@ -83,6 +83,14 @@ def compression_kwargs(compressor: Any | None, *, zarr_format: int | None = None
     return {"compressor": compressor}
 
 
+def open_group_v2(store: Any, *, mode: str = "w") -> Any:
+    """Open a Zarr v2 group, preserving the .zgroup/.zattrs layout expected by NGFF 0.4."""
+    try:
+        return zarr.open_group(store, mode=mode, zarr_format=2)
+    except TypeError:
+        return zarr.open_group(store, mode=mode, zarr_version=2)
+
+
 def create_group_array(
     group: Any,
     name: str,

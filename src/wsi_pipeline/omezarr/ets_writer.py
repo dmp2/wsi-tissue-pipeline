@@ -9,13 +9,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-import zarr
 from numcodecs import Blosc
 
 from ..etsfile import ETSFile
 from .metadata import _prepare_ngff_writer_metadata
 from .writers import _build_omero_block, _omero_version
-from .zarr_compat import create_group_array
+from .zarr_compat import create_group_array, open_group_v2
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +45,7 @@ def _validate_tile(
 
 def _open_zarr_v2_group(out_dir: Path):
     """Open a filesystem Zarr group using the OME-NGFF v0.4-compatible v2 layout."""
-    try:
-        return zarr.open_group(str(out_dir), mode="w", zarr_format=2)
-    except TypeError:
-        return zarr.open_group(str(out_dir), mode="w", zarr_version=2)
+    return open_group_v2(str(out_dir), mode="w")
 
 
 def write_ets_pyramid_to_ngff_zarr(

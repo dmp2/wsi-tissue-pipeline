@@ -8,14 +8,30 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import dask.array as da
+import dask.config
 import numpy as np
+from scipy.ndimage import binary_fill_holes
+from skimage import measure
 
 from ..config import SegmentationConfig, TileConfig
 from ..etsfile import ETSFile
 from ..omezarr.ets_writer import write_ets_pyramid_to_ngff_zarr
+from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
+from ..omezarr.streaming import write_ngff_from_tile_streaming_ome
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
+from ..precomputed.plate_writer import PlatePrecomputedWriter
+from ..segmentation.segmenter import make_lowres_mask
+from ..tiles.generator import TissueTileRecord, sort_labels_left_to_right
 from ..vsi_converter import find_ets_file, get_vsi_metadata
-from .plating import process_slide_with_plating
+from .plating import (
+    _is_big_tile,
+    _record_written_tissue,
+    _safe_close_existing_client,
+    _segmentation_kwargs,
+    _tile_ngff_metadata_or_none,
+    process_slide_with_plating,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +137,252 @@ def _physical_xy_from_metadata(metadata: dict[str, Any]) -> tuple[float, float] 
             if x_um is not None and y_um is not None:
                 return float(x_um), float(y_um)
     return None
+
+
+def _resolve_ets_level(
+    level: int | str | None,
+    *,
+    default_index: int,
+    nlevels: int,
+    label: str,
+) -> int:
+    """Resolve an ETS pyramid level from an integer index or an sN dataset name."""
+    if level is None:
+        idx = default_index
+    elif isinstance(level, str):
+        normalized = level.strip()
+        if normalized.startswith("s") and normalized[1:].isdigit():
+            idx = int(normalized[1:])
+        else:
+            idx = int(normalized)
+    else:
+        idx = int(level)
+    if idx < 0:
+        idx = nlevels + idx
+    if idx < 0 or idx >= nlevels:
+        raise ValueError(f"{label} level {level!r} is out of range for {nlevels} ETS levels.")
+    return idx
+
+
+def _filled_lr_labels(low_res_filled: np.ndarray) -> np.ndarray:
+    """Return connected-component labels after filling each low-res tissue island."""
+    lr_lbl, n_lr = measure.label(low_res_filled.astype(bool), connectivity=2, return_num=True)
+    filled_lr_lbl = np.zeros_like(lr_lbl, dtype=np.int32)
+    for lid in range(1, n_lr + 1):
+        comp = lr_lbl == lid
+        if comp.any():
+            filled_lr_lbl[binary_fill_holes(comp)] = lid
+    return filled_lr_lbl
+
+
+def _read_ets_region_yxc(
+    ets_path: str | Path,
+    *,
+    level: int,
+    x0: int,
+    y0: int,
+    x1: int,
+    y1: int,
+) -> np.ndarray:
+    """Read an arbitrary ETS level region as a YXC uint8 array."""
+    x0, y0, x1, y1 = map(int, (x0, y0, x1, y1))
+    if x1 <= x0 or y1 <= y0:
+        return np.zeros((0, 0, 3), dtype=np.uint8)
+
+    with ETSFile(ets_path) as ets:
+        height, width = map(int, ets.level_shape(level))
+        rx0 = max(0, min(width, x0))
+        rx1 = max(0, min(width, x1))
+        ry0 = max(0, min(height, y0))
+        ry1 = max(0, min(height, y1))
+        out = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.uint8)
+        if rx1 <= rx0 or ry1 <= ry0:
+            return out
+
+        tx = int(ets.tile_xsize)
+        ty = int(ets.tile_ysize)
+        col0 = rx0 // tx
+        col1 = (rx1 - 1) // tx
+        row0 = ry0 // ty
+        row1 = (ry1 - 1) // ty
+
+        for tile_row in range(row0, row1 + 1):
+            tile_y0 = tile_row * ty
+            tile_y1 = tile_y0 + ty
+            iy0 = max(ry0, tile_y0)
+            iy1 = min(ry1, tile_y1)
+            if iy1 <= iy0:
+                continue
+            for tile_col in range(col0, col1 + 1):
+                tile_x0 = tile_col * tx
+                tile_x1 = tile_x0 + tx
+                ix0 = max(rx0, tile_x0)
+                ix1 = min(rx1, tile_x1)
+                if ix1 <= ix0:
+                    continue
+                tile = ets.get_tile_decoded(level, tile_col, tile_row)
+                src = tile[iy0 - tile_y0 : iy1 - tile_y0, ix0 - tile_x0 : ix1 - tile_x0, :]
+                out[iy0 - y0 : iy1 - y0, ix0 - x0 : ix1 - x0, :] = src
+        return out
+
+
+def _read_masked_ets_block(
+    block: np.ndarray,
+    *,
+    ets_path: str,
+    source_level: int,
+    source_shape_yx: tuple[int, int],
+    tile_origin_yx: tuple[int, int],
+    lr_labels: np.ndarray,
+    label_id: int,
+    block_info: dict | None = None,
+) -> np.ndarray:
+    """Dask block callback for direct ETS tissue tile extraction."""
+    if block_info is None:
+        return np.zeros_like(block)
+
+    loc = block_info[None]["array-location"]
+    out_y0, out_y1 = map(int, loc[0])
+    out_x0, out_x1 = map(int, loc[1])
+    block_h = out_y1 - out_y0
+    block_w = out_x1 - out_x0
+    out = np.zeros((block_h, block_w, block.shape[2]), dtype=block.dtype)
+
+    tile_y0, tile_x0 = map(int, tile_origin_yx)
+    source_y0 = tile_y0 + out_y0
+    source_y1 = tile_y0 + out_y1
+    source_x0 = tile_x0 + out_x0
+    source_x1 = tile_x0 + out_x1
+    source_h, source_w = map(int, source_shape_yx)
+
+    valid_y0 = max(0, source_y0)
+    valid_y1 = min(source_h, source_y1)
+    valid_x0 = max(0, source_x0)
+    valid_x1 = min(source_w, source_x1)
+    if valid_y1 <= valid_y0 or valid_x1 <= valid_x0:
+        return out
+
+    region = _read_ets_region_yxc(
+        ets_path,
+        level=source_level,
+        x0=valid_x0,
+        y0=valid_y0,
+        x1=valid_x1,
+        y1=valid_y1,
+    )
+
+    yr = source_h / lr_labels.shape[0]
+    xr = source_w / lr_labels.shape[1]
+    lr_y = np.floor(np.arange(valid_y0, valid_y1) / yr).astype(np.int64)
+    lr_x = np.floor(np.arange(valid_x0, valid_x1) / xr).astype(np.int64)
+    lr_y = np.clip(lr_y, 0, lr_labels.shape[0] - 1)
+    lr_x = np.clip(lr_x, 0, lr_labels.shape[1] - 1)
+    mask = lr_labels[np.ix_(lr_y, lr_x)] == int(label_id)
+    region = np.where(mask[..., None], region, 0)
+
+    dst_y0 = valid_y0 - source_y0
+    dst_x0 = valid_x0 - source_x0
+    out[dst_y0 : dst_y0 + region.shape[0], dst_x0 : dst_x0 + region.shape[1], :] = region
+    return out
+
+
+def _direct_ets_tissue_tile_records(
+    *,
+    ets_path: Path,
+    source_level: int,
+    source_shape_yx: tuple[int, int],
+    low_res_filled: np.ndarray,
+    chunk: int,
+    pad_multiple: int | None,
+    extra_margin_px: int,
+) -> tuple[list[TissueTileRecord], int]:
+    """Build lazy per-tissue tile records that read directly from ETS source blocks."""
+    source_h, source_w = map(int, source_shape_yx)
+    lr_labels = _filled_lr_labels(low_res_filled)
+    if lr_labels.max() == 0:
+        return [], 0
+
+    if pad_multiple is None:
+        pad_multiple = chunk
+    yr = source_h / low_res_filled.shape[0]
+    xr = source_w / low_res_filled.shape[1]
+
+    roi_specs: list[tuple[int, int, int, int, int, int, int, int]] = []
+    max_side = 0
+    for lid in sort_labels_left_to_right(lr_labels):
+        lr_mask = lr_labels == lid
+        rows, cols = np.any(lr_mask, axis=1), np.any(lr_mask, axis=0)
+        yi = np.where(rows)[0]
+        xi = np.where(cols)[0]
+        if yi.size == 0 or xi.size == 0:
+            continue
+
+        y0_lr, y1_lr = yi[[0, -1]]
+        x0_lr, x1_lr = xi[[0, -1]]
+        y0_src = max(0, min(source_h, int(np.floor(y0_lr * yr))))
+        y1_src = max(0, min(source_h, int(np.ceil((y1_lr + 1) * yr))))
+        x0_src = max(0, min(source_w, int(np.floor(x0_lr * xr))))
+        x1_src = max(0, min(source_w, int(np.ceil((x1_lr + 1) * xr))))
+        max_side = max(
+            max_side,
+            (y1_src - y0_src) + (2 * extra_margin_px),
+            (x1_src - x0_src) + (2 * extra_margin_px),
+        )
+        roi_specs.append((int(lid), int(y0_lr), int(y1_lr), int(x0_lr), int(x1_lr), y0_src, y1_src, x0_src, x1_src))
+
+    if not roi_specs:
+        return [], 0
+
+    tile_dim = ((max_side + pad_multiple - 1) // pad_multiple) * pad_multiple
+    records: list[TissueTileRecord] = []
+    for tissue_index, (lid, _y0_lr, _y1_lr, _x0_lr, _x1_lr, y0_src, y1_src, x0_src, x1_src) in enumerate(roi_specs):
+        center_y = (y0_src + y1_src) / 2.0
+        center_x = (x0_src + x1_src) / 2.0
+        tile_y0 = int(np.floor(center_y - tile_dim / 2.0))
+        tile_x0 = int(np.floor(center_x - tile_dim / 2.0))
+        tile_y1 = tile_y0 + tile_dim
+        tile_x1 = tile_x0 + tile_dim
+
+        src_y0 = max(0, tile_y0)
+        src_x0 = max(0, tile_x0)
+        src_y1 = min(source_h, tile_y1)
+        src_x1 = min(source_w, tile_x1)
+        if src_y1 <= src_y0 or src_x1 <= src_x0:
+            continue
+
+        lr_crop_y0 = max(0, int(np.floor(src_y0 / yr)))
+        lr_crop_x0 = max(0, int(np.floor(src_x0 / xr)))
+        lr_crop_y1 = min(lr_labels.shape[0], int(np.ceil(src_y1 / yr)))
+        lr_crop_x1 = min(lr_labels.shape[1], int(np.ceil(src_x1 / xr)))
+
+        chunks = (min(chunk, tile_dim), min(chunk, tile_dim), 3)
+        dummy = da.zeros((tile_dim, tile_dim, 3), chunks=chunks, dtype=np.uint8)
+        tile = dummy.map_blocks(
+            _read_masked_ets_block,
+            dtype=np.uint8,
+            ets_path=str(ets_path),
+            source_level=int(source_level),
+            source_shape_yx=(source_h, source_w),
+            tile_origin_yx=(tile_y0, tile_x0),
+            lr_labels=lr_labels,
+            label_id=int(lid),
+        )
+        records.append(
+            TissueTileRecord(
+                tile=tile,
+                tissue_index=int(tissue_index),
+                label_id=int(lid),
+                crop_bounds_source_level=(int(src_x0), int(src_y0), int(src_x1), int(src_y1)),
+                crop_bounds_segmentation_level=(
+                    int(lr_crop_x0),
+                    int(lr_crop_y0),
+                    int(lr_crop_x1),
+                    int(lr_crop_y1),
+                ),
+                tile_dim=int(tile_dim),
+            )
+        )
+    return records, int(tile_dim)
 
 
 def vsi_to_source_ome_zarr(
@@ -231,6 +493,251 @@ def vsi_to_source_ome_zarr(
     return output_path, Path(ets_path), metadata
 
 
+def process_vsi_with_direct_plating(
+    vsi_path: str | Path,
+    out_ngff_dir: str | Path,
+    *,
+    segment_fn=None,
+    source_level: int | str = 0,
+    segmentation_level: int | str | None = None,
+    segmentation_config: SegmentationConfig | None = None,
+    tile_config: TileConfig | None = None,
+    metadata_backend: str = "auto",
+    metadata_schema: str = "v0.4",
+    struct_elem_px: int = 9,
+    min_size: int = 2000,
+    precomputed_plate_path: str | None = None,
+    plate_backend: str = "tensorstore",
+    plate_chunk_xy: int = 512,
+    parallel: bool = False,
+    fill_missing: bool = False,
+    min_side_for_mips: int | None = None,
+    tile_extra_margin_px: int = 0,
+    dtype: np.dtype | str | None = "uint8",
+) -> list[Path]:
+    """
+    Segment a VSI/ETS pyramid and write per-tissue OME-Zarr derivatives without
+    materializing a full-slide source OME-Zarr.
+    """
+    del parallel  # Direct ETS block reads are deliberately scheduled locally.
+    vsi_path = Path(vsi_path)
+    out_ngff_dir = Path(out_ngff_dir)
+    out_ngff_dir.mkdir(parents=True, exist_ok=True)
+
+    ets_path = find_ets_file(vsi_path)
+    if ets_path is None:
+        raise FileNotFoundError(f"No ETS file found for VSI {vsi_path}")
+    ets_path = Path(ets_path)
+
+    metadata = get_vsi_metadata(
+        vsi_path,
+        metadata_backend=metadata_backend,
+        target_schema="latest",
+    )
+    if not metadata:
+        raise RuntimeError(f"Unable to extract structural metadata for VSI {vsi_path}")
+
+    if tile_config is not None:
+        plate_chunk_xy = tile_config.chunk_size
+        tile_extra_margin_px = tile_config.extra_margin_px
+        tile_pad_multiple = tile_config.pad_multiple
+    else:
+        tile_pad_multiple = plate_chunk_xy
+
+    with ETSFile(ets_path) as ets:
+        source_idx = _resolve_ets_level(
+            source_level,
+            default_index=0,
+            nlevels=ets.nlevels,
+            label="source",
+        )
+        segmentation_idx = _resolve_ets_level(
+            segmentation_level,
+            default_index=ets.nlevels - 1,
+            nlevels=ets.nlevels,
+            label="segmentation",
+        )
+        source_shape_yx = tuple(map(int, ets.level_shape(source_idx)))
+        segmentation_yxc = ets.read_level(segmentation_idx)
+
+    logger.info(
+        "Resolved ETS levels for %s: source level %d shape=%s; segmentation level %d shape=%s.",
+        vsi_path.name,
+        source_idx,
+        source_shape_yx,
+        segmentation_idx,
+        tuple(map(int, segmentation_yxc.shape)),
+    )
+
+    seg_cyx = da.from_array(
+        np.moveaxis(segmentation_yxc, -1, 0),
+        chunks=(3, min(plate_chunk_xy, segmentation_yxc.shape[0]), min(plate_chunk_xy, segmentation_yxc.shape[1])),
+    )
+    if segment_fn is None:
+        segment_fn = make_lowres_mask
+    seg_kwargs = _segmentation_kwargs(
+        segmentation_config,
+        min_size=min_size,
+        struct_elem_px=struct_elem_px,
+    )
+    filled_lr, _ = segment_fn(seg_cyx, **seg_kwargs)
+
+    tile_records, tile_dim = _direct_ets_tissue_tile_records(
+        ets_path=ets_path,
+        source_level=source_idx,
+        source_shape_yx=source_shape_yx,
+        low_res_filled=filled_lr.astype(bool),
+        chunk=plate_chunk_xy,
+        pad_multiple=tile_pad_multiple,
+        extra_margin_px=tile_extra_margin_px,
+    )
+    if not tile_records:
+        logger.warning("[%s] no tissue regions found.", vsi_path.name)
+        return []
+
+    base_phys_xy_um = _physical_xy_from_metadata(metadata)
+    if base_phys_xy_um is None:
+        logger.warning(
+            "Physical pixel size unavailable for %s; tissue manifests will use 1.0 um fallback scales.",
+            vsi_path,
+        )
+        base_phys_xy_um = (1.0, 1.0)
+    px_um = float(base_phys_xy_um[0]) * (2**source_idx)
+    py_um = float(base_phys_xy_um[1]) * (2**source_idx)
+
+    source_context = {
+        "source_kind": "vsi",
+        "source_path": str(vsi_path),
+        "source_vsi": str(vsi_path),
+        "source_ets": str(ets_path),
+        "source_ome_zarr": None,
+        "ngff_metadata": metadata,
+        "metadata_schema": metadata_schema,
+        "metadata_backend": metadata_backend,
+    }
+    source_ngff_metadata = metadata
+    source_metadata_schema = metadata_schema
+
+    plate = None
+    if precomputed_plate_path:
+        plate = PlatePrecomputedWriter(
+            precomp_path=precomputed_plate_path,
+            width=tile_dim,
+            height=tile_dim,
+            z_slices=len(tile_records),
+            voxel_size_um=(px_um, py_um, 1.0),
+            chunk_xy=plate_chunk_xy,
+            min_side_for_mips=min_side_for_mips,
+            backend=plate_backend,
+            dtype=dtype if dtype else "uint8",
+            encoding="raw",
+            parallel=False,
+            fill_missing=fill_missing,
+        )
+
+    out_paths: list[Path] = []
+    big_tile_threshold = 8192
+    item_size_threshold = 1_500_000_000
+    bytes_per_px = np.dtype(dtype if dtype else np.uint8).itemsize
+    any_big = any(
+        _is_big_tile(
+            tile_da=record.tile,
+            bytes_per_px=bytes_per_px,
+            min_side=big_tile_threshold,
+            max_bytes=item_size_threshold,
+        )
+        for record in tile_records
+    )
+
+    _safe_close_existing_client()
+    with dask.config.set({"scheduler": "threads", "array.slicing.split_large_chunks": True}):
+        for z_idx, record in enumerate(tile_records):
+            tile_dask = record.tile
+            name = f"{vsi_path.stem}_tissue_{record.tissue_index:02d}"
+            ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
+            if any_big:
+                num_mips = compute_num_mips_min_side(
+                    int(tile_dask.shape[1]),
+                    int(tile_dask.shape[0]),
+                    min_side_for_mips or plate_chunk_xy,
+                )
+                tile_ngff_metadata = _tile_ngff_metadata_or_none(
+                    source_ngff_metadata,
+                    dataset_count=num_mips,
+                    name=name,
+                )
+                tlazy = tile_dask.astype(np.uint8) if tile_dask.dtype != np.uint8 else tile_dask
+                write_ngff_from_tile_streaming_ome(
+                    tile_yxc_da=tlazy,
+                    out_dir=ngff_dir,
+                    phys_xy_um=(px_um, py_um),
+                    block_xy=plate_chunk_xy,
+                    num_mips=num_mips,
+                    name=name,
+                    compressor=None,
+                    channel_labels=[f"ch{i}" for i in range(int(tile_dask.shape[2]))],
+                    channel_colors=["FFFFFF"] * int(tile_dask.shape[2]),
+                    ngff_metadata=tile_ngff_metadata,
+                    metadata_schema=source_metadata_schema,
+                )
+                if plate is not None:
+                    plate.write_slice(z_idx, tlazy)
+            else:
+                tile = tile_dask.compute()
+                if dtype and tile.dtype != np.uint8:
+                    if np.issubdtype(tile.dtype, np.integer):
+                        maxv = np.iinfo(tile.dtype).max
+                        tile = (
+                            (tile.astype(np.float32) / max(1, maxv) * 255.0)
+                            .clip(0, 255)
+                            .astype(np.uint8)
+                        )
+                    else:
+                        tile = (tile * 255.0).clip(0, 255).astype(np.uint16)
+
+                num_mips = compute_num_mips_min_side(
+                    tile.shape[1],
+                    tile.shape[0],
+                    min_side_for_mips or plate_chunk_xy,
+                )
+                tile_ngff_metadata = _tile_ngff_metadata_or_none(
+                    source_ngff_metadata,
+                    dataset_count=num_mips,
+                    name=name,
+                )
+                mips = build_mips_from_yxc(tile, num_mips)
+                write_ngff_from_mips_ngffzarr(
+                    mips_yxc=mips,
+                    out_dir=ngff_dir,
+                    phys_xy_um=(px_um, py_um),
+                    name=name,
+                    chunks_xy=plate_chunk_xy,
+                    version="0.4",
+                    overwrite=True,
+                    channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
+                    channel_colors=["FFFFFF"] * mips[0].shape[2],
+                    add_omero=True,
+                    ngff_metadata=tile_ngff_metadata,
+                    metadata_schema=source_metadata_schema,
+                )
+                if plate is not None:
+                    plate.write_slice(z_idx, mips)
+
+            _record_written_tissue(
+                out_paths,
+                ngff_dir,
+                record=record,
+                source_context=source_context,
+                source_ome_zarr=None,
+                source_level=source_idx,
+                segmentation_level=segmentation_idx,
+                phys_xy_um=(px_um, py_um),
+            )
+
+    logger.info("Wrote %d direct ETS tissue OME-Zarrs to %s", len(out_paths), out_ngff_dir)
+    return out_paths
+
+
 def process_vsi_directory_with_plating(
     input_dir: str | Path,
     output_dir: str | Path,
@@ -246,9 +753,10 @@ def process_vsi_directory_with_plating(
     metadata_schema: str = "v0.4",
     overwrite_source: bool = False,
     source_writer: str = "direct",
+    materialize_source: bool = False,
     parallel: bool = False,
     min_side_for_mips: int | None = None,
-    dtype: np.dtype | None = "uint8",
+    dtype: np.dtype | str | None = "uint8",
 ) -> dict[str, list[Path]]:
     """
     Process all matching VSI files into per-tissue OME-Zarr derivatives.
@@ -262,7 +770,8 @@ def process_vsi_directory_with_plating(
         Path(source_ome_zarr_dir) if source_ome_zarr_dir else output_dir / "source_ome_zarr"
     )
     per_tissue_dir = Path(per_tissue_dir) if per_tissue_dir else output_dir / "per_tissue_ngff"
-    source_ome_zarr_dir.mkdir(parents=True, exist_ok=True)
+    if materialize_source:
+        source_ome_zarr_dir.mkdir(parents=True, exist_ok=True)
     per_tissue_dir.mkdir(parents=True, exist_ok=True)
 
     results: dict[str, list[Path]] = {}
@@ -273,37 +782,52 @@ def process_vsi_directory_with_plating(
 
     chunk_xy = tile_config.chunk_size if tile_config is not None else 512
     for vsi_path in vsi_paths:
-        source_ome_zarr = source_ome_zarr_dir / f"{vsi_path.stem}.ome.zarr"
-        source_ome_zarr, ets_path, metadata = vsi_to_source_ome_zarr(
-            vsi_path,
-            source_ome_zarr,
-            metadata_backend=metadata_backend,
-            metadata_schema=metadata_schema,
-            chunks_xy=chunk_xy,
-            overwrite=overwrite_source,
-            source_writer=source_writer,
-        )
-        tissue_paths = process_slide_with_plating(
-            source_ome_zarr,
-            per_tissue_dir,
-            source_level=source_level,
-            segmentation_level=segmentation_level,
-            segmentation_config=segmentation_config,
-            tile_config=tile_config,
-            parallel=parallel,
-            min_side_for_mips=min_side_for_mips,
-            dtype=dtype,
-            source_context={
-                "source_kind": "vsi",
-                "source_path": str(vsi_path),
-                "source_vsi": str(vsi_path),
-                "source_ets": str(ets_path),
-                "source_ome_zarr": str(source_ome_zarr),
-                "ngff_metadata": metadata,
-                "metadata_backend": metadata_backend,
-                "metadata_schema": metadata_schema,
-            },
-        )
+        if materialize_source:
+            source_ome_zarr = source_ome_zarr_dir / f"{vsi_path.stem}.ome.zarr"
+            source_ome_zarr, ets_path, metadata = vsi_to_source_ome_zarr(
+                vsi_path,
+                source_ome_zarr,
+                metadata_backend=metadata_backend,
+                metadata_schema=metadata_schema,
+                chunks_xy=chunk_xy,
+                overwrite=overwrite_source,
+                source_writer=source_writer,
+            )
+            tissue_paths = process_slide_with_plating(
+                source_ome_zarr,
+                per_tissue_dir,
+                source_level=source_level,
+                segmentation_level=segmentation_level,
+                segmentation_config=segmentation_config,
+                tile_config=tile_config,
+                parallel=parallel,
+                min_side_for_mips=min_side_for_mips,
+                dtype=dtype,
+                source_context={
+                    "source_kind": "vsi",
+                    "source_path": str(vsi_path),
+                    "source_vsi": str(vsi_path),
+                    "source_ets": str(ets_path),
+                    "source_ome_zarr": str(source_ome_zarr),
+                    "ngff_metadata": metadata,
+                    "metadata_backend": metadata_backend,
+                    "metadata_schema": metadata_schema,
+                },
+            )
+        else:
+            tissue_paths = process_vsi_with_direct_plating(
+                vsi_path,
+                per_tissue_dir,
+                source_level=source_level,
+                segmentation_level=segmentation_level,
+                segmentation_config=segmentation_config,
+                tile_config=tile_config,
+                metadata_backend=metadata_backend,
+                metadata_schema=metadata_schema,
+                parallel=parallel,
+                min_side_for_mips=min_side_for_mips,
+                dtype=dtype,
+            )
         results[str(vsi_path)] = tissue_paths
 
     return results

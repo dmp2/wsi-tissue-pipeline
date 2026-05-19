@@ -17,7 +17,7 @@ import zarr
 from ngff_zarr import to_multiscales, to_ngff_image, to_ngff_zarr
 
 from .metadata import _prepare_ngff_writer_metadata
-from .zarr_compat import create_group_array
+from .zarr_compat import create_group_array, open_group_v2
 
 
 def _omero_version(root_attrs: dict[str, Any], schema: str) -> str:
@@ -231,7 +231,7 @@ def write_ngff_from_tile_streaming_ome(
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    root = zarr.open_group(str(out_dir), mode="w")
+    root = open_group_v2(str(out_dir), mode="w")
 
     # Shapes / scales
     if tile_yxc_da.ndim != 3:
@@ -265,6 +265,7 @@ def write_ngff_from_tile_streaming_ome(
             dtype=dtype,
             compressor=compressor,
             overwrite=True,
+            zarr_format=2,
         )
         arrays.append(arr)
 

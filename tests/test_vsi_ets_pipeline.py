@@ -219,6 +219,7 @@ def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(mo
         tmp_path / "out",
         source_level=0,
         segmentation_level=7,
+        materialize_source=True,
     )
 
     assert "expected_tissues" not in inspect.signature(
@@ -231,3 +232,81 @@ def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(mo
     assert [call["segmentation_level"] for call in plating_calls] == [7, 7]
     assert plating_calls[0]["source_context"]["source_vsi"] == str(vsi_a)
     assert plating_calls[0]["source_context"]["source_ets"] == "/ets/a.ets"
+
+
+def test_process_vsi_directory_with_plating_uses_direct_ets_by_default(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    input_dir = tmp_path / "inputs"
+    input_dir.mkdir()
+    vsi_path = input_dir / "a.vsi"
+    vsi_path.touch()
+
+    direct_calls: list[dict[str, object]] = []
+
+    def _fake_direct(vsi_path_arg, per_tissue_dir, **kwargs):
+        direct_calls.append(
+            {
+                "vsi_path": Path(vsi_path_arg),
+                "per_tissue_dir": Path(per_tissue_dir),
+                **kwargs,
+            }
+        )
+        return [Path(per_tissue_dir) / "a_tissue_00.ome.zarr"]
+
+    monkeypatch.setattr(vsi_ets, "process_vsi_with_direct_plating", _fake_direct)
+    monkeypatch.setattr(
+        vsi_ets,
+        "vsi_to_source_ome_zarr",
+        lambda *args, **kwargs: pytest.fail("default directory path should not materialize source OME-Zarr"),
+    )
+
+    results = vsi_ets.process_vsi_directory_with_plating(
+        input_dir,
+        tmp_path / "out",
+        source_level=0,
+        segmentation_level=7,
+    )
+
+    assert results == {str(vsi_path): [tmp_path / "out" / "per_tissue_ngff" / "a_tissue_00.ome.zarr"]}
+    assert direct_calls[0]["vsi_path"] == vsi_path
+    assert direct_calls[0]["source_level"] == 0
+    assert direct_calls[0]["segmentation_level"] == 7
+
+
+def test_direct_ets_tissue_tile_records_read_only_tissue_blocks(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    def _fake_read_region(_ets_path, *, level, x0, y0, x1, y1):
+        yy, xx = np.mgrid[y0:y1, x0:x1]
+        out = np.zeros((y1 - y0, x1 - x0, 3), dtype=np.uint8)
+        out[..., 0] = xx + 1
+        out[..., 1] = yy + 1
+        out[..., 2] = level
+        return out
+
+    monkeypatch.setattr(vsi_ets, "_read_ets_region_yxc", _fake_read_region)
+    low_res_mask = np.zeros((2, 4), dtype=bool)
+    low_res_mask[:, 0] = True
+    low_res_mask[:, 3] = True
+
+    records, tile_dim = vsi_ets._direct_ets_tissue_tile_records(
+        ets_path=tmp_path / "fake.ets",
+        source_level=1,
+        source_shape_yx=(4, 8),
+        low_res_filled=low_res_mask,
+        chunk=2,
+        pad_multiple=2,
+        extra_margin_px=0,
+    )
+
+    assert tile_dim == 4
+    assert [record.tissue_index for record in records] == [0, 1]
+    first = records[0].tile.compute()
+    second = records[1].tile.compute()
+    assert first.shape == (4, 4, 3)
+    assert second.shape == (4, 4, 3)
+    assert np.count_nonzero(first[..., 0]) > 0
+    assert np.count_nonzero(second[..., 0]) > 0
+    assert np.count_nonzero(first[:, -1, 0]) == 0
+    assert np.count_nonzero(second[:, 0, 0]) == 0

@@ -20,7 +20,7 @@ from ngff_zarr.v04.zarr_metadata import Metadata as V04Metadata
 from numcodecs import Blosc
 
 from .metadata import _prepare_ngff_writer_metadata
-from .zarr_compat import create_group_array
+from .zarr_compat import create_group_array, open_group_v2
 
 
 def _omero_version(root_attrs: dict[str, Any], schema: str) -> str:
@@ -140,7 +140,7 @@ def write_ngff_from_mips(
     resolved_channel_labels = prepared["resolved_channel_labels"]
     omero_version = _omero_version(root_attrs, prepared["schema"])
 
-    root = zarr.open_group(str(out_dir), mode="w")
+    root = open_group_v2(str(out_dir), mode="w")
 
     for lvl, img in enumerate(mips_yxc):
         if img.ndim != 3:
@@ -158,6 +158,7 @@ def write_ngff_from_mips(
             dtype=dtype,
             compressor=compressor,
             overwrite=True,
+            zarr_format=2,
         )
         arr[...] = np.moveaxis(img, -1, 0)
         arr.attrs["_ARRAY_DIMENSIONS"] = ["c^", "y", "x"]
