@@ -253,6 +253,7 @@ def segment_crosses_isovalue(
     p0 = np.asarray(p0, dtype=np.float64, order="C")
     p1 = np.asarray(p1, dtype=np.float64, order="C")
     if coord_map is None:
+
         def coord_map(array):
             return array
 
@@ -279,7 +280,9 @@ def segment_crosses_isovalue(
     return keep
 
 
-def _check_tetrahedra(image, triangulation, circumcenters, x_axis, y_axis, z_axis, isoval, verbose=False):
+def _check_tetrahedra(
+    image, triangulation, circumcenters, x_axis, y_axis, z_axis, isoval, verbose=False
+):
     """Keep Delaunay faces whose dual circumcenter edge crosses the image isovalue."""
 
     tets = triangulation.simplices

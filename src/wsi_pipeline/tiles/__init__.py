@@ -26,10 +26,10 @@ from __future__ import annotations
 
 # Generator functions
 from .generator import (
+    TissueTileRecord,
     center_crop_pad_dask,
     crop_and_pad,
     generate_tissue_images,
-    TissueTileRecord,
     generate_tissue_tile_records,
     generate_tissue_tiles,
     sort_labels_left_to_right,

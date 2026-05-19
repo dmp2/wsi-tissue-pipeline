@@ -81,9 +81,7 @@ def _sha256_file(path: Path) -> str:
 def _verify_managed_jar(path: Path) -> None:
     """Verify that the managed jar matches the pinned Bio-Formats artifact."""
     if _sha256_file(path) != BIOFORMATS_JAR_SHA256:
-        raise RuntimeError(
-            f"Cached Bio-Formats jar at {path} does not match the pinned SHA-256."
-        )
+        raise RuntimeError(f"Cached Bio-Formats jar at {path} does not match the pinned SHA-256.")
 
 
 @contextmanager
@@ -348,8 +346,7 @@ def _validate_java_runtime() -> Path:
         )
 
     raise RuntimeError(
-        "Java/JDK not found. Bio-Formats metadata via PyJNIus requires Java. "
-        f"{_JDK_INSTALL_HINT}"
+        f"Java/JDK not found. Bio-Formats metadata via PyJNIus requires Java. {_JDK_INSTALL_HINT}"
     )
 
 
@@ -386,7 +383,7 @@ def ensure_bioformats_jnius():
     except ImportError as exc:
         raise RuntimeError(
             "Bio-Formats metadata backend requires the optional 'bioformats' dependencies. "
-            "Install the package with `pip install -e \".[bioformats]\"`."
+            'Install the package with `pip install -e ".[bioformats]"`.'
         ) from exc
 
     if _CONFIGURED_JAR_PATH is None:

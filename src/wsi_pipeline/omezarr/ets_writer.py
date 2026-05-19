@@ -27,7 +27,9 @@ def _ets_context(ets: ETSFile | str | Path):
     return nullcontext(ets)
 
 
-def _validate_tile(tile: np.ndarray, *, level: int, col: int, row: int, channels: int) -> np.ndarray:
+def _validate_tile(
+    tile: np.ndarray, *, level: int, col: int, row: int, channels: int
+) -> np.ndarray:
     """Validate a decoded ETS tile and return a channel-last array."""
     if tile.ndim != 3:
         raise ValueError(

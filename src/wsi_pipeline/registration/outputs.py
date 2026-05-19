@@ -399,7 +399,9 @@ def write_atlas_registration_outputs(
     graph_path = None
     graph_execution_path = None
     if transformation_graph is not None:
-        graph_path = _write_json(output_dir / "transformation_graph_config.json", transformation_graph)
+        graph_path = _write_json(
+            output_dir / "transformation_graph_config.json", transformation_graph
+        )
     if transformation_graph_execution_config is not None:
         graph_execution_path = _write_json(
             output_dir / "transformation_graph_execution_config.json",

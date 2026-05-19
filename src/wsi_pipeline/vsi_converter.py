@@ -255,9 +255,7 @@ def ets_to_flat_image(
     try:
         with ETSFile(ets_fname) as ets:
             if level < 0 or level >= ets.nlevels:
-                raise ValueError(
-                    f"Level {level} out of range [0, {ets.nlevels - 1}]"
-                )
+                raise ValueError(f"Level {level} out of range [0, {ets.nlevels - 1}]")
 
             img = ets.read_level(level)
 
@@ -332,9 +330,7 @@ def ets_to_ome_tiff(
     vsi_metadata: dict[str, Any] | None = None
 
     if backend == "bioformats" and vsi_path is None:
-        raise RuntimeError(
-            "Bio-Formats metadata backend requires a VSI path; provide `vsi_fname`."
-        )
+        raise RuntimeError("Bio-Formats metadata backend requires a VSI path; provide `vsi_fname`.")
 
     if vsi_path is not None:
         try:
@@ -783,7 +779,11 @@ def _build_canonical_vsi_metadata(
     dataset_paths = [f"s{level}" for level in range(ets.nlevels)]
     level_scales = {
         level: (
-            [1.0, physical_pixel_size_um["y"] * (2**level), physical_pixel_size_um["x"] * (2**level)]
+            [
+                1.0,
+                physical_pixel_size_um["y"] * (2**level),
+                physical_pixel_size_um["x"] * (2**level),
+            ]
             if physical_pixel_size_um["x"] is not None and physical_pixel_size_um["y"] is not None
             else None
         )
@@ -976,9 +976,7 @@ def get_vsi_metadata(
         lossy_fields_for_v04: list[str] = []
 
         if canonical_metadata["stage_origin_um"]:
-            lossy_fields_for_v04.extend(
-                ["named_coordinate_systems", "absolute_origin_translation"]
-            )
+            lossy_fields_for_v04.extend(["named_coordinate_systems", "absolute_origin_translation"])
             compatibility_warnings.append(
                 "Stage-origin metadata is preserved only in the latest-NGFF projection."
             )
@@ -999,12 +997,8 @@ def get_vsi_metadata(
             "compression": ets.compression_str,
             "is_bgr": ets.is_bgr,
             "file_size_bytes": ets.fsize,
-            "level_shapes": {
-                lvl: ets.level_shape(lvl) for lvl in range(ets.nlevels)
-            },
-            "level_tile_counts": {
-                lvl: ets.level_ntiles(lvl) for lvl in range(ets.nlevels)
-            },
+            "level_shapes": {lvl: ets.level_shape(lvl) for lvl in range(ets.nlevels)},
+            "level_tile_counts": {lvl: ets.level_ntiles(lvl) for lvl in range(ets.nlevels)},
             "metadata_sources": {
                 "ets": "ETSFile",
                 "physical": physical_source,

@@ -41,6 +41,7 @@ from urllib.parse import urlparse
 
 try:
     import neuroglancer as ng
+
     NEUROGLANCER_AVAILABLE = True
 except ImportError:
     NEUROGLANCER_AVAILABLE = False
@@ -87,6 +88,7 @@ B_SHADER = """void main(){ emitRGB( vec3( 0.0, 0.0, toNormalized(getDataValue(2)
 # not data servers. No Neuroglancer Python package is required.
 # =============================================================================
 
+
 def emit_ng_state_for_ngff_plate(
     plate_root: str | Path,
     base_http_url: str,
@@ -115,7 +117,9 @@ def emit_ng_state_for_ngff_plate(
         Path to the written state JSON file.
     """
     plate_root = Path(plate_root)
-    children = sorted(p for p in plate_root.iterdir() if p.is_dir() and p.name.endswith(".ome.zarr"))
+    children = sorted(
+        p for p in plate_root.iterdir() if p.is_dir() and p.name.endswith(".ome.zarr")
+    )
     from .omezarr.metadata import _is_ngff_image_group
 
     layers = []
@@ -124,13 +128,15 @@ def emit_ng_state_for_ngff_plate(
             continue
         name = f"{layer_prefix}{child.stem}"
         source = f"zarr://{base_http_url.rstrip('/')}/{child.name}"
-        layers.append({
-            "type": "image",
-            "name": name,
-            "source": source,
-            "shader": R_SHADER,
-            "visible": (idx == 0),  # only first is visible initially
-        })
+        layers.append(
+            {
+                "type": "image",
+                "name": name,
+                "source": source,
+                "shader": R_SHADER,
+                "visible": (idx == 0),  # only first is visible initially
+            }
+        )
 
     state = {
         "layers": layers,
@@ -168,11 +174,13 @@ def emit_ng_state_for_precomputed_plate(
         Path to the written state JSON file.
     """
     state = {
-        "layers": [{
-            "type": "image",
-            "name": layer_name,
-            "source": precomputed_url.rstrip("/"),
-        }],
+        "layers": [
+            {
+                "type": "image",
+                "name": layer_name,
+                "source": precomputed_url.rstrip("/"),
+            }
+        ],
         "crossSectionScale": 1.0,
         "perspectiveZoom": 50.0,
         "selectedLayer": {"visible": True, "layer": layer_name},
@@ -189,6 +197,7 @@ def emit_ng_state_for_precomputed_plate(
 # Neuroglancer browser application. Requires the ``neuroglancer`` Python package
 # (``pip install wsi-tissue-pipeline[visualization]``).
 # =============================================================================
+
 
 class CORSRequestHandler(SimpleHTTPRequestHandler):
     """Static file server with permissive CORS and HTTP Range support.
@@ -445,6 +454,7 @@ def open_neuroglancer_plate_view(
                 s.layers[layer_name] = ng.ImageLayer(source=src, shader=shader)
             else:
                 import zarr
+
                 z = zarr.open(child / "s0", mode="r")
                 s.layers[layer_name] = ng.ImageLayer(
                     source=ng.LocalVolume(
@@ -600,6 +610,7 @@ def start_neuroglancer_server(
                 )
             else:
                 import zarr
+
                 z = zarr.open(child / "s0", mode="r")
                 vol = ng.LocalVolume(data=z, dimensions=dims)
                 state.layers[layer_name] = ng.ImageLayer(source=vol)

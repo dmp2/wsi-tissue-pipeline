@@ -98,7 +98,7 @@ def crop_and_pad(
     xmin, xmax = np.where(cols)[0][[0, -1]]
 
     # Crop the image to the bounding box
-    cropped_image = image[ymin:ymax + 1, xmin:xmax + 1]
+    cropped_image = image[ymin : ymax + 1, xmin : xmax + 1]
 
     if isinstance(target_shape, int):
         # Calculate padding amounts for square image
@@ -180,6 +180,7 @@ def generate_tissue_images(
         if display_images:
             try:
                 import matplotlib.pyplot as plt
+
                 plt.figure()
                 plt.imshow(processed_image)
                 plt.title(f"Tissue Region {i}")

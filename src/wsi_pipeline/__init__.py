@@ -45,10 +45,10 @@ from wsi_pipeline.config import PipelineConfig, load_config
 
 # ETS/VSI file handling
 from wsi_pipeline.etsfile import ETSFile, ETSFileError
+from wsi_pipeline.pipeline import process_vsi_directory_with_plating, vsi_to_source_ome_zarr
 
 # Quality control
 from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids, run_qc_workflow
-from wsi_pipeline.pipeline import process_vsi_directory_with_plating, vsi_to_source_ome_zarr
 
 # Segmentation (high-level)
 from wsi_pipeline.segmentation import WSISegmenter, segment_mask

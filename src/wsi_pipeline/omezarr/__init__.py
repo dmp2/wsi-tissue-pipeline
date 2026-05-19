@@ -26,6 +26,9 @@ write_ets_pyramid_to_ngff_zarr(ets, out_dir, phys_xy_um, ...)
 
 from __future__ import annotations
 
+# Streaming writers (for large images)
+from .ets_writer import write_ets_pyramid_to_ngff_zarr
+
 # Metadata utilities (internal -- used by writers and pipeline)
 from .metadata import (
     _detect_source_ds_factor,
@@ -43,9 +46,6 @@ from .pyramid import (
     build_mips_from_yxc,
     compute_num_mips_min_side,
 )
-
-# Streaming writers (for large images)
-from .ets_writer import write_ets_pyramid_to_ngff_zarr
 from .streaming import (
     write_ngff_from_tile_streaming_ome,
     write_ngff_from_tile_ts,

@@ -4,7 +4,6 @@ Entropy-based tissue segmentation.
 Provides local-entropy tissue mask generation that works with both NumPy and Dask arrays.
 """
 
-
 import dask.array as da
 import numpy as np
 from scipy import ndimage as ndi
@@ -71,7 +70,9 @@ def entropy_mask(
             depth=(struct_elem_px, struct_elem_px),
             boundary="reflect",
             dtype=np.uint8,
-            gmin=gmin, gscale=gscale, struct_elem_px=int(struct_elem_px)
+            gmin=gmin,
+            gscale=gscale,
+            struct_elem_px=int(struct_elem_px),
         )
 
         # global threshold on the *full* entropy image (avoids blockwise biases)
@@ -80,7 +81,7 @@ def entropy_mask(
         # NumPy path (e.g., your fixed thumbnail)
         g = gray.astype(np.float32, copy=False)
         g -= g.min()
-        g /= (g.max() - g.min() + 1e-6)
+        g /= g.max() - g.min() + 1e-6
         u8 = (g * 255.0 + 0.5).astype(np.uint8)
         ent_np = rank_entropy(u8, fp).astype(np.float32)
 

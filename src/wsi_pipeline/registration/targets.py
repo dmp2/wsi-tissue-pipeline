@@ -49,9 +49,7 @@ def load_manifest(path: str | Path | None) -> dict[str, Any] | None:
     }
     missing = sorted(required_keys.difference(manifest))
     if missing:
-        raise ValueError(
-            f"Manifest {manifest_path} is missing required keys: {', '.join(missing)}"
-        )
+        raise ValueError(f"Manifest {manifest_path} is missing required keys: {', '.join(missing)}")
     return manifest
 
 
@@ -109,9 +107,7 @@ def _validate_prepared_target_manifest(
     if manifest is None:
         return
     if len(target.xJ[0]) != int(manifest["full_grid_count"]):
-        raise ValueError(
-            "Prepared target z-grid length does not match manifest full_grid_count"
-        )
+        raise ValueError("Prepared target z-grid length does not match manifest full_grid_count")
     expected_present = np.array(
         [_is_present_status(entry["status"]) for entry in manifest["entries"]],
         dtype=bool,

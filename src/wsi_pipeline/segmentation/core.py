@@ -4,7 +4,6 @@ Core segmentation utilities.
 Provides grayscale conversion, thumbnail generation, and mask upsampling.
 """
 
-
 import dask.array as da
 import numpy as np
 from skimage.transform import resize
@@ -40,7 +39,9 @@ def to_gray(image: np.ndarray) -> np.ndarray:
 _to_gray = to_gray
 
 
-def create_thumbnail(image: np.ndarray | da.Array, target_long_side: int) -> tuple[np.ndarray, float]:
+def create_thumbnail(
+    image: np.ndarray | da.Array, target_long_side: int
+) -> tuple[np.ndarray, float]:
     """
     Create a NumPy thumbnail and return the scale factor.
 

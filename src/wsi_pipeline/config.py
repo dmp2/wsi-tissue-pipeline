@@ -23,7 +23,9 @@ class SegmentationConfig(BaseModel):
     ] = Field(default="local-entropy", description="Segmentation algorithm backend")
 
     target_long_side: int = Field(
-        default=1800, ge=100, le=10000,
+        default=1800,
+        ge=100,
+        le=10000,
         description=(
             "Thumbnail long-axis size (px) used for segmentation. "
             "Larger = more accurate but slower. Default 1800 works well for most slides; "
@@ -32,7 +34,8 @@ class SegmentationConfig(BaseModel):
     )
 
     min_area_px: int = Field(
-        default=3000, ge=100,
+        default=3000,
+        ge=100,
         description=(
             "Minimum tissue region area (pixels, at thumbnail scale). "
             "Regions smaller than this are discarded as artifacts. "
@@ -41,7 +44,9 @@ class SegmentationConfig(BaseModel):
     )
 
     struct_elem_px: int = Field(
-        default=4, ge=1, le=50,
+        default=4,
+        ge=1,
+        le=50,
         description=(
             "Radius (px) of the morphological structuring element used to smooth and close "
             "holes in the tissue mask. Increase for noisier slides."
@@ -67,17 +72,21 @@ class SegmentationConfig(BaseModel):
     )
 
     stain_min_saturation: float = Field(
-        default=0.08, ge=0.0, le=1.0,
+        default=0.08,
+        ge=0.0,
+        le=1.0,
         description="Minimum HSV saturation used by the fixed H&E stain gate.",
     )
 
     stain_min_od: float = Field(
-        default=0.35, ge=0.0,
+        default=0.35,
+        ge=0.0,
         description="Minimum summed optical density used by the optional H&E stain gate.",
     )
 
     stain_min_he_signal: float = Field(
-        default=0.0, ge=0.0,
+        default=0.0,
+        ge=0.0,
         description=(
             "Optional HED hematoxylin+eosin stain signal threshold that can rescue "
             "light but color-deconvolution-positive tissue."
@@ -85,7 +94,9 @@ class SegmentationConfig(BaseModel):
     )
 
     stain_od_bg_percentile: float = Field(
-        default=0.80, ge=0.50, le=0.99,
+        default=0.80,
+        ge=0.50,
+        le=0.99,
         description=(
             "Brightness percentile used to estimate background optical density "
             "for adaptive-od stain gating."
@@ -93,15 +104,18 @@ class SegmentationConfig(BaseModel):
     )
 
     stain_od_mad_multiplier: float = Field(
-        default=4.0, ge=0.0, le=20.0,
+        default=4.0,
+        ge=0.0,
+        le=20.0,
         description=(
-            "Robust MAD multiplier above background optical density for "
-            "adaptive-od stain gating."
+            "Robust MAD multiplier above background optical density for adaptive-od stain gating."
         ),
     )
 
     stain_pre_open_px: int = Field(
-        default=0, ge=0, le=20,
+        default=0,
+        ge=0,
+        le=20,
         description=(
             "Optional opening radius applied after stain gating and before closing. "
             "Use small values, such as 1, to break wispy pale bridges."
@@ -113,7 +127,9 @@ class SegmentationConfig(BaseModel):
     )
 
     r_split: int = Field(
-        default=3, ge=1, le=10,
+        default=3,
+        ge=1,
+        le=10,
         description=(
             "Radius (px, at thumbnail scale) used by watershed to split touching tissue sections. "
             "Increase if sections that should be separate are merged; "
@@ -122,7 +138,8 @@ class SegmentationConfig(BaseModel):
     )
 
     keep_top_k: int | None = Field(
-        default=None, ge=1,
+        default=None,
+        ge=1,
         description=(
             "Optional safety-net that keeps only the K largest tissue components "
             "after segmentation and splitting. Use only when the expected number "
@@ -169,16 +186,16 @@ class SegmentationConfig(BaseModel):
         description="Component QC rule profile.",
     )
 
-    diagnostics: bool = Field(
-        default=False, description="Enable detailed diagnostic output"
-    )
+    diagnostics: bool = Field(default=False, description="Enable detailed diagnostic output")
 
 
 class TileConfig(BaseModel):
     """Configuration for tile extraction."""
 
     chunk_size: int = Field(
-        default=512, ge=64, le=4096,
+        default=512,
+        ge=64,
+        le=4096,
         description=(
             "Tile chunk size (px) for OME-Zarr output. "
             "512 is optimal for most use cases; "
@@ -189,7 +206,8 @@ class TileConfig(BaseModel):
     pad_multiple: int = Field(default=512, ge=64, description="Padding multiple for tiles")
 
     extra_margin_px: int = Field(
-        default=0, ge=0,
+        default=0,
+        ge=0,
         description=(
             "Extra padding (px, at full resolution) added around each tissue bounding box "
             "before writing. Useful to avoid clipping edge tissue."
@@ -208,23 +226,20 @@ class OutputConfig(BaseModel):
         default="zstd", description="Compression algorithm (zstd, lz4, gzip, or None)"
     )
 
-    compression_level: int = Field(
-        default=5, ge=1, le=9, description="Compression level"
-    )
+    compression_level: int = Field(default=5, ge=1, le=9, description="Compression level")
 
-    convert_to_uint8: bool = Field(
-        default=True, description="Convert output to uint8"
-    )
+    convert_to_uint8: bool = Field(default=True, description="Convert output to uint8")
 
-    generate_qc: bool = Field(
-        default=True, description="Generate QC contact sheets"
-    )
+    generate_qc: bool = Field(default=True, description="Generate QC contact sheets")
 
 
 class MLflowConfig(BaseModel):
     """Configuration for MLflow experiment tracking."""
 
-    enabled: bool = Field(default=False, description="Enable MLflow tracking (requires: pip install wsi-tissue-pipeline[mlflow])")
+    enabled: bool = Field(
+        default=False,
+        description="Enable MLflow tracking (requires: pip install wsi-tissue-pipeline[mlflow])",
+    )
 
     tracking_uri: str = Field(
         default="sqlite:///mlflow.db", description="MLflow tracking server URI"
@@ -238,13 +253,9 @@ class MLflowConfig(BaseModel):
         default="{specimen}_{timestamp}", description="Template for run names"
     )
 
-    log_artifacts: bool = Field(
-        default=True, description="Log output artifacts to MLflow"
-    )
+    log_artifacts: bool = Field(default=True, description="Log output artifacts to MLflow")
 
-    log_qc_images: bool = Field(
-        default=True, description="Log QC images as artifacts"
-    )
+    log_qc_images: bool = Field(default=True, description="Log QC images as artifacts")
 
 
 class ColabConfig(BaseModel):
@@ -252,15 +263,11 @@ class ColabConfig(BaseModel):
 
     mount_drive: bool = Field(default=True, description="Mount Google Drive")
 
-    drive_mount_path: str = Field(
-        default="/content/drive", description="Google Drive mount path"
-    )
+    drive_mount_path: str = Field(default="/content/drive", description="Google Drive mount path")
 
     use_gpu: bool = Field(default=True, description="Use GPU if available")
 
-    install_dependencies: bool = Field(
-        default=True, description="Install missing dependencies"
-    )
+    install_dependencies: bool = Field(default=True, description="Install missing dependencies")
 
 
 class PipelineConfig(BaseModel):
@@ -292,9 +299,7 @@ class PipelineConfig(BaseModel):
 
     verbose: bool = Field(default=True, description="Enable verbose output")
 
-    random_seed: int | None = Field(
-        default=42, description="Random seed for reproducibility"
-    )
+    random_seed: int | None = Field(default=42, description="Random seed for reproducibility")
 
     @model_validator(mode="after")
     def validate_config(self) -> PipelineConfig:

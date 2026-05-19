@@ -81,14 +81,16 @@ def create_precomputed_cloudvolume(
     voxel_sizes_nm = _voxel_sizes_for_mips_xy(voxel_size_nm_int, num_mips)
 
     for lvl in range(int(num_mips)):
-        scales.append({
-            "chunk_sizes": [[chunk_xy, chunk_xy, 1]],
-            "encoding": encoding,
-            "key": str(lvl),
-            "resolution": voxel_sizes_nm[lvl],
-            "size": sizes_xyz[lvl],
-            "voxel_offset": [0, 0, 0]
-        })
+        scales.append(
+            {
+                "chunk_sizes": [[chunk_xy, chunk_xy, 1]],
+                "encoding": encoding,
+                "key": str(lvl),
+                "resolution": voxel_sizes_nm[lvl],
+                "size": sizes_xyz[lvl],
+                "voxel_offset": [0, 0, 0],
+            }
+        )
 
     # Create info structure
     info = CloudVolume.create_new_info(
@@ -99,7 +101,7 @@ def create_precomputed_cloudvolume(
         resolution=voxel_size_nm_int,
         voxel_offset=[0, 0, 0],
         chunk_size=[chunk_xy, chunk_xy, 1],
-        volume_size=[W, H, Z]
+        volume_size=[W, H, Z],
     )
 
     # Overwrite scales and commit
@@ -111,7 +113,7 @@ def create_precomputed_cloudvolume(
         cache=False,
         compress=False,
         parallel=parallel,
-        fill_missing=fill_missing
+        fill_missing=fill_missing,
     )
     vol.commit_info()
 
@@ -160,11 +162,11 @@ def write_slice_cloudvolume(
 
         # Add Z dimension: (X, Y, C) -> (X, Y, 1, C)
         img_xyzc = img_xyc[:, :, np.newaxis, :]
-        vol_i[:, :, z_index:z_index + 1, :] = img_xyzc
+        vol_i[:, :, z_index : z_index + 1, :] = img_xyzc
 
         # Force flush if available
-        if hasattr(vol_i, 'cache'):
-            if hasattr(vol_i.cache, 'flush'):
+        if hasattr(vol_i, "cache"):
+            if hasattr(vol_i.cache, "flush"):
                 vol_i.cache.flush()
-            elif hasattr(vol_i.cache, 'flush_cache'):
+            elif hasattr(vol_i.cache, "flush_cache"):
                 vol_i.cache.flush_cache()

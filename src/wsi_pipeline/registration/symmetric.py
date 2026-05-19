@@ -38,13 +38,16 @@ def _integrate_inverse_flow(xv, v, *, emlddmm_module, interp2d=None, grid_sample
     dt = 1.0 / v.shape[0]
     for t in range(v.shape[0]):
         Xs = mesh - v[t] * dt
-        phi = emlddmm_module.interp(
-            xv[:ndim],
-            phi - mesh,
-            Xs,
-            interp2d=interp2d,
-            **(grid_sample_kwargs or {}),
-        ) + Xs
+        phi = (
+            emlddmm_module.interp(
+                xv[:ndim],
+                phi - mesh,
+                Xs,
+                interp2d=interp2d,
+                **(grid_sample_kwargs or {}),
+            )
+            + Xs
+        )
         phis.append(phi)
     return torch.stack(phis)
 
@@ -203,9 +206,13 @@ def _extract_in_plane_velocity(output):
     last = output[-1] if isinstance(output, list) else output
     v3d = torch.as_tensor(last["v"])
     if v3d.ndim != 5 or v3d.shape[1] != 3:
-        raise ValueError(f"Expected backend velocity with shape (T, 3, Z, Y, X); got {tuple(v3d.shape)}")
+        raise ValueError(
+            f"Expected backend velocity with shape (T, 3, Z, Y, X); got {tuple(v3d.shape)}"
+        )
     v2d = v3d[:, 1:].mean(dim=2)
-    xv = tuple(torch.as_tensor(axis, device=v3d.device, dtype=v3d.dtype) for axis in last["xv"][-2:])
+    xv = tuple(
+        torch.as_tensor(axis, device=v3d.device, dtype=v3d.dtype) for axis in last["xv"][-2:]
+    )
     return last, v2d, xv
 
 
@@ -308,7 +315,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     if is_2d_pair:
         fwd_last, v_fwd, xv = _extract_in_plane_velocity(out_fwd)
     else:
-        fwd_last = out_fwd[-1] if isinstance(out_fwd, list) else out_fwd # last scale output
+        fwd_last = out_fwd[-1] if isinstance(out_fwd, list) else out_fwd  # last scale output
         v_fwd, xv = fwd_last["v"], [x.clone() for x in fwd_last["xv"]]
 
     # Now for the symmetric part: flip and negate the forward velocity to get a guess for the backward velocity
@@ -341,7 +348,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
             W0=W0_t,
             **back_cfg,
         )
-        back_last = out_back[-1] if isinstance(out_back, list) else out_back # last scale output
+        back_last = out_back[-1] if isinstance(out_back, list) else out_back  # last scale output
         v_back = torch.flip(-back_last["v"], [0])
 
     if combine_velocities == "average":
@@ -370,8 +377,8 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         interp2d=interp2d,
         grid_sample_kwargs=grid_sample_kwargs,
     )
-    xI_flow = xI_t[:phi_I_velocity.shape[1]]
-    xJ_flow = xJ_t[:phi_J_velocity.shape[1]]
+    xI_flow = xI_t[: phi_I_velocity.shape[1]]
+    xJ_flow = xJ_t[: phi_J_velocity.shape[1]]
     phi_I = _resample_transform_to_domain(
         xv,
         phi_I_velocity,

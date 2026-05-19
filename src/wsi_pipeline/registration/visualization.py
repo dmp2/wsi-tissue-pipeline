@@ -635,8 +635,7 @@ def open_registration_neuroglancer_view(
         import neuroglancer as ng
     except ImportError as exc:
         raise ImportError(
-            "Neuroglancer is not installed. Install with: "
-            'pip install -e ".[visualization]"'
+            'Neuroglancer is not installed. Install with: pip install -e ".[visualization]"'
         ) from exc
 
     if isinstance(bundle, RegistrationNeuroglancerBundle):
@@ -679,4 +678,3 @@ def open_registration_neuroglancer_view(
                     s.layers[name].visible = False
         s.layout = state.get("layout", "4panel")
     return viewer, httpd
-

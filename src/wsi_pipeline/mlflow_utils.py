@@ -32,9 +32,7 @@ logger = logging.getLogger(__name__)
 def check_mlflow_available():
     """Check if MLflow is available."""
     if not MLFLOW_AVAILABLE:
-        raise ImportError(
-            "MLflow is not installed. Install with: pip install mlflow"
-        )
+        raise ImportError("MLflow is not installed. Install with: pip install mlflow")
 
 
 def init_mlflow(
@@ -266,9 +264,7 @@ def log_processing_run(
         mlflow.log_param("input_dir", results["input_dir"])
 
     # Log results as JSON artifact
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(results, f, indent=2, default=str)
         f.flush()
         mlflow.log_artifact(f.name, "results")
@@ -315,6 +311,7 @@ def track_processing(
     ...     # Processing code
     ...     return {"n_tiles": 42, "output_paths": [...]}
     """
+
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -347,6 +344,7 @@ def track_processing(
                 return result
 
         return wrapper
+
     return decorator
 
 

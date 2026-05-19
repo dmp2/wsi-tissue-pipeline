@@ -146,9 +146,7 @@ def write_ngff_from_mips(
         if img.ndim != 3:
             raise ValueError(f"mips[{lvl}] must be (H,W,C), got shape {img.shape}")
         if img.shape[-1] != C:
-            raise ValueError(
-                f"mips[{lvl}] has {img.shape[-1]} channels, expected {C}."
-            )
+            raise ValueError(f"mips[{lvl}] has {img.shape[-1]} channels, expected {C}.")
 
         H, W, _ = img.shape
 
@@ -252,9 +250,7 @@ def write_ngff_from_mips_ngffzarr(
         if yxc.ndim != 3:
             raise ValueError(f"mips[{lvl}] must be (Y,X,C), got shape {yxc.shape}")
         if yxc.shape[-1] != channel_count:
-            raise ValueError(
-                f"mips[{lvl}] has {yxc.shape[-1]} channels, expected {channel_count}."
-            )
+            raise ValueError(f"mips[{lvl}] has {yxc.shape[-1]} channels, expected {channel_count}.")
         if hasattr(yxc, "chunks"):  # dask array
             arr_yxc = yxc
         else:  # numpy -> dask
@@ -266,13 +262,13 @@ def write_ngff_from_mips_ngffzarr(
     # Build NgffImage objects with correct dims/units and per-level scale
     images = []
     for lvl, cyx in enumerate(cyx_levels):
-        scale_map = {"y": py_um * (2 ** lvl), "x": px_um * (2 ** lvl)}
+        scale_map = {"y": py_um * (2**lvl), "x": px_um * (2**lvl)}
         img = to_ngff_image(
             data=cyx,
             dims=("c", "y", "x"),
             scale=scale_map,
             name=resolved_name,
-            axes_units={"y": "micrometer", "x": "micrometer"}
+            axes_units={"y": "micrometer", "x": "micrometer"},
         )
         images.append(img)
 
@@ -286,9 +282,7 @@ def write_ngff_from_mips_ngffzarr(
         datasets=[
             Dataset(
                 path=f"s{lvl}",
-                coordinateTransformations=[
-                    Scale(scale=[1.0, py_um * (2 ** lvl), px_um * (2 ** lvl)])
-                ],
+                coordinateTransformations=[Scale(scale=[1.0, py_um * (2**lvl), px_um * (2**lvl)])],
             )
             for lvl in range(len(images))
         ],
@@ -301,11 +295,7 @@ def write_ngff_from_mips_ngffzarr(
 
     # Write with TensorStore backend
     to_ngff_zarr(
-        store=str(out_dir),
-        multiscales=ms,
-        version=version,
-        overwrite=True,
-        use_tensorstore=True
+        store=str(out_dir), multiscales=ms, version=version, overwrite=True, use_tensorstore=True
     )
 
     root = zarr.open_group(str(out_dir), mode="r+")

@@ -41,7 +41,7 @@ def _get_multiscales_paths(root: zarr.Group) -> list[str]:
     return [d["path"] for d in ms["datasets"]]
 
 
-def _phys_xy_um(root: zarr.Group, L: int=0) -> tuple[float,float]:
+def _phys_xy_um(root: zarr.Group, L: int = 0) -> tuple[float, float]:
     """
     Read (phys_x_um, phys_y_um) from the child's NGFF multiscales at Lth resolution.
     L=0 is the highest resolution, used by default
@@ -51,7 +51,7 @@ def _phys_xy_um(root: zarr.Group, L: int=0) -> tuple[float,float]:
     scale = ms["datasets"][L]["coordinateTransformations"][0]["scale"]  # NGFF order: [c,y,x]
     phys_y = float(scale[1])
     phys_x = float(scale[2])
-    return phys_x, phys_y # (px_um, py_um)
+    return phys_x, phys_y  # (px_um, py_um)
 
 
 def _detect_source_ds_factor(root: zarr.Group) -> float:
@@ -59,19 +59,19 @@ def _detect_source_ds_factor(root: zarr.Group) -> float:
     Detect the source downsample schedule. Usually 2x or 4x.
     """
     ms = root.attrs["multiscales"][0]
-    s = [ds["coordinateTransformations"][0]["scale"] for ds in ms["datasets"]]  # [ [1, py, px], ... ]
+    s = [
+        ds["coordinateTransformations"][0]["scale"] for ds in ms["datasets"]
+    ]  # [ [1, py, px], ... ]
     ys = [float(si[1]) for si in s]  # use Y only (X should match)
-    ratios = [ys[i+1] / ys[i] for i in range(len(ys)-1)]
+    ratios = [ys[i + 1] / ys[i] for i in range(len(ys) - 1)]
 
     # Return the median rounded to 2 decimals (often ~2.0 or ~4.0)
     ratios.sort()
 
-    return round(ratios[len(ratios)//2], 2)
+    return round(ratios[len(ratios) // 2], 2)
 
 
-
-
-def _sizes_for_mips_xy(W: int, H: int, levels: int) -> list[tuple[int,int]]:
+def _sizes_for_mips_xy(W: int, H: int, levels: int) -> list[tuple[int, int]]:
     sizes = []
     w, h = W, H
     for _ in range(levels):
@@ -80,7 +80,10 @@ def _sizes_for_mips_xy(W: int, H: int, levels: int) -> list[tuple[int,int]]:
         h = max(1, h // 2)
     return sizes
 
-def _voxel_sizes_for_mips_xy(phys_xyz: int, levels: int, scale_factor: int = 2) -> list[tuple[int,int,int]]:
+
+def _voxel_sizes_for_mips_xy(
+    phys_xyz: int, levels: int, scale_factor: int = 2
+) -> list[tuple[int, int, int]]:
     """
     phys_xyz is (x_nm, y_nm, z_nm).
     Double XY per MIP; keep Z fixed.
@@ -226,7 +229,9 @@ def _dataset_paths(root_attrs: dict[str, Any]) -> list[str]:
     return [str(dataset.get("path", "")) for dataset in datasets]
 
 
-def _extract_phys_xy_from_root_attrs(root_attrs: dict[str, Any], level: int = 0) -> tuple[float, float] | None:
+def _extract_phys_xy_from_root_attrs(
+    root_attrs: dict[str, Any], level: int = 0
+) -> tuple[float, float] | None:
     """Read base physical spacing from root attrs when a scale transform exists."""
     try:
         dataset = root_attrs["multiscales"][0]["datasets"][level]
@@ -519,9 +524,7 @@ def _project_source_metadata_for_tile_writes(
             "warnings": compatibility_warnings,
         },
     }
-    payload["ngff"] = (
-        payload["ngff_latest"] if selected_schema == "latest" else payload["ngff_v04"]
-    )
+    payload["ngff"] = payload["ngff_latest"] if selected_schema == "latest" else payload["ngff_v04"]
     return payload
 
 

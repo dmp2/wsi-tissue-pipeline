@@ -65,4 +65,3 @@ def write_precomputed_raw_volume(
                 chunk_path = scale_dir / f"{x0}-{x1}_{y0}-{y1}_{z0}-{z1}"
                 chunk_path.write_bytes(np.asfortranarray(chunk_xyzc).tobytes(order="F"))
     return path
-

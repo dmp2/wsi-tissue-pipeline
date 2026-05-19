@@ -266,9 +266,7 @@ def _resolve_present_mask(J, W, mode, present_mask):
     if present_mask is not None:
         present_mask = np.asarray(present_mask)
         if present_mask.ndim != 1 or len(present_mask) != z_dim:
-            raise ValueError(
-                f"present_mask must have shape ({z_dim},); got {present_mask.shape}"
-            )
+            raise ValueError(f"present_mask must have shape ({z_dim},); got {present_mask.shape}")
         if present_mask.dtype.kind != "b":
             raise ValueError("present_mask must be a boolean array")
         return present_mask

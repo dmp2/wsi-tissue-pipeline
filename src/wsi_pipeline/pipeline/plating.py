@@ -41,12 +41,13 @@ def _is_big_tile(tile_da, bytes_per_px=1, min_side=8192, max_bytes=1_500_000_000
 def _safe_close_existing_client():
     # If a client already exists (e.g., from a previous run), close it to avoid port 8787 conflicts.
     from dask.distributed import get_client
+
     try:
         c = get_client()
         try:
             c.shutdown()  # politely stop scheduler + workers if we own them
         except Exception:
-            c.close()     # at least drop our client
+            c.close()  # at least drop our client
     except ValueError:
         pass  # no existing client
 
@@ -288,30 +289,30 @@ def _record_written_tissue(
 
 def process_slide_with_plating(
     zarr_root_path: os.PathLike,
-    out_ngff_dir: os.PathLike,                      # where to write tissue_region_*.zarr
+    out_ngff_dir: os.PathLike,  # where to write tissue_region_*.zarr
     *,
     # Coarse segmentation function preprocess() options
-    segment_fn=None,                                # callable(dask_arr)->(filled_mask_bool, _)
+    segment_fn=None,  # callable(dask_arr)->(filled_mask_bool, _)
     source_level: int | str = 0,
     segmentation_level: int | str | None = None,
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
-    struct_elem_px: int = 9,                         # structuring element radius in pixels
+    struct_elem_px: int = 9,  # structuring element radius in pixels
     min_size: int = 2000,
     # Plate options
-    precomputed_plate_path: str | None = None,   # "file:///.../plate_precomp"
-    plate_backend: str = "tensorstore",             # or "cloudvolume"
+    precomputed_plate_path: str | None = None,  # "file:///.../plate_precomp"
+    plate_backend: str = "tensorstore",  # or "cloudvolume"
     plate_chunk_xy: int = 512,
     parallel: bool = False,
     fill_missing: bool = False,
     # mips options
-    min_side_for_mips: int | None = None,        # default to chunk size in writers
-    downscale: int = 2,                             # default downsampling rate for mips (not used yet)
+    min_side_for_mips: int | None = None,  # default to chunk size in writers
+    downscale: int = 2,  # default downsampling rate for mips (not used yet)
     tile_extra_margin_px: int = 0,
     # dtype policy
-    dtype: np.dtype | None = "uint8",            # cast ROI to uint8 before mip (recommended for imagery)
+    dtype: np.dtype | None = "uint8",  # cast ROI to uint8 before mip (recommended for imagery)
     source_context: Mapping[str, Any] | None = None,
-    ) -> list[Path]:
+) -> list[Path]:
     """
     Pipeline for ONE slide root (OME-Zarr):
         1) Run segmentation on the selected pyramid level -> boolean mask with N labels after filling.
@@ -344,8 +345,8 @@ def process_slide_with_plating(
     # Step 1: Load the NGFF root, find image and metadata for the levels
     logger.info("Loading the NGFF root.")
 
-    root = zarr.open_group(str(zarr_root_path), mode = 'r')
-    ds_paths = _get_multiscales_paths(root)        # e.g. ["s0","s1","s2","s3"]
+    root = zarr.open_group(str(zarr_root_path), mode="r")
+    ds_paths = _get_multiscales_paths(root)  # e.g. ["s0","s1","s2","s3"]
     L_idx, L_path = _resolve_level_path(
         ds_paths,
         source_level,
@@ -370,8 +371,8 @@ def process_slide_with_plating(
     # Load arrays which are stored (C,Y,X) with parallelization; give unique and stable names to prevent collisions in the graph
     RUN_UID = f"{int(time.time())}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
     dataset_id = zarr_root_path.name.replace(".", "_")
-    base_name  = f"ngff-{dataset_id}-{L_path}-{RUN_UID}"
-    coarse_name= f"ngff-{dataset_id}-{sL_path}-{RUN_UID}"
+    base_name = f"ngff-{dataset_id}-{L_path}-{RUN_UID}"
+    coarse_name = f"ngff-{dataset_id}-{sL_path}-{RUN_UID}"
     base_cyx = da.from_zarr(str(zarr_root_path / L_path), name=base_name)  # (C, H, W)
     sL = da.from_zarr(str(zarr_root_path / sL_path), name=coarse_name)
     logger.info(
@@ -391,12 +392,12 @@ def process_slide_with_plating(
     # sL = sL.rechunk((3, plate_chunk_xy, plate_chunk_xy))
 
     # Double check high res image shape info; channel information is either grayscale or RGB
-    if base_cyx.ndim != 3 or base_cyx.shape[0] not in (1,3):
+    if base_cyx.ndim != 3 or base_cyx.shape[0] not in (1, 3):
         raise ValueError("Expected (C,Y,X) at base")
 
     # Precompute shapes and physical pixel sizes at the highest resolution
     C, H0, W0 = base_cyx.shape
-    px_um, py_um = _phys_xy_um(root, L_idx) # this is the base s0 scale now
+    px_um, py_um = _phys_xy_um(root, L_idx)  # this is the base s0 scale now
     source_ngff_metadata, source_metadata_schema = _resolve_source_ngff_metadata(source_context)
     if source_ngff_metadata is not None:
         logger.info(
@@ -408,8 +409,8 @@ def process_slide_with_plating(
     logger.info("Generating tissue masks at the coarsest resolution.")
 
     # Ensure channel-first for the grayscale() function within segment_fn
-    if sL.ndim == 3 and sL.shape[-1] in (1,3) and sL.shape[0] not in (1,3):
-        sL = da.moveaxis(sL, -1, 0) # (C, Y, X)
+    if sL.ndim == 3 and sL.shape[-1] in (1, 3) and sL.shape[0] not in (1, 3):
+        sL = da.moveaxis(sL, -1, 0)  # (C, Y, X)
 
     if segment_fn is None:
         segment_fn = make_lowres_mask
@@ -420,7 +421,6 @@ def process_slide_with_plating(
     )
     filled_lr, _ = segment_fn(sL, **seg_kwargs)
 
-
     # Step 2: upsample the low-resolution mask to the high-resolution image
     # Build LIST of HR tile records (Y,X,C), ordered left->right
     tile_records, tile_dim = generate_tissue_tile_records(
@@ -428,7 +428,7 @@ def process_slide_with_plating(
         low_res_filled=filled_lr.astype(bool),
         chunk=plate_chunk_xy,
         pad_multiple=tile_pad_multiple,
-        extra_margin_px=tile_extra_margin_px
+        extra_margin_px=tile_extra_margin_px,
     )
     # Break out early if there are no tissue sections
     if not tile_records:
@@ -450,13 +450,13 @@ def process_slide_with_plating(
             dtype=dtype if dtype else str(base_cyx.dtype),
             encoding="raw",
             parallel=parallel,
-            fill_missing=fill_missing
+            fill_missing=fill_missing,
         )
 
     # 3) iterate tiles
     out_paths: list[Path] = []
 
-    big_tile_threshold = 8192 # 2^13=8192; tune threshold
+    big_tile_threshold = 8192  # 2^13=8192; tune threshold
     item_size_threshold = 1_500_000_000
     bytes_per_px = np.dtype(dtype if dtype else np.uint8).itemsize
     # nbytes_est = np.prod(np.squeeze(tiles_yxc[0].shape)) * bytes_per_px
@@ -483,50 +483,60 @@ def process_slide_with_plating(
         # Upper Limit: Each image pyramid should be ~2.5GB so we should be good. Note that agregate_memory = n_workers * memory_limit (e.g. 10 workers, "8GB" -> 80GB)
         # Use context managers so we always shut down cleanly
         n_workers = min(10, os.cpu_count())
-        with LocalCluster(
-            n_workers=n_workers,
-            threads_per_worker=1,
-            # processes=False,        # False w/threads may stabilize WSL2 runs
-            processes=True,        # separate processes (nanny restarts workers)
-            memory_limit="auto",   # let Dask size to process, safer in WSL2
-            scheduler_port=0,      # random free port, avoids conflicts
-            dashboard_address=None # disable dashboard to avoid port issues
-        ) as cluster, Client(cluster, set_as_default=True) as client:
-
+        with (
+            LocalCluster(
+                n_workers=n_workers,
+                threads_per_worker=1,
+                # processes=False,        # False w/threads may stabilize WSL2 runs
+                processes=True,  # separate processes (nanny restarts workers)
+                memory_limit="auto",  # let Dask size to process, safer in WSL2
+                scheduler_port=0,  # random free port, avoids conflicts
+                dashboard_address=None,  # disable dashboard to avoid port issues
+            ) as cluster,
+            Client(cluster, set_as_default=True) as client,
+        ):
             # Set distributed configuration
-            dask.config.set({
-            "array.slicing.split_large_chunks": True, # useful when there are oversized chunks
-            "distributed.worker.memory.target": 0.6,
-            "distributed.worker.memory.spill": 0.7,
-            "distributed.worker.memory.pause": 0.85,     # helps prevent out of memory
-            "distributed.worker.memory.terminate": 0.95,
-            "distributed.comm.timeouts.connect": "20s",
-            "distributed.comm.timeouts.tcp": "120s"
-            })
+            dask.config.set(
+                {
+                    "array.slicing.split_large_chunks": True,  # useful when there are oversized chunks
+                    "distributed.worker.memory.target": 0.6,
+                    "distributed.worker.memory.spill": 0.7,
+                    "distributed.worker.memory.pause": 0.85,  # helps prevent out of memory
+                    "distributed.worker.memory.terminate": 0.95,
+                    "distributed.comm.timeouts.connect": "20s",
+                    "distributed.comm.timeouts.tcp": "120s",
+                }
+            )
 
-            client.wait_for_workers(1) # don't block waiting for all workers
+            client.wait_for_workers(1)  # don't block waiting for all workers
 
             # Submit in batches so we do not flood scheduler/RAM
             batch_size = 8
             for start in range(0, n_tiles, batch_size):
-                batch = tile_records[start:start+batch_size]
-                fmap = {client.compute(record.tile): (start+i) for i, record in enumerate(batch)}
+                batch = tile_records[start : start + batch_size]
+                fmap = {client.compute(record.tile): (start + i) for i, record in enumerate(batch)}
 
                 for fut in as_completed(fmap):
                     z_idx = fmap.pop(fut)
                     record = tile_records[z_idx]
-                    tile = fut.result()                     # stores (Y,X,C) numpy array as soon as one tile finishes
+                    tile = fut.result()  # stores (Y,X,C) numpy array as soon as one tile finishes
                     # dtype policy (optional)
                     if dtype and tile.dtype != np.uint8:
                         logger.debug("Enforcing dtype policy.")
                         if np.issubdtype(tile.dtype, np.integer):
                             maxv = np.iinfo(tile.dtype).max
-                            tile = (tile.astype(np.float32) / max(1, maxv) * 255.0).clip(0,255).astype(np.uint8)
+                            tile = (
+                                (tile.astype(np.float32) / max(1, maxv) * 255.0)
+                                .clip(0, 255)
+                                .astype(np.uint8)
+                            )
                         else:
-                            tile = (tile * 255.0).clip(0,255).astype(np.uint16)
+                            tile = (tile * 255.0).clip(0, 255).astype(np.uint16)
 
                     # Write per-tissue NGFF
-                    name = f"{_clean_ome_zarr_stem(zarr_root_path)}_tissue_{record.tissue_index:02d}"
+                    name = (
+                        f"{_clean_ome_zarr_stem(zarr_root_path)}_tissue_{record.tissue_index:02d}"
+                    )
                     ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
                     if any_big:
                         # STREAM the NGFF pyramid from base tile via TensorStore
@@ -546,7 +556,8 @@ def process_slide_with_plating(
                             (px_um, py_um),
                             chunks_xy=plate_chunk_xy,
                             num_mips=num_mips,
-                            name=name, version="0.4",
+                            name=name,
+                            version="0.4",
                             channel_labels=[f"ch{i}" for i in range(tile.shape[2])],
                             channel_colors=["FFFFFF"] * tile.shape[2],
                             ngff_metadata=tile_ngff_metadata,
@@ -567,8 +578,9 @@ def process_slide_with_plating(
                         )
                     else:
                         # Small/medium: keep your fast path (build mips once in RAM)
-                        ms = compute_num_mips_min_side(tile.shape[1], tile.shape[0],
-                                                    min_side_for_mips or plate_chunk_xy)
+                        ms = compute_num_mips_min_side(
+                            tile.shape[1], tile.shape[0], min_side_for_mips or plate_chunk_xy
+                        )
                         tile_ngff_metadata = _tile_ngff_metadata_or_none(
                             source_ngff_metadata,
                             dataset_count=ms,
@@ -581,7 +593,7 @@ def process_slide_with_plating(
                             phys_xy_um=(px_um, py_um),
                             name=name,
                             chunks_xy=plate_chunk_xy,
-                            version="0.4",          # keep 0.4 unless you want sharded v0.5
+                            version="0.4",  # keep 0.4 unless you want sharded v0.5
                             overwrite=True,
                             channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
                             channel_colors=["FFFFFF"] * mips[0].shape[2],
@@ -617,9 +629,11 @@ def process_slide_with_plating(
                 # client.run(gc.collect)
     else:
         # Set distributed configuration
-        dask.config.set({
-        "array.slicing.split_large_chunks": True # useful when there are oversized chunks
-        })
+        dask.config.set(
+            {
+                "array.slicing.split_large_chunks": True  # useful when there are oversized chunks
+            }
+        )
 
         # For small jobs, threads are faster and simpler (no scheduler ports, no heartbeats)
         _safe_close_existing_client()
@@ -630,7 +644,12 @@ def process_slide_with_plating(
                 # Write per-tissue NGFF
                 name = f"{_clean_ome_zarr_stem(zarr_root_path)}_tissue_{record.tissue_index:02d}"
                 ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
-                logger.debug("tile %d: %s, big=%s", z_idx, tuple(map(int, tile_dask.shape)), _is_big_tile(tile_dask, bytes_per_px))
+                logger.debug(
+                    "tile %d: %s, big=%s",
+                    z_idx,
+                    tuple(map(int, tile_dask.shape)),
+                    _is_big_tile(tile_dask, bytes_per_px),
+                )
                 tile = None
 
                 # For big tiles, don't build mips_yxc in memory. Instead, write directly from the base tile with the streaming writer
@@ -660,7 +679,9 @@ def process_slide_with_plating(
                     #     channel_colors=["FFFFFF"] * tlazy.shape[2],
                     # )
                     write_ngff_from_tile_streaming_ome(
-                        tile_yxc_da=tile_dask.astype(np.uint8) if tile_dask.dtype != np.uint8 else tile_dask,
+                        tile_yxc_da=tile_dask.astype(np.uint8)
+                        if tile_dask.dtype != np.uint8
+                        else tile_dask,
                         out_dir=ngff_dir,
                         phys_xy_um=(px_um, py_um),
                         block_xy=plate_chunk_xy,
@@ -676,7 +697,12 @@ def process_slide_with_plating(
                     # Append to precomputed plate (optional)
                     if plate is not None:
                         # plate.write_slice(z_idx, tlazy)   # accepts dask arrays, streams blocks
-                        plate.write_slice(z_idx, tile_dask.astype(np.uint8) if tile_dask.dtype != np.uint8 else tile_dask)   # accepts dask arrays, streams blocks
+                        plate.write_slice(
+                            z_idx,
+                            tile_dask.astype(np.uint8)
+                            if tile_dask.dtype != np.uint8
+                            else tile_dask,
+                        )  # accepts dask arrays, streams blocks
                     _record_written_tissue(
                         out_paths,
                         ngff_dir,
@@ -689,20 +715,24 @@ def process_slide_with_plating(
                     )
 
                 else:
-                    tile = tile_dask.compute()                  # numpy (Y,X,C); ok for small/medium arrays
+                    tile = tile_dask.compute()  # numpy (Y,X,C); ok for small/medium arrays
                     # dtype policy (optional)
                     if dtype and tile.dtype != np.uint8:
                         logger.debug("Enforcing dtype policy.")
                         if np.issubdtype(tile.dtype, np.integer):
                             maxv = np.iinfo(tile.dtype).max
-                            tile = (tile.astype(np.float32) / max(1, maxv) * 255.0).clip(0,255).astype(np.uint8)
+                            tile = (
+                                (tile.astype(np.float32) / max(1, maxv) * 255.0)
+                                .clip(0, 255)
+                                .astype(np.uint8)
+                            )
                         else:
-                            tile = (tile * 255.0).clip(0,255).astype(np.uint16)
+                            tile = (tile * 255.0).clip(0, 255).astype(np.uint16)
 
                     # Compute mips once
-                    ms = compute_num_mips_min_side(tile.shape[1],
-                                                tile.shape[0],
-                                                min_side_for_mips or plate_chunk_xy)
+                    ms = compute_num_mips_min_side(
+                        tile.shape[1], tile.shape[0], min_side_for_mips or plate_chunk_xy
+                    )
                     tile_ngff_metadata = _tile_ngff_metadata_or_none(
                         source_ngff_metadata,
                         dataset_count=ms,
@@ -717,7 +747,7 @@ def process_slide_with_plating(
                         phys_xy_um=(px_um, py_um),
                         name=name,
                         chunks_xy=plate_chunk_xy,
-                        version="0.4",          # keep 0.4 unless you want sharded v0.5
+                        version="0.4",  # keep 0.4 unless you want sharded v0.5
                         overwrite=True,
                         channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
                         channel_colors=["FFFFFF"] * mips[0].shape[2],

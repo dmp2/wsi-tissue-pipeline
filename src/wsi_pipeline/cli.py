@@ -24,7 +24,8 @@ console = Console()
 @click.group()
 @click.version_option(version=__version__, prog_name="wsi-pipeline")
 @click.option(
-    "--verbose", "-v",
+    "--verbose",
+    "-v",
     is_flag=True,
     default=False,
     help="Enable verbose (DEBUG) logging.",
@@ -47,21 +48,24 @@ def main(ctx: click.Context, verbose: bool):
 
 @main.command()
 @click.option(
-    "--input", "-i",
+    "--input",
+    "-i",
     "input_path",
     required=True,
     type=click.Path(exists=True, path_type=Path),
     help="Input WSI file path (.vsi, .ets, .jpg, .tiff, etc.)",
 )
 @click.option(
-    "--output", "-o",
+    "--output",
+    "-o",
     "output_dir",
     required=True,
     type=click.Path(path_type=Path),
     help="Output directory for tissue tiles",
 )
 @click.option(
-    "--config", "-c",
+    "--config",
+    "-c",
     "config_path",
     type=click.Path(exists=True, path_type=Path),
     help="Configuration file (YAML)",
@@ -107,6 +111,7 @@ def process(
     # Process with optional MLflow tracking
     if config.mlflow.enabled:
         from .mlflow_utils import MLflowContext, log_processing_run
+
         with MLflowContext(
             run_name=f"process_{input_path.stem}",
             config=config,
@@ -122,24 +127,28 @@ def process(
 
 @main.command()
 @click.option(
-    "--input-dir", "-i",
+    "--input-dir",
+    "-i",
     required=True,
     type=click.Path(exists=True, path_type=Path),
     help="Input directory containing WSI files",
 )
 @click.option(
-    "--output-dir", "-o",
+    "--output-dir",
+    "-o",
     required=True,
     type=click.Path(path_type=Path),
     help="Output directory for tissue tiles",
 )
 @click.option(
-    "--pattern", "-p",
+    "--pattern",
+    "-p",
     default="*.vsi",
     help="Glob pattern for input files (default: *.vsi)",
 )
 @click.option(
-    "--config", "-c",
+    "--config",
+    "-c",
     "config_path",
     type=click.Path(exists=True, path_type=Path),
     help="Configuration file (YAML)",
@@ -177,19 +186,22 @@ def batch(
     # Process with optional MLflow tracking
     if config.mlflow.enabled:
         from .mlflow_utils import MLflowContext, log_processing_run
+
         with MLflowContext(
             run_name=f"batch_{input_dir.name}",
             config=config,
         ):
             results = process_specimen(
-                input_dir, output_dir,
+                input_dir,
+                output_dir,
                 config=config,
                 pattern=pattern,
             )
             log_processing_run(results)
     else:
         results = process_specimen(
-            input_dir, output_dir,
+            input_dir,
+            output_dir,
             config=config,
             pattern=pattern,
         )
@@ -200,13 +212,15 @@ def batch(
 
 @main.command()
 @click.option(
-    "--input-dir", "-i",
+    "--input-dir",
+    "-i",
     required=True,
     type=click.Path(exists=True, path_type=Path),
     help="Input directory containing tissue images",
 )
 @click.option(
-    "--output-dir", "-o",
+    "--output-dir",
+    "-o",
     required=True,
     type=click.Path(path_type=Path),
     help="Output directory for QC grids",
@@ -263,7 +277,8 @@ def qc(
 
 @main.command()
 @click.option(
-    "--zarr-dir", "-z",
+    "--zarr-dir",
+    "-z",
     required=True,
     type=click.Path(exists=True, path_type=Path),
     help="Directory containing OME-Zarr files",
@@ -307,7 +322,8 @@ def visualize(
 
 @main.command()
 @click.option(
-    "--output", "-o",
+    "--output",
+    "-o",
     "output_path",
     type=click.Path(path_type=Path),
     help="Output path for config file",
@@ -335,6 +351,7 @@ def init_config(output_path: Path | None):
 def init_tracking(tracking_uri: str, experiment: str):
     """Initialize MLflow tracking."""
     from .mlflow_utils import init_mlflow
+
     success = init_mlflow(tracking_uri=tracking_uri, experiment_name=experiment)
 
     if success:
@@ -379,7 +396,9 @@ def doctor(strict: bool):
         if java_status.get("has_libjvm"):
             table.add_row("libjvm", "[green]OK", str(java_status["jvm_path"]))
         else:
-            table.add_row("libjvm", "[red]Missing", "Set JVM_PATH or install a full OpenJDK package.")
+            table.add_row(
+                "libjvm", "[red]Missing", "Set JVM_PATH or install a full OpenJDK package."
+            )
             failures.append("libjvm")
     else:
         java_detail = str(java_status["java"] or "not found")
@@ -428,8 +447,7 @@ def doctor(strict: bool):
 
     if strict and failures:
         console.print(
-            "[bold red]Doctor found missing prerequisites:[/] "
-            + ", ".join(sorted(set(failures)))
+            "[bold red]Doctor found missing prerequisites:[/] " + ", ".join(sorted(set(failures)))
         )
         sys.exit(1)
 
@@ -449,12 +467,14 @@ def info():
     # Check optional dependencies
     try:
         import torch
+
         table.add_row("PyTorch", torch.__version__)
     except ImportError:
         table.add_row("PyTorch", "[red]Not installed")
 
     try:
         import mlflow
+
         table.add_row("MLflow", mlflow.__version__)
     except ImportError:
         table.add_row("MLflow", "[red]Not installed")

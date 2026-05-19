@@ -22,6 +22,7 @@ import numpy as np
 
 class ETSFileError(Exception):
     """Exception raised for ETS file format errors."""
+
     pass
 
 
@@ -171,8 +172,7 @@ class ETSFile:
         tileidx_size = self._offset_endtiles - self._offset_tiles
         if tileidx_size != self.ntiles * 36:
             raise ETSFileError(
-                f"Tile count mismatch: ntiles={self.ntiles}, "
-                f"index size={tileidx_size / 36}"
+                f"Tile count mismatch: ntiles={self.ntiles}, index size={tileidx_size / 36}"
             )
 
         if self._offset_endtiles > self.fsize:
@@ -239,8 +239,7 @@ class ETSFile:
 
         # Build lookup dictionary
         self._tile_loc = {
-            (t.level, t.col, t.row): self.TileLoc(t.file_offset, t.nbytes)
-            for t in self._tiles
+            (t.level, t.col, t.row): self.TileLoc(t.file_offset, t.nbytes) for t in self._tiles
         }
 
         # Compute level info
@@ -270,7 +269,7 @@ class ETSFile:
         tuple
             (height, width) at the specified level.
         """
-        scale = 2 ** level
+        scale = 2**level
         return (
             (self.npix_y + scale - 1) // scale,
             (self.npix_x + scale - 1) // scale,
@@ -455,7 +454,7 @@ class ETSFile:
                 if tile_img is not None:
                     y0 = tile_row * ty
                     x0 = tile_col * tx
-                    img[y0:y0 + ty, x0:x0 + tx, :] = tile_img
+                    img[y0 : y0 + ty, x0 : x0 + tx, :] = tile_img
 
         # Crop to actual image size
         h, w = self.level_shape(level)

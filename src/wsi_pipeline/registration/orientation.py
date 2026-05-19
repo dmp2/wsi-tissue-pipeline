@@ -12,13 +12,7 @@ from .config import OrientationResolution
 _AXIS_GROUPS = (("R", "L"), ("A", "P"), ("S", "I"))
 _EXAMPLE_CODES = ("RAS", "LPI", "PIR", "RIP")
 _VALID_CODES = tuple(
-    sorted(
-        {
-            "".join(perm)
-            for choice in product(*_AXIS_GROUPS)
-            for perm in permutations(choice)
-        }
-    )
+    sorted({"".join(perm) for choice in product(*_AXIS_GROUPS) for perm in permutations(choice)})
 )
 
 

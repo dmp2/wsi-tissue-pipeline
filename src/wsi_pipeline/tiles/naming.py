@@ -35,10 +35,11 @@ def build_xy_regex_from_pattern(pattern: str) -> re.Pattern:
       - Use the static prefix before the first '*' as an anchor (may be empty).
       - Then look for '_<digits>_<digits>' anywhere after that prefix.
     """
-    basename = Path(pattern).name            # e.g., "E241_right_level_7_Image_*.jpg"
-    prefix = re.escape(basename.split('*')[0])  # static head before first '*'
+    basename = Path(pattern).name  # e.g., "E241_right_level_7_Image_*.jpg"
+    prefix = re.escape(basename.split("*")[0])  # static head before first '*'
     # Anchor: prefix, then anything, then "_<digits>_<digits>"
     return re.compile(rf"{prefix}.*?_([0-9]+)_([0-9]+)", re.IGNORECASE)
+
 
 def build_output_glob_from_pattern(pattern: str) -> str:
     """
@@ -47,10 +48,11 @@ def build_output_glob_from_pattern(pattern: str) -> str:
 
     We reuse the static prefix before the first '*' and then look for '*_*.*'.
     """
-    basename = Path(pattern).name            # e.g., "E241_right_level_7_Image_*.jpg"
-    prefix = basename.split('*')[0]          # e.g., "E241_right_level_7_Image_"
+    basename = Path(pattern).name  # e.g., "E241_right_level_7_Image_*.jpg"
+    prefix = basename.split("*")[0]  # e.g., "E241_right_level_7_Image_"
     # Outputs like: "<prefix>*_*.<any ext>"
     return f"{prefix}*_*.*"
+
 
 def parse_xx_yy_from_name(name: str, rx_xy: re.Pattern) -> tuple[int, int]:
     m = rx_xy.search(name)
@@ -58,12 +60,14 @@ def parse_xx_yy_from_name(name: str, rx_xy: re.Pattern) -> tuple[int, int]:
         return (10**9, 10**9)  # push non-matching names to the end deterministically
     return (int(m.group(1)), int(m.group(2)))
 
+
 def overall_label(rank_zero_based: int, *, spacing: int, pad: int, start: int) -> str:
     """Arithmetic progression per global file rank:
-       label(rank) = start + rank * (spacing + 1)"""
+    label(rank) = start + rank * (spacing + 1)"""
     step = spacing + 1
     n = start + rank_zero_based * step
     return f"{n:0{pad}d}"
+
 
 def add_overall_suffix(p: Path, label: str, pad: int) -> Path:
     # Idempotent: strip existing trailing _dddd (with width `pad`)
@@ -89,7 +93,9 @@ def _load_tile_metadata(output_dir: Path, pad: int) -> dict[str, dict[str, Any]]
     lookup: dict[str, dict[str, Any]] = {}
     for metadata_path in sorted(output_dir.glob("*_metadata.json")):
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
-        source_image = Path(payload.get("input_path", "")).name or metadata_path.name.replace("_metadata.json", "")
+        source_image = Path(payload.get("input_path", "")).name or metadata_path.name.replace(
+            "_metadata.json", ""
+        )
 
         tile_records = payload.get("tile_records") or []
         if tile_records:
@@ -172,14 +178,13 @@ def _write_tile_manifest(
     return manifest_path
 
 
-
 def rename_outputs_by_overall_index(
     output_dir: Path | str,
     *,
-    pattern: str,          # input pattern, used to derive both regex & output glob
-    spacing: int = 9,      # skip 9 -> step 10
+    pattern: str,  # input pattern, used to derive both regex & output glob
+    spacing: int = 9,  # skip 9 -> step 10
     pad: int = 4,
-    start: int = 1,        # 0001, 0011, 0021, ...
+    start: int = 1,  # 0001, 0011, 0021, ...
     dry_run: bool = False,
 ) -> list[tuple[Path, Path]]:
     """
@@ -196,9 +201,9 @@ def rename_outputs_by_overall_index(
 
     permissible_exts = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
     all_paths = output_dir.glob(output_glob)
-    files = sorted((
-        p for p in all_paths if p.suffix.lower() in permissible_exts),
-        key=lambda p: parse_xx_yy_from_name(p.name, rx_xy)
+    files = sorted(
+        (p for p in all_paths if p.suffix.lower() in permissible_exts),
+        key=lambda p: parse_xx_yy_from_name(p.name, rx_xy),
     )
     metadata_lookup = _load_tile_metadata(output_dir, pad)
     renames: list[tuple[Path, Path]] = []

@@ -140,7 +140,7 @@ class WSISegmenter:
             if not _HAS_TIA:
                 raise ImportError(
                     "TIAToolbox not found in this Python. "
-                    "Verify the interpreter: `python -c \"import sys; print(sys.executable)\"` "
+                    'Verify the interpreter: `python -c "import sys; print(sys.executable)"` '
                     "and install with `python -m pip install tiatoolbox`."
                 )
             # Try the specific module and surface the *real* error if it fails
@@ -195,11 +195,13 @@ class WSISegmenter:
         # 3) Compute mask on thumbnail by backend
         if self.backend == "tiatoolbox-otsu":
             from tiatoolbox.tools.tissuemask import OtsuTissueMasker
+
             masker = OtsuTissueMasker()
             mask_t = masker.fit_transform([thumb])[0].astype(bool)
 
         elif self.backend == "tiatoolbox-morph":
             from tiatoolbox.tools.tissuemask import MorphologicalMasker
+
             masker = MorphologicalMasker(
                 kernel_size=int(self.struct_elem_px),
                 min_region_size=int(self.min_area_px),
@@ -208,6 +210,7 @@ class WSISegmenter:
 
         elif self.backend == "pathml-he":
             from pathml.preprocessing import TissueDetectionHE
+
             td = TissueDetectionHE(min_region_size=min_area)
             g = to_gray(thumb)
             mask_t = td._apply(g)
@@ -254,7 +257,9 @@ class WSISegmenter:
                 mode=self.appendage_refinement_mode,
                 profile=self.appendage_refinement_profile,
                 min_area_px=min_area,
-                he_mask=stain_mask_t if self.stain_gate and self.stain_gate_mode == "adaptive-he" else None,
+                he_mask=stain_mask_t
+                if self.stain_gate and self.stain_gate_mode == "adaptive-he"
+                else None,
             )
         mask_t = keep_largest_components(mask_t, self.keep_top_k)
         lbl_a = measure.label(mask_t, connectivity=2).max()
@@ -263,8 +268,16 @@ class WSISegmenter:
             logger.debug(
                 "[segmenter] backend=%s size_t=%s struct_elem_px=%s min_area=%s "
                 "stain_gate=%s r_split=%s keep_top_k=%s appendage_trimmed_px=%s CCs: %s->%s",
-                self.backend, mask_t.shape, struct_r, min_area, self.stain_gate,
-                self.r_split, self.keep_top_k, appendage_info.get("trimmed_area_px", 0), lbl_b, lbl_a
+                self.backend,
+                mask_t.shape,
+                struct_r,
+                min_area,
+                self.stain_gate,
+                self.r_split,
+                self.keep_top_k,
+                appendage_info.get("trimmed_area_px", 0),
+                lbl_b,
+                lbl_a,
             )
 
         # 5) Upsample back to full resolution and return
@@ -613,9 +626,9 @@ def make_lowres_mask(
     if keep_top_k:
         keep = {
             p.label
-            for p in sorted(
-                measure.regionprops(lbl_after), key=lambda p: p.area, reverse=True
-            )[:keep_top_k]
+            for p in sorted(measure.regionprops(lbl_after), key=lambda p: p.area, reverse=True)[
+                :keep_top_k
+            ]
         }
         bw = np.isin(lbl_after, list(keep))
         n_kept = int(keep_top_k)
@@ -646,8 +659,14 @@ def make_lowres_mask(
         logger.debug(
             "[preprocess] size=(%dx%d) struct_elem_px=%s min_area=%s stain_gate=%s "
             "r_split=%s components: %s -> %s",
-            H, W, se_r, min_area, stain_gate, r_split, n_before, n_after
-            if not keep_top_k else f"{n_after} -> {n_kept}"
+            H,
+            W,
+            se_r,
+            min_area,
+            stain_gate,
+            r_split,
+            n_before,
+            n_after if not keep_top_k else f"{n_after} -> {n_kept}",
         )
 
     return (bw, diag if return_diag else None)

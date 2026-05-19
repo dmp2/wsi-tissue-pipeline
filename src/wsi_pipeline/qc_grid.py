@@ -560,7 +560,9 @@ def _record_from_derivative_manifest(
 ) -> QCRecord | None:
     tissue_dir = manifest_path.parent
     if not tissue_dir.exists():
-        logger.warning("Skipping derivative manifest with missing tissue directory: %s", manifest_path)
+        logger.warning(
+            "Skipping derivative manifest with missing tissue directory: %s", manifest_path
+        )
         return None
     try:
         relative_path = str(tissue_dir.relative_to(input_dir))
@@ -615,7 +617,9 @@ def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecor
         if record.path(input_dir).exists():
             records.append(record)
         else:
-            logger.warning("Skipping manifest record for missing QC image: %s", record.relative_path)
+            logger.warning(
+                "Skipping manifest record for missing QC image: %s", record.relative_path
+            )
     return records
 
 
@@ -689,7 +693,13 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
             path = Path(str(item.get("path", "")))
             if not path.is_absolute():
                 path = input_dir / path
-            if not path.exists() or path.suffix.lower() not in {".tif", ".tiff", ".png", ".jpg", ".jpeg"}:
+            if not path.exists() or path.suffix.lower() not in {
+                ".tif",
+                ".tiff",
+                ".png",
+                ".jpg",
+                ".jpeg",
+            }:
                 continue
 
             width = int(item.get("width", 0) or 0)
@@ -701,7 +711,9 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
                 _make_qc_record(
                     relative_path=str(path.relative_to(input_dir)),
                     filename=path.name,
-                    source_image=str(item.get("source_image") or payload.get("input_path") or metadata_path.stem),
+                    source_image=str(
+                        item.get("source_image") or payload.get("input_path") or metadata_path.stem
+                    ),
                     tile_index_on_source=int(item.get("tile_index_on_source", 0)),
                     overall_index=0,
                     overall_label="",
@@ -888,7 +900,9 @@ def _build_label(
         return f"{label}|ART?" if _record_artifact_likely(record) else label
     if label_mode == "both":
         if master:
-            label = f"s{group_ordinal:02d}:t{record.tile_index_on_source:02d}|g{record.overall_label}"
+            label = (
+                f"s{group_ordinal:02d}:t{record.tile_index_on_source:02d}|g{record.overall_label}"
+            )
         else:
             label = f"t{record.tile_index_on_source:02d}|g{record.overall_label}"
         return f"{label}|ART?" if _record_artifact_likely(record) else label
@@ -1037,7 +1051,9 @@ def run_qc_workflow(
         stats_csv=stats_csv,
         records_manifest=records_manifest,
     )
-    logger.info("Created %d QC records and %d per-slide grids", len(records), len(artifacts.per_slide_grids))
+    logger.info(
+        "Created %d QC records and %d per-slide grids", len(records), len(artifacts.per_slide_grids)
+    )
     return QCWorkflowResult(records=records, artifacts=artifacts)
 
 

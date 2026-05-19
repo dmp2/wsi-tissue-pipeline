@@ -78,7 +78,7 @@ def _generate_synthetic_wsi_array(
                 sy = int(spot_coords[0][idx])
                 sx = int(spot_coords[1][idx])
                 spot_radius = int(rng.integers(2, 8))
-                spot_mask = (x_coords - sx) ** 2 + (y_coords - sy) ** 2 <= spot_radius ** 2
+                spot_mask = (x_coords - sx) ** 2 + (y_coords - sy) ** 2 <= spot_radius**2
                 img[spot_mask] = [
                     int(rng.integers(80, 120)),
                     int(rng.integers(60, 100)),

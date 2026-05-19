@@ -89,9 +89,7 @@ def _source_ome_zarr_shape_errors(
             expected_shape = [channel_count, int(height), int(width)]
             actual_shape = zarray.get("shape")
             if list(actual_shape) != expected_shape:
-                errors.append(
-                    f"{dataset_path} shape={actual_shape!r}, expected={expected_shape!r}"
-                )
+                errors.append(f"{dataset_path} shape={actual_shape!r}, expected={expected_shape!r}")
     return errors
 
 
@@ -260,7 +258,9 @@ def process_vsi_directory_with_plating(
     """
     input_dir = Path(input_dir)
     output_dir = Path(output_dir)
-    source_ome_zarr_dir = Path(source_ome_zarr_dir) if source_ome_zarr_dir else output_dir / "source_ome_zarr"
+    source_ome_zarr_dir = (
+        Path(source_ome_zarr_dir) if source_ome_zarr_dir else output_dir / "source_ome_zarr"
+    )
     per_tissue_dir = Path(per_tissue_dir) if per_tissue_dir else output_dir / "per_tissue_ngff"
     source_ome_zarr_dir.mkdir(parents=True, exist_ok=True)
     per_tissue_dir.mkdir(parents=True, exist_ok=True)

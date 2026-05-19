@@ -41,6 +41,7 @@ def is_sciserver_environment() -> bool:
     """Check if running in SciServer Compute environment."""
     try:
         from SciServer import Config
+
         return Config.isSciServerComputeEnvironment()
     except ImportError:
         return False
@@ -52,6 +53,7 @@ def get_sciserver_user() -> str | None:
         return None
     try:
         from SciServer import Authentication
+
         user = Authentication.getKeystoneUserWithToken()
         return user.userName if user else None
     except Exception:
@@ -61,6 +63,7 @@ def get_sciserver_user() -> str | None:
 @dataclass
 class StorageConfig:
     """SciServer storage configuration."""
+
     persistent_base: Path
     temporary_base: Path
     scratch_base: Path
@@ -193,16 +196,19 @@ class SciServerPipeline:
         """Configure MLFlow for the environment."""
         try:
             from sciserver_mlflow import SciServerMLFlowConfig
+
             self._mlflow_config = SciServerMLFlowConfig(
                 experiment_name=self.experiment_name,
                 mlflow_subdir=str(self.storage.mlflow_dir.relative_to(self.storage.user_volume))
-                if self.is_sciserver else "mlflow"
+                if self.is_sciserver
+                else "mlflow",
             )
             self._mlflow_config.setup()
         except ImportError:
             # Fall back to direct MLFlow setup
             try:
                 import mlflow
+
                 tracking_uri = f"sqlite:///{self.storage.mlflow_dir}/mlflow.db"
                 mlflow.set_tracking_uri(tracking_uri)
 
@@ -210,13 +216,13 @@ class SciServerPipeline:
                 if experiment is None:
                     mlflow.create_experiment(
                         self.experiment_name,
-                        artifact_location=str(self.storage.mlflow_dir / "artifacts")
+                        artifact_location=str(self.storage.mlflow_dir / "artifacts"),
                     )
                 mlflow.set_experiment(self.experiment_name)
 
                 self._mlflow_config = {
                     "tracking_uri": tracking_uri,
-                    "artifact_location": str(self.storage.mlflow_dir / "artifacts")
+                    "artifact_location": str(self.storage.mlflow_dir / "artifacts"),
                 }
             except ImportError:
                 self._mlflow_config = None
@@ -225,10 +231,11 @@ class SciServerPipeline:
         """Configure lineage tracker."""
         try:
             from sciserver_lineage import LineageTracker
+
             self._lineage_tracker = LineageTracker(
                 storage_path=str(self.storage.lineage_dir),
                 job_namespace=f"sciserver://{self.project_name}",
-                dataset_namespace=f"sciserver://storage/{self.username or 'local'}"
+                dataset_namespace=f"sciserver://storage/{self.username or 'local'}",
             )
         except ImportError:
             self._lineage_tracker = None
@@ -286,23 +293,27 @@ class SciServerPipeline:
             def log_param(ctx, key: str, value: Any):
                 if ctx.mlflow_run:
                     import mlflow
+
                     mlflow.log_param(key, value)
 
             def log_params(ctx, params: dict[str, Any]):
                 if ctx.mlflow_run:
                     import mlflow
+
                     mlflow.log_params(params)
 
             def log_metric(ctx, key: str, value: float, step: int = None):
                 ctx._metrics[key] = value
                 if ctx.mlflow_run:
                     import mlflow
+
                     mlflow.log_metric(key, value, step=step)
 
             def log_metrics(ctx, metrics: dict[str, float], step: int = None):
                 ctx._metrics.update(metrics)
                 if ctx.mlflow_run:
                     import mlflow
+
                     mlflow.log_metrics(metrics, step=step)
 
             def log_input(ctx, input_name: str):
@@ -314,11 +325,13 @@ class SciServerPipeline:
             def log_artifact(ctx, path: str, artifact_path: str = None):
                 if ctx.mlflow_run:
                     import mlflow
+
                     mlflow.log_artifact(path, artifact_path)
 
             def set_tag(ctx, key: str, value: str):
                 if ctx.mlflow_run:
                     import mlflow
+
                     mlflow.set_tag(key, value)
 
         mlflow_run = None
@@ -327,10 +340,11 @@ class SciServerPipeline:
         # Start MLFlow run
         try:
             import mlflow
+
             all_tags = {
                 "environment": "sciserver" if self.is_sciserver else "local",
                 "username": self.username or "local",
-                **(tags or {})
+                **(tags or {}),
             }
             mlflow_run = mlflow.start_run(run_name=run_name, tags=all_tags)
         except Exception:
@@ -340,8 +354,10 @@ class SciServerPipeline:
         if self._lineage_tracker:
             lineage_run_id = self._lineage_tracker.start_run(
                 job_name=run_name,
-                inputs=[{"name": i, "namespace": f"sciserver://storage/{self.username or 'local'}"}
-                       for i in (inputs or [])]
+                inputs=[
+                    {"name": i, "namespace": f"sciserver://storage/{self.username or 'local'}"}
+                    for i in (inputs or [])
+                ],
             )
 
         ctx = ExperimentContext(self, mlflow_run, lineage_run_id)
@@ -354,27 +370,29 @@ class SciServerPipeline:
                 self._lineage_tracker.complete_run(
                     run_id=lineage_run_id,
                     job_name=run_name,
-                    outputs=[{"name": o, "namespace": f"sciserver://storage/{self.username or 'local'}"}
-                            for o in ctx._outputs],
-                    metrics=ctx._metrics
+                    outputs=[
+                        {"name": o, "namespace": f"sciserver://storage/{self.username or 'local'}"}
+                        for o in ctx._outputs
+                    ],
+                    metrics=ctx._metrics,
                 )
 
             # End MLFlow run
             if mlflow_run:
                 import mlflow
+
                 mlflow.end_run()
 
         except Exception as e:
             # Record failure
             if self._lineage_tracker and lineage_run_id:
                 self._lineage_tracker.fail_run(
-                    run_id=lineage_run_id,
-                    job_name=run_name,
-                    error_message=str(e)
+                    run_id=lineage_run_id, job_name=run_name, error_message=str(e)
                 )
 
             if mlflow_run:
                 import mlflow
+
                 mlflow.end_run(status="FAILED")
 
             raise
@@ -407,22 +425,23 @@ class SciServerPipeline:
             import mlflow
 
             # Convert to dict if possible
-            if hasattr(config, 'to_dict'):
+            if hasattr(config, "to_dict"):
                 config_dict = config.to_dict()
-            elif hasattr(config, '__dict__'):
+            elif hasattr(config, "__dict__"):
                 config_dict = vars(config)
             else:
                 config_dict = {"value": str(config)}
 
             # Log as artifact
             import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
                 json.dump(config_dict, f, indent=2, default=str)
                 f.flush()
                 mlflow.log_artifact(f.name, "config")
 
             # Also log key params
-            def flatten(d, parent_key=''):
+            def flatten(d, parent_key=""):
                 items = []
                 for k, v in d.items():
                     new_key = f"{parent_key}.{k}" if parent_key else k
@@ -480,7 +499,7 @@ class SciServerPipeline:
                 dockerComputeDomain="Science Pipelines",
                 dockerImageName=docker_image or "sciserver/jupyter:latest",
                 userVolumes=volumes,
-                jobAlias=job_name or f"wsi-pipeline-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+                jobAlias=job_name or f"wsi-pipeline-{datetime.now().strftime('%Y%m%d%H%M%S')}",
             )
 
             return str(job_id)
@@ -496,6 +515,7 @@ class SciServerPipeline:
 
         try:
             from SciServer import Jobs
+
             return Jobs.getJobStatus(int(job_id))
         except Exception:
             return None
