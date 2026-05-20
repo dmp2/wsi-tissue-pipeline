@@ -452,6 +452,77 @@ def doctor(strict: bool):
         sys.exit(1)
 
 
+@main.command("diagnose-vsi-replating")
+@click.option(
+    "--vsi",
+    "vsi_path",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="Input VSI path to diagnose.",
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Directory for diagnostics.json and overlay PNGs.",
+)
+@click.option(
+    "--flat-image",
+    type=click.Path(exists=True, path_type=Path),
+    help="Optional flat level image to compare against the ETS path.",
+)
+@click.option(
+    "--source-level",
+    default="7",
+    show_default=True,
+    help="ETS source level used for crop bounds.",
+)
+@click.option(
+    "--segmentation-level",
+    default="7",
+    show_default=True,
+    help="ETS level used for segmentation.",
+)
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Pipeline YAML config whose segmentation/tile settings should be used.",
+)
+def diagnose_vsi_replating_cmd(
+    vsi_path: Path,
+    output_dir: Path,
+    flat_image: Path | None,
+    source_level: str,
+    segmentation_level: str,
+    config_path: Path | None,
+):
+    """Run a no-full-rerun VSI/ETS segmentation and crop diagnostic."""
+    from .pipeline import diagnose_vsi_replating
+
+    config = load_config(config_path) if config_path else PipelineConfig()
+    result = diagnose_vsi_replating(
+        vsi_path,
+        output_dir,
+        flat_image_path=flat_image,
+        source_level=source_level,
+        segmentation_level=segmentation_level,
+        segmentation_config=config.segmentation,
+        tile_config=config.tiles,
+    )
+    ets_summary = result["ets_segmentation_input"]
+    console.print(f"[bold green]Wrote diagnostics:[/] {output_dir / 'diagnostics.json'}")
+    console.print(
+        "[bold blue]ETS components:[/] "
+        f"{ets_summary['component_count']} at level {result['segmentation_level']}"
+    )
+    if result.get("comparison"):
+        iou = result["comparison"]["flat_vs_ets_mask"]["iou"]
+        console.print(f"[bold blue]Flat/ETS mask IoU:[/] {iou:.4f}")
+
+
 @main.command()
 def info():
     """Display pipeline information and configuration."""

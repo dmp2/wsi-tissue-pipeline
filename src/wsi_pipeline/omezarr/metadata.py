@@ -14,6 +14,24 @@ from typing import Any
 import zarr
 
 
+RGB_CHANNEL_LABELS = ["red", "green", "blue"]
+RGB_CHANNEL_COLORS = ["FF0000", "00FF00", "0000FF"]
+
+
+def default_channel_labels(channel_count: int) -> list[str]:
+    """Return display labels for a brightfield channel count."""
+    if int(channel_count) == 3:
+        return list(RGB_CHANNEL_LABELS)
+    return [f"ch{idx}" for idx in range(int(channel_count))]
+
+
+def default_channel_colors(channel_count: int) -> list[str]:
+    """Return OMERO display colors for a brightfield channel count."""
+    if int(channel_count) == 3:
+        return list(RGB_CHANNEL_COLORS)
+    return ["FFFFFF"] * int(channel_count)
+
+
 def _is_ngff_image_group(path: Path) -> bool:
     """Basic NGFF image check based on readable root attrs."""
     try:
@@ -470,6 +488,7 @@ def _project_source_metadata_for_tile_writes(
     *,
     dataset_count: int,
     name: str,
+    phys_xy_um: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """
     Re-project source metadata into tile-compatible dual NGFF payloads.
@@ -482,22 +501,31 @@ def _project_source_metadata_for_tile_writes(
 
     channel_count = _metadata_channel_count(source_metadata) or 3
     metadata_labels = _metadata_channel_labels(source_metadata) or []
-    channel_labels = [str(label) for label in metadata_labels[:channel_count]]
-    if len(channel_labels) < channel_count:
-        channel_labels.extend(f"ch{idx}" for idx in range(len(channel_labels), channel_count))
+    if metadata_labels:
+        channel_labels = [str(label) for label in metadata_labels[:channel_count]]
+        if len(channel_labels) < channel_count:
+            channel_labels.extend(
+                default_channel_labels(channel_count)[len(channel_labels) : channel_count]
+            )
+    else:
+        channel_labels = default_channel_labels(channel_count)
 
-    phys_xy_um = _extract_phys_xy_from_metadata_payload(source_metadata)
+    resolved_phys_xy_um = (
+        tuple(map(float, phys_xy_um))
+        if phys_xy_um is not None
+        else _extract_phys_xy_from_metadata_payload(source_metadata)
+    )
     latest_root = _build_default_ngff_root_attrs(
         name=name,
         dataset_count=dataset_count,
-        phys_xy_um=phys_xy_um,
+        phys_xy_um=resolved_phys_xy_um,
         schema="latest",
         channel_axis_name="c",
     )
     v04_root = _build_default_ngff_root_attrs(
         name=name,
         dataset_count=dataset_count,
-        phys_xy_um=phys_xy_um,
+        phys_xy_um=resolved_phys_xy_um,
         schema="v0.4",
         channel_axis_name="c",
     )
@@ -606,7 +634,7 @@ def _prepare_ngff_writer_metadata(
         else _metadata_channel_labels(ngff_metadata)
     )
     if resolved_channel_labels is None:
-        resolved_channel_labels = [f"ch{idx}" for idx in range(channel_count)]
+        resolved_channel_labels = default_channel_labels(channel_count)
     if len(resolved_channel_labels) != channel_count:
         raise ValueError(
             f"Writer received {len(resolved_channel_labels)} channel labels for {channel_count} channels."

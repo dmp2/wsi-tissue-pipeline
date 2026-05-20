@@ -19,7 +19,7 @@ from ngff_zarr.v04.zarr_metadata import Axis, Dataset, Scale
 from ngff_zarr.v04.zarr_metadata import Metadata as V04Metadata
 from numcodecs import Blosc
 
-from .metadata import _prepare_ngff_writer_metadata
+from .metadata import _prepare_ngff_writer_metadata, default_channel_colors
 from .zarr_compat import create_group_array, open_group_v2
 
 
@@ -42,7 +42,7 @@ def _build_omero_block(
     channel_colors: list[str] | None,
 ) -> dict[str, Any]:
     """Build the standard OMERO display block used by the writers."""
-    colors = channel_colors or ["FFFFFF"] * len(channel_labels)
+    colors = channel_colors or default_channel_colors(len(channel_labels))
     if len(colors) != len(channel_labels):
         raise ValueError(
             f"Writer received {len(colors)} channel colors for {len(channel_labels)} channels."

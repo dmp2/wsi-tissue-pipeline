@@ -11,24 +11,24 @@ from typing import Any
 import dask.array as da
 import dask.config
 import numpy as np
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import affine_transform, binary_fill_holes
 from skimage import measure
 
 from ..config import SegmentationConfig, TileConfig
 from ..etsfile import ETSFile
 from ..omezarr.ets_writer import write_ets_pyramid_to_ngff_zarr
+from ..omezarr.metadata import default_channel_colors, default_channel_labels
 from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
 from ..omezarr.streaming import write_ngff_from_tile_streaming_ome
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
 from ..precomputed.plate_writer import PlatePrecomputedWriter
-from ..segmentation.segmenter import make_lowres_mask
 from ..tiles.generator import TissueTileRecord, sort_labels_left_to_right
 from ..vsi_converter import find_ets_file, get_vsi_metadata
 from .plating import (
     _is_big_tile,
     _record_written_tissue,
     _safe_close_existing_client,
-    _segmentation_kwargs,
+    _segment_for_plating,
     _tile_ngff_metadata_or_none,
     process_slide_with_plating,
 )
@@ -233,6 +233,7 @@ def _read_masked_ets_block(
     source_level: int,
     source_shape_yx: tuple[int, int],
     tile_origin_yx: tuple[int, int],
+    source_crop_bounds_yx: tuple[int, int, int, int],
     lr_labels: np.ndarray,
     label_id: int,
     block_info: dict | None = None,
@@ -273,11 +274,27 @@ def _read_masked_ets_block(
 
     yr = source_h / lr_labels.shape[0]
     xr = source_w / lr_labels.shape[1]
-    lr_y = np.floor(np.arange(valid_y0, valid_y1) / yr).astype(np.int64)
-    lr_x = np.floor(np.arange(valid_x0, valid_x1) / xr).astype(np.int64)
-    lr_y = np.clip(lr_y, 0, lr_labels.shape[0] - 1)
-    lr_x = np.clip(lr_x, 0, lr_labels.shape[1] - 1)
-    mask = lr_labels[np.ix_(lr_y, lr_x)] == int(label_id)
+    crop_y0, crop_x0, crop_y1, crop_x1 = map(int, source_crop_bounds_yx)
+    lr_crop_y0 = max(0, int(np.floor(crop_y0 / yr)))
+    lr_crop_x0 = max(0, int(np.floor(crop_x0 / xr)))
+    lr_crop_y1 = min(lr_labels.shape[0], int(np.ceil(crop_y1 / yr)))
+    lr_crop_x1 = min(lr_labels.shape[1], int(np.ceil(crop_x1 / xr)))
+    lr_crop = lr_labels[lr_crop_y0:lr_crop_y1, lr_crop_x0:lr_crop_x1].astype(np.int32)
+    matrix = np.array([[1.0 / yr, 0.0], [0.0, 1.0 / xr]], dtype=float)
+    offset = np.array(
+        [(valid_y0 / yr) - lr_crop_y0, (valid_x0 / xr) - lr_crop_x0],
+        dtype=float,
+    )
+    mask = (
+        affine_transform(
+            lr_crop,
+            matrix=matrix,
+            offset=offset,
+            output_shape=(valid_y1 - valid_y0, valid_x1 - valid_x0),
+            order=0,
+        )
+        == int(label_id)
+    )
     region = np.where(mask[..., None], region, 0)
 
     dst_y0 = valid_y0 - source_y0
@@ -364,6 +381,7 @@ def _direct_ets_tissue_tile_records(
             source_level=int(source_level),
             source_shape_yx=(source_h, source_w),
             tile_origin_yx=(tile_y0, tile_x0),
+            source_crop_bounds_yx=(src_y0, src_x0, src_y1, src_x1),
             lr_labels=lr_labels,
             label_id=int(lid),
         )
@@ -383,6 +401,223 @@ def _direct_ets_tissue_tile_records(
             )
         )
     return records, int(tile_dim)
+
+
+def _mask_component_boxes(mask: np.ndarray) -> list[dict[str, int]]:
+    """Return left-to-right component boxes for a boolean mask."""
+    lbl = measure.label(np.asarray(mask, dtype=bool), connectivity=2)
+    records: list[dict[str, int]] = []
+    for prop in sorted(measure.regionprops(lbl), key=lambda item: item.bbox[1]):
+        y0, x0, y1, x1 = map(int, prop.bbox)
+        records.append(
+            {
+                "x0": x0,
+                "y0": y0,
+                "x1": x1,
+                "y1": y1,
+                "area_px": int(prop.area),
+            }
+        )
+    return records
+
+
+def _mask_iou(a: np.ndarray, b: np.ndarray) -> dict[str, Any]:
+    """Return IoU over the common crop of two masks."""
+    h = min(int(a.shape[0]), int(b.shape[0]))
+    w = min(int(a.shape[1]), int(b.shape[1]))
+    aa = np.asarray(a[:h, :w], dtype=bool)
+    bb = np.asarray(b[:h, :w], dtype=bool)
+    union = int(np.logical_or(aa, bb).sum())
+    intersection = int(np.logical_and(aa, bb).sum())
+    return {
+        "shape": [h, w],
+        "intersection_px": intersection,
+        "union_px": union,
+        "iou": float(intersection / union) if union else 1.0,
+    }
+
+
+def _to_overlay_rgb(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Return an RGB image with component boundaries overlaid in red."""
+    from skimage.segmentation import find_boundaries
+
+    arr = np.asarray(image)
+    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
+        arr = np.moveaxis(arr, 0, -1)
+    if arr.ndim == 2:
+        arr = np.repeat(arr[..., None], 3, axis=2)
+    if arr.shape[-1] == 1:
+        arr = np.repeat(arr, 3, axis=2)
+    arr = arr[..., :3]
+    if arr.dtype != np.uint8:
+        if np.issubdtype(arr.dtype, np.integer):
+            info = np.iinfo(arr.dtype)
+            arr = (arr.astype(np.float32) / max(1, info.max) * 255.0).clip(0, 255)
+        else:
+            arr = arr.astype(np.float32)
+            if np.nanmax(arr) <= 1.0:
+                arr = arr * 255.0
+            arr = np.nan_to_num(arr, nan=0.0).clip(0, 255)
+        arr = arr.astype(np.uint8)
+    else:
+        arr = arr.copy()
+
+    boundary = find_boundaries(np.asarray(mask, dtype=bool), mode="outer")
+    h = min(boundary.shape[0], arr.shape[0])
+    w = min(boundary.shape[1], arr.shape[1])
+    out = arr[:h, :w, :].copy()
+    out[boundary[:h, :w]] = np.array([255, 0, 0], dtype=np.uint8)
+    return out
+
+
+def _json_ready(value: Any) -> Any:
+    """Convert common NumPy/Python containers to JSON-serializable values."""
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        return float(value)
+    if isinstance(value, Path):
+        return str(value)
+    return value
+
+
+def diagnose_vsi_replating(
+    vsi_path: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    flat_image_path: str | Path | None = None,
+    source_level: int | str = 7,
+    segmentation_level: int | str | None = 7,
+    segmentation_config: SegmentationConfig | None = None,
+    tile_config: TileConfig | None = None,
+) -> dict[str, Any]:
+    """
+    Read only the requested ETS levels and report segmentation/crop diagnostics.
+
+    This is a no-full-rerun smoke helper for comparing the notebook flat-image
+    route with the VSI/ETS replating route. When ``output_dir`` is supplied, it
+    writes ``diagnostics.json`` plus mask-boundary overlay PNGs.
+    """
+    vsi_path = Path(vsi_path)
+    output_path = Path(output_dir) if output_dir is not None else None
+    if output_path is not None:
+        output_path.mkdir(parents=True, exist_ok=True)
+
+    config = segmentation_config or SegmentationConfig()
+    tile_cfg = tile_config or TileConfig()
+
+    ets_path = find_ets_file(vsi_path)
+    if ets_path is None:
+        raise FileNotFoundError(f"No ETS file found for VSI {vsi_path}")
+    ets_path = Path(ets_path)
+
+    with ETSFile(ets_path) as ets:
+        source_idx = _resolve_ets_level(
+            source_level,
+            default_index=0,
+            nlevels=ets.nlevels,
+            label="source",
+        )
+        segmentation_idx = _resolve_ets_level(
+            segmentation_level,
+            default_index=ets.nlevels - 1,
+            nlevels=ets.nlevels,
+            label="segmentation",
+        )
+        source_shape_yx = tuple(map(int, ets.level_shape(source_idx)))
+        segmentation_yxc = ets.read_level(segmentation_idx)
+
+    ets_mask, ets_info = _segment_for_plating(
+        segmentation_yxc,
+        segment_fn=None,
+        segmentation_config=config,
+        min_size=config.min_area_px,
+        struct_elem_px=config.struct_elem_px,
+    )
+    ets_mask = np.asarray(ets_mask, dtype=bool)
+    tile_records, tile_dim = _direct_ets_tissue_tile_records(
+        ets_path=ets_path,
+        source_level=source_idx,
+        source_shape_yx=source_shape_yx,
+        low_res_filled=ets_mask,
+        chunk=tile_cfg.chunk_size,
+        pad_multiple=tile_cfg.pad_multiple,
+        extra_margin_px=tile_cfg.extra_margin_px,
+    )
+
+    flat_summary: dict[str, Any] | None = None
+    comparison: dict[str, Any] | None = None
+    if flat_image_path is not None:
+        import imageio.v3 as iio
+
+        flat_path = Path(flat_image_path)
+        flat_yxc = iio.imread(flat_path)
+        flat_mask, flat_info = _segment_for_plating(
+            flat_yxc,
+            segment_fn=None,
+            segmentation_config=config,
+            min_size=config.min_area_px,
+            struct_elem_px=config.struct_elem_px,
+        )
+        flat_mask = np.asarray(flat_mask, dtype=bool)
+        flat_summary = {
+            "path": str(flat_path),
+            "shape": list(map(int, flat_yxc.shape)),
+            "dtype": str(flat_yxc.dtype),
+            "component_count": int(measure.label(flat_mask, connectivity=2).max()),
+            "component_boxes": _mask_component_boxes(flat_mask),
+            "segmentation_info": flat_info,
+        }
+        comparison = {"flat_vs_ets_mask": _mask_iou(flat_mask, ets_mask)}
+        if output_path is not None:
+            iio.imwrite(output_path / "flat_overlay.png", _to_overlay_rgb(flat_yxc, flat_mask))
+
+    result: dict[str, Any] = {
+        "vsi_path": str(vsi_path),
+        "ets_path": str(ets_path),
+        "source_level": int(source_idx),
+        "segmentation_level": int(segmentation_idx),
+        "source_shape_yx": list(source_shape_yx),
+        "ets_segmentation_input": {
+            "shape": list(map(int, segmentation_yxc.shape)),
+            "dtype": str(segmentation_yxc.dtype),
+            "component_count": int(measure.label(ets_mask, connectivity=2).max()),
+            "component_boxes": _mask_component_boxes(ets_mask),
+            "segmentation_info": ets_info,
+        },
+        "flat_input": flat_summary,
+        "comparison": comparison,
+        "tile_dim": int(tile_dim),
+        "tile_records": [
+            {
+                "tissue_index": int(record.tissue_index),
+                "label_id": int(record.label_id),
+                "crop_bounds_source_level": list(record.crop_bounds_source_level),
+                "crop_bounds_segmentation_level": list(record.crop_bounds_segmentation_level),
+                "tile_dim": int(record.tile_dim),
+            }
+            for record in tile_records
+        ],
+    }
+
+    result = _json_ready(result)
+
+    if output_path is not None:
+        import imageio.v3 as iio
+
+        iio.imwrite(output_path / "ets_overlay.png", _to_overlay_rgb(segmentation_yxc, ets_mask))
+        (output_path / "diagnostics.json").write_text(
+            json.dumps(result, indent=2),
+            encoding="utf-8",
+        )
+
+    return result
 
 
 def vsi_to_source_ome_zarr(
@@ -436,7 +671,8 @@ def vsi_to_source_ome_zarr(
             )
         return output_path, Path(ets_path), metadata
 
-    channel_labels = metadata.get("channel_labels")
+    channel_labels = default_channel_labels(3)
+    channel_colors = default_channel_colors(3)
     phys_xy_um = _physical_xy_from_metadata(metadata)
     if phys_xy_um is None:
         logger.warning(
@@ -461,8 +697,8 @@ def vsi_to_source_ome_zarr(
             name=vsi_path.stem,
             chunks_xy=chunks_xy,
             overwrite=True,
-            channel_labels=channel_labels if isinstance(channel_labels, list) else None,
-            channel_colors=["FFFFFF"] * 3,
+            channel_labels=channel_labels,
+            channel_colors=channel_colors,
             add_omero=True,
             ngff_metadata=metadata,
             metadata_schema=metadata_schema,
@@ -479,8 +715,8 @@ def vsi_to_source_ome_zarr(
                 chunks_xy=chunks_xy,
                 version="0.4",
                 overwrite=True,
-                channel_labels=channel_labels if isinstance(channel_labels, list) else None,
-                channel_colors=["FFFFFF"] * 3,
+                channel_labels=channel_labels,
+                channel_colors=channel_colors,
                 add_omero=True,
                 ngff_metadata=metadata,
                 metadata_schema=metadata_schema,
@@ -573,14 +809,13 @@ def process_vsi_with_direct_plating(
         np.moveaxis(segmentation_yxc, -1, 0),
         chunks=(3, min(plate_chunk_xy, segmentation_yxc.shape[0]), min(plate_chunk_xy, segmentation_yxc.shape[1])),
     )
-    if segment_fn is None:
-        segment_fn = make_lowres_mask
-    seg_kwargs = _segmentation_kwargs(
-        segmentation_config,
+    filled_lr, _ = _segment_for_plating(
+        seg_cyx,
+        segment_fn=segment_fn,
+        segmentation_config=segmentation_config,
         min_size=min_size,
         struct_elem_px=struct_elem_px,
     )
-    filled_lr, _ = segment_fn(seg_cyx, **seg_kwargs)
 
     tile_records, tile_dim = _direct_ets_tissue_tile_records(
         ets_path=ets_path,
@@ -665,6 +900,7 @@ def process_vsi_with_direct_plating(
                     source_ngff_metadata,
                     dataset_count=num_mips,
                     name=name,
+                    phys_xy_um=(px_um, py_um),
                 )
                 tlazy = tile_dask.astype(np.uint8) if tile_dask.dtype != np.uint8 else tile_dask
                 write_ngff_from_tile_streaming_ome(
@@ -675,8 +911,8 @@ def process_vsi_with_direct_plating(
                     num_mips=num_mips,
                     name=name,
                     compressor=None,
-                    channel_labels=[f"ch{i}" for i in range(int(tile_dask.shape[2]))],
-                    channel_colors=["FFFFFF"] * int(tile_dask.shape[2]),
+                    channel_labels=default_channel_labels(int(tile_dask.shape[2])),
+                    channel_colors=default_channel_colors(int(tile_dask.shape[2])),
                     ngff_metadata=tile_ngff_metadata,
                     metadata_schema=source_metadata_schema,
                 )
@@ -704,6 +940,7 @@ def process_vsi_with_direct_plating(
                     source_ngff_metadata,
                     dataset_count=num_mips,
                     name=name,
+                    phys_xy_um=(px_um, py_um),
                 )
                 mips = build_mips_from_yxc(tile, num_mips)
                 write_ngff_from_mips_ngffzarr(
@@ -714,8 +951,8 @@ def process_vsi_with_direct_plating(
                     chunks_xy=plate_chunk_xy,
                     version="0.4",
                     overwrite=True,
-                    channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
-                    channel_colors=["FFFFFF"] * mips[0].shape[2],
+                    channel_labels=default_channel_labels(mips[0].shape[2]),
+                    channel_colors=default_channel_colors(mips[0].shape[2]),
                     add_omero=True,
                     ngff_metadata=tile_ngff_metadata,
                     metadata_schema=source_metadata_schema,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import dask.array as da
 import numpy as np
 import pytest
 
@@ -53,6 +54,8 @@ def test_vsi_to_source_ome_zarr_uses_direct_writer_by_default(monkeypatch, tmp_p
     assert writer_call["phys_xy_um"] == (0.25, 0.5)
     assert writer_call["chunks_xy"] == 256
     assert writer_call["ngff_metadata"] == metadata
+    assert writer_call["channel_labels"] == ["red", "green", "blue"]
+    assert writer_call["channel_colors"] == ["FF0000", "00FF00", "0000FF"]
 
 
 def test_vsi_to_source_ome_zarr_ngff_zarr_escape_hatch_uses_ets_dask_levels(monkeypatch, tmp_path):
@@ -113,6 +116,8 @@ def test_vsi_to_source_ome_zarr_ngff_zarr_escape_hatch_uses_ets_dask_levels(monk
     assert writer_call["phys_xy_um"] == (0.25, 0.5)
     assert writer_call["chunks_xy"] == 256
     assert writer_call["ngff_metadata"] == metadata
+    assert writer_call["channel_labels"] == ["red", "green", "blue"]
+    assert writer_call["channel_colors"] == ["FF0000", "00FF00", "0000FF"]
 
 
 def test_vsi_to_source_ome_zarr_rejects_incomplete_cached_source(monkeypatch, tmp_path):
@@ -309,4 +314,138 @@ def test_direct_ets_tissue_tile_records_read_only_tissue_blocks(monkeypatch, tmp
     assert np.count_nonzero(first[..., 0]) > 0
     assert np.count_nonzero(second[..., 0]) > 0
     assert np.count_nonzero(first[:, -1, 0]) == 0
-    assert np.count_nonzero(second[:, 0, 0]) == 0
+    assert np.count_nonzero(second[..., 0]) < second[..., 0].size
+
+
+def _assert_direct_ets_records_match_shared_generator(
+    monkeypatch,
+    tmp_path,
+    *,
+    source_shape_yx: tuple[int, int],
+    mask_shape_yx: tuple[int, int],
+) -> None:
+    from wsi_pipeline.pipeline import vsi_ets
+    from wsi_pipeline.tiles.generator import generate_tissue_tile_records
+
+    source_h, source_w = source_shape_yx
+    yy, xx = np.mgrid[:source_h, :source_w]
+    source_yxc = np.zeros((source_h, source_w, 3), dtype=np.uint8)
+    source_yxc[..., 0] = xx + 1
+    source_yxc[..., 1] = yy + 1
+    source_yxc[..., 2] = (xx + yy) % 251
+
+    def _fake_read_region(_ets_path, *, level, x0, y0, x1, y1):  # noqa: ARG001
+        return source_yxc[y0:y1, x0:x1, :]
+
+    monkeypatch.setattr(vsi_ets, "_read_ets_region_yxc", _fake_read_region)
+    mask = np.zeros(mask_shape_yx, dtype=bool)
+    mask[:, : max(1, mask_shape_yx[1] // 4)] = True
+    mask[:, -max(1, mask_shape_yx[1] // 4) :] = True
+
+    shared_records, shared_dim = generate_tissue_tile_records(
+        s0_cyx=da.from_array(np.moveaxis(source_yxc, -1, 0), chunks=(3, 4, 4)),
+        low_res_filled=mask,
+        chunk=4,
+        pad_multiple=4,
+        extra_margin_px=0,
+    )
+    direct_records, direct_dim = vsi_ets._direct_ets_tissue_tile_records(
+        ets_path=tmp_path / "fake.ets",
+        source_level=2,
+        source_shape_yx=source_shape_yx,
+        low_res_filled=mask,
+        chunk=4,
+        pad_multiple=4,
+        extra_margin_px=0,
+    )
+
+    assert direct_dim == shared_dim
+    assert len(direct_records) == len(shared_records) == 2
+    for direct, shared in zip(direct_records, shared_records, strict=True):
+        assert direct.tissue_index == shared.tissue_index
+        assert direct.crop_bounds_source_level == shared.crop_bounds_source_level
+        assert direct.crop_bounds_segmentation_level == shared.crop_bounds_segmentation_level
+        np.testing.assert_array_equal(direct.tile.compute(), shared.tile.compute())
+
+
+def test_direct_ets_tissue_tile_records_match_shared_generator_same_level(
+    monkeypatch,
+    tmp_path,
+):
+    _assert_direct_ets_records_match_shared_generator(
+        monkeypatch,
+        tmp_path,
+        source_shape_yx=(4, 8),
+        mask_shape_yx=(4, 8),
+    )
+
+
+def test_direct_ets_tissue_tile_records_match_shared_generator_cross_level(
+    monkeypatch,
+    tmp_path,
+):
+    _assert_direct_ets_records_match_shared_generator(
+        monkeypatch,
+        tmp_path,
+        source_shape_yx=(8, 16),
+        mask_shape_yx=(4, 8),
+    )
+
+
+def test_diagnose_vsi_replating_writes_lightweight_outputs(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+
+    class _DummyETS:
+        nlevels = 3
+
+        def __init__(self, path):
+            assert Path(path) == ets_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(16, 32), (8, 16), (4, 8)][level]
+
+        def read_level(self, level):
+            assert level == 2
+            arr = np.zeros((4, 8, 3), dtype=np.uint8)
+            arr[..., 0] = 120
+            arr[..., 1] = 80
+            arr[..., 2] = 40
+            return arr
+
+    def _fake_segment(image, **kwargs):  # noqa: ARG001
+        shape = tuple(map(int, image.shape))
+        h, w = shape[:2] if shape[-1] == 3 else shape[1:]
+        mask = np.zeros((h, w), dtype=bool)
+        mask[:, :2] = True
+        mask[:, -2:] = True
+        return mask, {"component_source": "fake"}
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
+    monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
+
+    result = vsi_ets.diagnose_vsi_replating(
+        vsi_path,
+        tmp_path / "diag",
+        source_level=1,
+        segmentation_level=2,
+    )
+
+    assert (tmp_path / "diag" / "diagnostics.json").is_file()
+    assert (tmp_path / "diag" / "ets_overlay.png").is_file()
+    assert result["source_level"] == 1
+    assert result["segmentation_level"] == 2
+    assert result["ets_segmentation_input"]["component_count"] == 2
+    assert [record["tissue_index"] for record in result["tile_records"]] == [0, 1]

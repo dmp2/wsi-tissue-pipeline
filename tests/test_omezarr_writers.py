@@ -189,7 +189,7 @@ def test_write_ets_pyramid_to_ngff_zarr_streams_tiles_and_metadata(tmp_path, mon
         root.arrays[name] = arr
         return arr
 
-    monkeypatch.setattr(ets_writer_mod.zarr, "open_group", lambda *args, **kwargs: group)
+    monkeypatch.setattr(ets_writer_mod, "open_group_v2", lambda *args, **kwargs: group)
     monkeypatch.setattr(ets_writer_mod, "create_group_array", fake_create_group_array)
 
     write_ets_pyramid_to_ngff_zarr(
@@ -209,6 +209,7 @@ def test_write_ets_pyramid_to_ngff_zarr_streams_tiles_and_metadata(tmp_path, mon
     assert group.arrays["s0"][:, 4, 6].tolist() == [11, 12, 13]
     assert group.attrs["multiscales"] == materialize_ngff_root_attrs(payload, "v0.4")["multiscales"]
     assert group.attrs["omero"]["channels"][0]["label"] == "label_0"
+    assert group.attrs["omero"]["channels"][0]["color"] == "FF0000"
 
 
 def test_create_group_array_falls_back_to_create_dataset():
@@ -241,7 +242,8 @@ def test_write_ngff_from_mips_preserves_default_v04_root_attrs(tmp_path):
         0.5,
         0.25,
     ]
-    assert attrs["omero"]["channels"][0]["label"] == "ch0"
+    assert attrs["omero"]["channels"][0]["label"] == "red"
+    assert attrs["omero"]["channels"][0]["color"] == "FF0000"
 
 
 def test_write_ngff_from_mips_emits_no_zarr_format_warning(tmp_path):

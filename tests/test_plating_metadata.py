@@ -225,6 +225,22 @@ def test_plating_uses_supplied_metadata_and_projects_tile_levels(monkeypatch, tm
     assert "absolute_origin_translation" in projected["compatibility"]["lossy_fields_for_v04"]
 
 
+def test_tile_metadata_projection_uses_selected_source_level_scale():
+    payload = _make_metadata_payload()
+
+    projected = plating_mod._tile_ngff_metadata_or_none(
+        payload,
+        dataset_count=2,
+        name="tile-at-source-level",
+        phys_xy_um=(2.0, 4.0),
+    )
+
+    assert projected is not None
+    datasets = projected["ngff_v04"]["multiscales"][0]["datasets"]
+    assert datasets[0]["coordinateTransformations"][0]["scale"] == [1.0, 4.0, 2.0]
+    assert datasets[1]["coordinateTransformations"][0]["scale"] == [1.0, 8.0, 4.0]
+
+
 def test_plating_vsi_context_fetches_metadata_once(monkeypatch, tmp_path):
     payload = _make_metadata_payload()
     call_counter = {"count": 0}
@@ -249,6 +265,48 @@ def test_plating_vsi_context_fetches_metadata_once(monkeypatch, tmp_path):
     assert len(calls) == 1
     assert calls[0]["metadata_schema"] == "v0.4"
     assert calls[0]["ngff_metadata"] is not None
+
+
+def test_plating_default_config_uses_notebook_segmentation(monkeypatch):
+    from wsi_pipeline.config import SegmentationConfig
+
+    calls: dict[str, object] = {}
+
+    def _fake_segment_tissue(image, **kwargs):
+        calls.update(kwargs)
+        return np.ones((8, 10), dtype=bool), {"ok": True}
+
+    monkeypatch.setattr(plating_mod, "segment_tissue", _fake_segment_tissue)
+    config = SegmentationConfig(
+        target_long_side=777,
+        min_area_px=321,
+        struct_elem_px=6,
+        stain_gate=True,
+        stain_gate_mode="adaptive-he",
+        stain_min_od=0.12,
+        split_touching=False,
+        appendage_refinement_enabled=True,
+        diagnostics=True,
+    )
+
+    mask, info = plating_mod._segment_for_plating(
+        da.zeros((3, 8, 10), chunks=(3, 8, 10), dtype=np.uint8),
+        segment_fn=None,
+        segmentation_config=config,
+        min_size=1,
+        struct_elem_px=2,
+    )
+
+    assert mask.shape == (8, 10)
+    assert info == {"ok": True}
+    assert calls["target_long_side"] == 777
+    assert calls["min_area_px"] == 321
+    assert calls["struct_elem_px"] == 6
+    assert calls["stain_gate"] is True
+    assert calls["stain_gate_mode"] == "adaptive-he"
+    assert calls["split_touching"] is False
+    assert calls["appendage_refinement_enabled"] is True
+    assert calls["diagnostics"] is True
 
 
 def test_plating_writes_derivative_manifest_and_forwards_config(monkeypatch, tmp_path):
@@ -344,6 +402,8 @@ def test_plating_writes_derivative_manifest_and_forwards_config(monkeypatch, tmp
     assert segment_kwargs["appendage_refinement_enabled"] is True
     assert len(writer_calls) == 1
     assert writer_calls[0]["chunks_xy"] == 256
+    assert writer_calls[0]["channel_labels"] == ["red", "green", "blue"]
+    assert writer_calls[0]["channel_colors"] == ["FF0000", "00FF00", "0000FF"]
     assert [path.name for path in paths] == ["source_tissue_00.ome.zarr"]
 
     manifest = json.loads((paths[0] / "tissue_manifest.json").read_text(encoding="utf-8"))

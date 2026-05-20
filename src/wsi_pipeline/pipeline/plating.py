@@ -22,6 +22,8 @@ from ..omezarr.metadata import (
     _get_multiscales_paths,
     _phys_xy_um,
     _project_source_metadata_for_tile_writes,
+    default_channel_colors,
+    default_channel_labels,
 )
 from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
 from ..omezarr.streaming import write_ngff_from_tile_streaming_ome, write_ngff_from_tile_ts
@@ -29,6 +31,7 @@ from ..omezarr.writers import write_ngff_from_mips_ngffzarr
 from ..precomputed.plate_writer import PlatePrecomputedWriter
 from ..segmentation.segmenter import make_lowres_mask
 from ..tiles.generator import TissueTileRecord, generate_tissue_tile_records
+from ..wsi_processing import segment_tissue
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +108,7 @@ def _tile_ngff_metadata_or_none(
     *,
     dataset_count: int,
     name: str,
+    phys_xy_um: tuple[float, float] | None = None,
 ) -> dict[str, Any] | None:
     """Project resolved source metadata to tile-compatible NGFF payloads."""
     if source_metadata is None:
@@ -114,6 +118,7 @@ def _tile_ngff_metadata_or_none(
             source_metadata,
             dataset_count=dataset_count,
             name=name,
+            phys_xy_um=phys_xy_um,
         )
     except Exception as exc:
         logger.warning(
@@ -122,6 +127,16 @@ def _tile_ngff_metadata_or_none(
             exc,
         )
         return None
+
+
+def _channel_labels_for_count(channel_count: int) -> list[str]:
+    """Return default brightfield labels for writer calls."""
+    return default_channel_labels(int(channel_count))
+
+
+def _channel_colors_for_count(channel_count: int) -> list[str]:
+    """Return default brightfield colors for writer calls."""
+    return default_channel_colors(int(channel_count))
 
 
 def _clean_ome_zarr_stem(path: Path) -> str:
@@ -198,6 +213,67 @@ def _segmentation_kwargs(
         "diagnostics": segmentation_config.diagnostics,
         "return_diag": segmentation_config.diagnostics,
     }
+
+
+def _segment_for_plating(
+    image: np.ndarray | da.Array,
+    *,
+    segment_fn,
+    segmentation_config: SegmentationConfig | None,
+    min_size: int,
+    struct_elem_px: int,
+) -> tuple[np.ndarray, dict[str, Any] | None]:
+    """
+    Segment a low-resolution plating image.
+
+    When a notebook-style SegmentationConfig is supplied and no explicit
+    segment_fn override is present, use the same segment_tissue() path as
+    notebook 01. Passing segment_fn remains the compatibility shim for the
+    legacy make_lowres_mask/preprocess API.
+    """
+    if segment_fn is not None:
+        return segment_fn(
+            image,
+            **_segmentation_kwargs(
+                segmentation_config,
+                min_size=min_size,
+                struct_elem_px=struct_elem_px,
+            ),
+        )
+
+    if segmentation_config is not None:
+        mask, info = segment_tissue(
+            image,
+            backend=segmentation_config.backend,
+            target_long_side=segmentation_config.target_long_side,
+            min_area_px=segmentation_config.min_area_px,
+            struct_elem_px=segmentation_config.struct_elem_px,
+            stain_gate=segmentation_config.stain_gate,
+            stain_gate_mode=segmentation_config.stain_gate_mode,
+            stain_min_saturation=segmentation_config.stain_min_saturation,
+            stain_min_od=segmentation_config.stain_min_od,
+            stain_min_he_signal=segmentation_config.stain_min_he_signal,
+            stain_od_bg_percentile=segmentation_config.stain_od_bg_percentile,
+            stain_od_mad_multiplier=segmentation_config.stain_od_mad_multiplier,
+            stain_pre_open_px=segmentation_config.stain_pre_open_px,
+            split_touching=segmentation_config.split_touching,
+            r_split=segmentation_config.r_split,
+            keep_top_k=segmentation_config.keep_top_k,
+            appendage_refinement_enabled=segmentation_config.appendage_refinement_enabled,
+            appendage_refinement_mode=segmentation_config.appendage_refinement_mode,
+            appendage_refinement_profile=segmentation_config.appendage_refinement_profile,
+            diagnostics=segmentation_config.diagnostics,
+        )
+        return mask, info
+
+    return make_lowres_mask(
+        image,
+        **_segmentation_kwargs(
+            None,
+            min_size=min_size,
+            struct_elem_px=struct_elem_px,
+        ),
+    )
 
 
 def _source_context_path(
@@ -412,14 +488,13 @@ def process_slide_with_plating(
     if sL.ndim == 3 and sL.shape[-1] in (1, 3) and sL.shape[0] not in (1, 3):
         sL = da.moveaxis(sL, -1, 0)  # (C, Y, X)
 
-    if segment_fn is None:
-        segment_fn = make_lowres_mask
-    seg_kwargs = _segmentation_kwargs(
-        segmentation_config,
+    filled_lr, _ = _segment_for_plating(
+        sL,
+        segment_fn=segment_fn,
+        segmentation_config=segmentation_config,
         min_size=min_size,
         struct_elem_px=struct_elem_px,
     )
-    filled_lr, _ = segment_fn(sL, **seg_kwargs)
 
     # Step 2: upsample the low-resolution mask to the high-resolution image
     # Build LIST of HR tile records (Y,X,C), ordered left->right
@@ -549,6 +624,7 @@ def process_slide_with_plating(
                             source_ngff_metadata,
                             dataset_count=num_mips,
                             name=name,
+                            phys_xy_um=(px_um, py_um),
                         )
                         write_ngff_from_tile_ts(
                             tile,
@@ -558,8 +634,8 @@ def process_slide_with_plating(
                             num_mips=num_mips,
                             name=name,
                             version="0.4",
-                            channel_labels=[f"ch{i}" for i in range(tile.shape[2])],
-                            channel_colors=["FFFFFF"] * tile.shape[2],
+                            channel_labels=_channel_labels_for_count(tile.shape[2]),
+                            channel_colors=_channel_colors_for_count(tile.shape[2]),
                             ngff_metadata=tile_ngff_metadata,
                             metadata_schema=source_metadata_schema,
                         )
@@ -585,6 +661,7 @@ def process_slide_with_plating(
                             source_ngff_metadata,
                             dataset_count=ms,
                             name=name,
+                            phys_xy_um=(px_um, py_um),
                         )
                         mips = build_mips_from_yxc(tile, ms)
                         write_ngff_from_mips_ngffzarr(
@@ -595,8 +672,8 @@ def process_slide_with_plating(
                             chunks_xy=plate_chunk_xy,
                             version="0.4",  # keep 0.4 unless you want sharded v0.5
                             overwrite=True,
-                            channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
-                            channel_colors=["FFFFFF"] * mips[0].shape[2],
+                            channel_labels=_channel_labels_for_count(mips[0].shape[2]),
+                            channel_colors=_channel_colors_for_count(mips[0].shape[2]),
                             add_omero=True,
                             ngff_metadata=tile_ngff_metadata,
                             metadata_schema=source_metadata_schema,
@@ -665,6 +742,7 @@ def process_slide_with_plating(
                         source_ngff_metadata,
                         dataset_count=num_mips,
                         name=name,
+                        phys_xy_um=(px_um, py_um),
                     )
 
                     # write_ngff_from_tile_ts(
@@ -675,8 +753,8 @@ def process_slide_with_plating(
                     #     num_mips=compute_num_mips_min_side(tlazy.shape[1], tlazy.shape[0],
                     #                                     min_side_for_mips or plate_chunk_xy),
                     #     name=name, version="0.4",
-                    #     channel_labels=[f"ch{i}" for i in range(tlazy.shape[2])],
-                    #     channel_colors=["FFFFFF"] * tlazy.shape[2],
+                    #     channel_labels=_channel_labels_for_count(tlazy.shape[2]),
+                    #     channel_colors=_channel_colors_for_count(tlazy.shape[2]),
                     # )
                     write_ngff_from_tile_streaming_ome(
                         tile_yxc_da=tile_dask.astype(np.uint8)
@@ -688,8 +766,8 @@ def process_slide_with_plating(
                         num_mips=num_mips,
                         name=name,
                         compressor=None,  # or zarr.Blosc(cname="zstd", clevel=5, shuffle=2)
-                        channel_labels=[f"ch{i}" for i in range(int(tile_dask.shape[2]))],
-                        channel_colors=["FFFFFF"] * int(tile_dask.shape[2]),
+                        channel_labels=_channel_labels_for_count(int(tile_dask.shape[2])),
+                        channel_colors=_channel_colors_for_count(int(tile_dask.shape[2])),
                         ngff_metadata=tile_ngff_metadata,
                         metadata_schema=source_metadata_schema,
                     )
@@ -737,6 +815,7 @@ def process_slide_with_plating(
                         source_ngff_metadata,
                         dataset_count=ms,
                         name=name,
+                        phys_xy_um=(px_um, py_um),
                     )
                     mips = build_mips_from_yxc(tile, ms)
                     # print(f"mips[0].dtype: {mips[0].dtype}")
@@ -749,8 +828,8 @@ def process_slide_with_plating(
                         chunks_xy=plate_chunk_xy,
                         version="0.4",  # keep 0.4 unless you want sharded v0.5
                         overwrite=True,
-                        channel_labels=[f"ch{i}" for i in range(mips[0].shape[2])],
-                        channel_colors=["FFFFFF"] * mips[0].shape[2],
+                        channel_labels=_channel_labels_for_count(mips[0].shape[2]),
+                        channel_colors=_channel_colors_for_count(mips[0].shape[2]),
                         add_omero=True,
                         ngff_metadata=tile_ngff_metadata,
                         metadata_schema=source_metadata_schema,

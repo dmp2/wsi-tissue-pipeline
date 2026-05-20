@@ -12,7 +12,7 @@ import numpy as np
 from numcodecs import Blosc
 
 from ..etsfile import ETSFile
-from .metadata import _prepare_ngff_writer_metadata
+from .metadata import _prepare_ngff_writer_metadata, default_channel_colors
 from .writers import _build_omero_block, _omero_version
 from .zarr_compat import create_group_array, open_group_v2
 
@@ -191,6 +191,6 @@ def write_ets_pyramid_to_ngff_zarr(
                 name=resolved_name,
                 version=omero_version,
                 channel_labels=resolved_labels,
-                channel_colors=channel_colors or ["FFFFFF"] * channel_count,
+                channel_colors=channel_colors or default_channel_colors(channel_count),
             )
         root.attrs.put(attrs)
