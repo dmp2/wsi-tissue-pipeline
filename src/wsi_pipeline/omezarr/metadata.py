@@ -13,7 +13,6 @@ from typing import Any
 
 import zarr
 
-
 RGB_CHANNEL_LABELS = ["red", "green", "blue"]
 RGB_CHANNEL_COLORS = ["FF0000", "00FF00", "0000FF"]
 

@@ -303,6 +303,22 @@ def _source_vsi_from_context(source_context: Mapping[str, Any] | None) -> str | 
     return None
 
 
+def _debug_bounds_xyxy(frame_debug: Mapping[str, Any], key: str) -> list[int] | None:
+    """Return a frame-debug YX bounds payload as export-friendly XYXY bounds."""
+    payload = frame_debug.get(key)
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        return [
+            int(payload["x0"]),
+            int(payload["y0"]),
+            int(payload["x1"]),
+            int(payload["y1"]),
+        ]
+    except KeyError:
+        return None
+
+
 def _write_tissue_manifest(
     ngff_dir: Path,
     *,
@@ -313,7 +329,7 @@ def _write_tissue_manifest(
     segmentation_level: int,
     phys_xy_um: tuple[float, float],
 ) -> Path:
-    """Write the minimal chopped-derivative manifest next to a tissue OME-Zarr."""
+    """Write the chopped-derivative manifest next to a tissue OME-Zarr."""
     px_um, py_um = map(float, phys_xy_um)
     payload = {
         "role": "derivative",
@@ -335,9 +351,56 @@ def _write_tissue_manifest(
             "write_ome_zarr",
         ],
     }
+    if record.frame_debug is not None:
+        frame_debug = record.frame_debug
+        logical_source = _debug_bounds_xyxy(frame_debug, "logical_canvas_source_yx")
+        clipped_source = _debug_bounds_xyxy(frame_debug, "clipped_source_yx")
+        logical_segmentation = _debug_bounds_xyxy(frame_debug, "logical_frame_seg_yx")
+        clipped_segmentation = _debug_bounds_xyxy(frame_debug, "clipped_frame_seg_yx")
+        if logical_source is not None:
+            payload["logical_crop_bounds_source_level"] = logical_source
+        if clipped_source is not None:
+            payload["clipped_crop_bounds_source_level"] = clipped_source
+        if logical_segmentation is not None:
+            payload["logical_crop_bounds_segmentation_level"] = logical_segmentation
+        if clipped_segmentation is not None:
+            payload["clipped_crop_bounds_segmentation_level"] = clipped_segmentation
+        padding = frame_debug.get("padding_source_level")
+        if isinstance(padding, Mapping):
+            payload["padding_source_level"] = {
+                "top": int(padding.get("top", 0)),
+                "bottom": int(padding.get("bottom", 0)),
+                "left": int(padding.get("left", 0)),
+                "right": int(padding.get("right", 0)),
+            }
+        if frame_debug.get("tile_frame_level") is not None:
+            payload["tile_frame_level"] = str(frame_debug["tile_frame_level"])
+
     manifest_path = ngff_dir / "tissue_manifest.json"
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return manifest_path
+
+
+def _write_tissue_frame_debug(
+    ngff_dir: Path,
+    *,
+    record: TissueTileRecord,
+    source_level: int,
+    segmentation_level: int,
+) -> Path | None:
+    """Write optional rich coordinate diagnostics as a sidecar JSON."""
+    if record.frame_debug is None:
+        return None
+    payload = {
+        "source_level": int(source_level),
+        "segmentation_level": int(segmentation_level),
+        "tissue_index": int(record.tissue_index),
+        "label_id": int(record.label_id),
+        "frame_debug": record.frame_debug,
+    }
+    debug_path = ngff_dir / "tissue_frame_debug.json"
+    debug_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return debug_path
 
 
 def _record_written_tissue(
@@ -360,6 +423,12 @@ def _record_written_tissue(
         segmentation_level=segmentation_level,
         phys_xy_um=phys_xy_um,
     )
+    _write_tissue_frame_debug(
+        ngff_dir,
+        record=record,
+        source_level=source_level,
+        segmentation_level=segmentation_level,
+    )
     out_paths.append(ngff_dir)
 
 
@@ -371,6 +440,7 @@ def process_slide_with_plating(
     segment_fn=None,  # callable(dask_arr)->(filled_mask_bool, _)
     source_level: int | str = 0,
     segmentation_level: int | str | None = None,
+    tile_frame_level: str = "segmentation",
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
     struct_elem_px: int = 9,  # structuring element radius in pixels
@@ -399,7 +469,9 @@ def process_slide_with_plating(
 
     ``source_level`` and ``segmentation_level`` accept either multiscales indices
     or dataset paths such as ``"s7"``. ``segmentation_config`` and
-    ``tile_config`` mirror the notebook configuration objects.
+    ``tile_config`` mirror the notebook configuration objects. ``tile_frame_level``
+    controls whether crop dimensions/margins are finalized at the segmentation
+    level (notebook-equivalent default) or at the source level (legacy behavior).
 
     Returns
     -------
@@ -504,6 +576,7 @@ def process_slide_with_plating(
         chunk=plate_chunk_xy,
         pad_multiple=tile_pad_multiple,
         extra_margin_px=tile_extra_margin_px,
+        tile_frame_level=tile_frame_level,
     )
     # Break out early if there are no tissue sections
     if not tile_records:

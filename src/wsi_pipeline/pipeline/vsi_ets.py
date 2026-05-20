@@ -11,7 +11,7 @@ from typing import Any
 import dask.array as da
 import dask.config
 import numpy as np
-from scipy.ndimage import affine_transform, binary_fill_holes
+from scipy.ndimage import binary_fill_holes
 from skimage import measure
 
 from ..config import SegmentationConfig, TileConfig
@@ -22,7 +22,13 @@ from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
 from ..omezarr.streaming import write_ngff_from_tile_streaming_ome
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
 from ..precomputed.plate_writer import PlatePrecomputedWriter
-from ..tiles.generator import TissueTileRecord, sort_labels_left_to_right
+from ..tiles.generator import (
+    BoundsYX,
+    TissueTileRecord,
+    _build_tissue_frame_specs,
+    _normalize_tile_frame_level,
+    project_label_mask_to_source_region,
+)
 from ..vsi_converter import find_ets_file, get_vsi_metadata
 from .plating import (
     _is_big_tile,
@@ -233,7 +239,8 @@ def _read_masked_ets_block(
     source_level: int,
     source_shape_yx: tuple[int, int],
     tile_origin_yx: tuple[int, int],
-    source_crop_bounds_yx: tuple[int, int, int, int],
+    logical_canvas_source_yx: tuple[int, int, int, int],
+    label_crop_seg_yx: tuple[int, int, int, int],
     lr_labels: np.ndarray,
     label_id: int,
     block_info: dict | None = None,
@@ -250,6 +257,7 @@ def _read_masked_ets_block(
     out = np.zeros((block_h, block_w, block.shape[2]), dtype=block.dtype)
 
     tile_y0, tile_x0 = map(int, tile_origin_yx)
+    canvas = BoundsYX(*map(int, logical_canvas_source_yx))
     source_y0 = tile_y0 + out_y0
     source_y1 = tile_y0 + out_y1
     source_x0 = tile_x0 + out_x0
@@ -272,28 +280,20 @@ def _read_masked_ets_block(
         y1=valid_y1,
     )
 
+    if canvas.y0 != tile_y0 or canvas.x0 != tile_x0:
+        raise ValueError("logical_canvas_source_yx origin must match tile_origin_yx.")
+
     yr = source_h / lr_labels.shape[0]
     xr = source_w / lr_labels.shape[1]
-    crop_y0, crop_x0, crop_y1, crop_x1 = map(int, source_crop_bounds_yx)
-    lr_crop_y0 = max(0, int(np.floor(crop_y0 / yr)))
-    lr_crop_x0 = max(0, int(np.floor(crop_x0 / xr)))
-    lr_crop_y1 = min(lr_labels.shape[0], int(np.ceil(crop_y1 / yr)))
-    lr_crop_x1 = min(lr_labels.shape[1], int(np.ceil(crop_x1 / xr)))
-    lr_crop = lr_labels[lr_crop_y0:lr_crop_y1, lr_crop_x0:lr_crop_x1].astype(np.int32)
-    matrix = np.array([[1.0 / yr, 0.0], [0.0, 1.0 / xr]], dtype=float)
-    offset = np.array(
-        [(valid_y0 / yr) - lr_crop_y0, (valid_x0 / xr) - lr_crop_x0],
-        dtype=float,
-    )
-    mask = (
-        affine_transform(
-            lr_crop,
-            matrix=matrix,
-            offset=offset,
-            output_shape=(valid_y1 - valid_y0, valid_x1 - valid_x0),
-            order=0,
-        )
-        == int(label_id)
+    valid_region = BoundsYX(valid_y0, valid_x0, valid_y1, valid_x1)
+    label_crop = BoundsYX(*map(int, label_crop_seg_yx)).clip(lr_labels.shape)
+    mask = project_label_mask_to_source_region(
+        lr_labels,
+        label_id=int(label_id),
+        source_region_yx=valid_region,
+        label_crop_seg_yx=label_crop,
+        scale_y=yr,
+        scale_x=xr,
     )
     region = np.where(mask[..., None], region, 0)
 
@@ -312,8 +312,10 @@ def _direct_ets_tissue_tile_records(
     chunk: int,
     pad_multiple: int | None,
     extra_margin_px: int,
+    tile_frame_level: str,
 ) -> tuple[list[TissueTileRecord], int]:
     """Build lazy per-tissue tile records that read directly from ETS source blocks."""
+    tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     source_h, source_w = map(int, source_shape_yx)
     lr_labels = _filled_lr_labels(low_res_filled)
     if lr_labels.max() == 0:
@@ -321,56 +323,20 @@ def _direct_ets_tissue_tile_records(
 
     if pad_multiple is None:
         pad_multiple = chunk
-    yr = source_h / low_res_filled.shape[0]
-    xr = source_w / low_res_filled.shape[1]
+    frame_specs, tile_dim = _build_tissue_frame_specs(
+        lr_labels,
+        source_shape_yx=(source_h, source_w),
+        tile_frame_level=tile_frame_level,
+        pad_multiple=pad_multiple,
+        extra_margin_px=extra_margin_px,
+    )
 
-    roi_specs: list[tuple[int, int, int, int, int, int, int, int]] = []
-    max_side = 0
-    for lid in sort_labels_left_to_right(lr_labels):
-        lr_mask = lr_labels == lid
-        rows, cols = np.any(lr_mask, axis=1), np.any(lr_mask, axis=0)
-        yi = np.where(rows)[0]
-        xi = np.where(cols)[0]
-        if yi.size == 0 or xi.size == 0:
-            continue
-
-        y0_lr, y1_lr = yi[[0, -1]]
-        x0_lr, x1_lr = xi[[0, -1]]
-        y0_src = max(0, min(source_h, int(np.floor(y0_lr * yr))))
-        y1_src = max(0, min(source_h, int(np.ceil((y1_lr + 1) * yr))))
-        x0_src = max(0, min(source_w, int(np.floor(x0_lr * xr))))
-        x1_src = max(0, min(source_w, int(np.ceil((x1_lr + 1) * xr))))
-        max_side = max(
-            max_side,
-            (y1_src - y0_src) + (2 * extra_margin_px),
-            (x1_src - x0_src) + (2 * extra_margin_px),
-        )
-        roi_specs.append((int(lid), int(y0_lr), int(y1_lr), int(x0_lr), int(x1_lr), y0_src, y1_src, x0_src, x1_src))
-
-    if not roi_specs:
-        return [], 0
-
-    tile_dim = ((max_side + pad_multiple - 1) // pad_multiple) * pad_multiple
     records: list[TissueTileRecord] = []
-    for tissue_index, (lid, _y0_lr, _y1_lr, _x0_lr, _x1_lr, y0_src, y1_src, x0_src, x1_src) in enumerate(roi_specs):
-        center_y = (y0_src + y1_src) / 2.0
-        center_x = (x0_src + x1_src) / 2.0
-        tile_y0 = int(np.floor(center_y - tile_dim / 2.0))
-        tile_x0 = int(np.floor(center_x - tile_dim / 2.0))
-        tile_y1 = tile_y0 + tile_dim
-        tile_x1 = tile_x0 + tile_dim
-
-        src_y0 = max(0, tile_y0)
-        src_x0 = max(0, tile_x0)
-        src_y1 = min(source_h, tile_y1)
-        src_x1 = min(source_w, tile_x1)
-        if src_y1 <= src_y0 or src_x1 <= src_x0:
+    for spec in frame_specs:
+        canvas = spec.logical_canvas_source_yx
+        clipped = spec.clipped_source_yx
+        if clipped.h <= 0 or clipped.w <= 0:
             continue
-
-        lr_crop_y0 = max(0, int(np.floor(src_y0 / yr)))
-        lr_crop_x0 = max(0, int(np.floor(src_x0 / xr)))
-        lr_crop_y1 = min(lr_labels.shape[0], int(np.ceil(src_y1 / yr)))
-        lr_crop_x1 = min(lr_labels.shape[1], int(np.ceil(src_x1 / xr)))
 
         chunks = (min(chunk, tile_dim), min(chunk, tile_dim), 3)
         dummy = da.zeros((tile_dim, tile_dim, 3), chunks=chunks, dtype=np.uint8)
@@ -380,24 +346,26 @@ def _direct_ets_tissue_tile_records(
             ets_path=str(ets_path),
             source_level=int(source_level),
             source_shape_yx=(source_h, source_w),
-            tile_origin_yx=(tile_y0, tile_x0),
-            source_crop_bounds_yx=(src_y0, src_x0, src_y1, src_x1),
+            tile_origin_yx=(canvas.y0, canvas.x0),
+            logical_canvas_source_yx=canvas.as_yx(),
+            label_crop_seg_yx=spec.label_crop_seg_yx.as_yx(),
             lr_labels=lr_labels,
-            label_id=int(lid),
+            label_id=int(spec.label_id),
         )
         records.append(
             TissueTileRecord(
                 tile=tile,
-                tissue_index=int(tissue_index),
-                label_id=int(lid),
-                crop_bounds_source_level=(int(src_x0), int(src_y0), int(src_x1), int(src_y1)),
-                crop_bounds_segmentation_level=(
-                    int(lr_crop_x0),
-                    int(lr_crop_y0),
-                    int(lr_crop_x1),
-                    int(lr_crop_y1),
-                ),
+                tissue_index=int(spec.tissue_index),
+                label_id=int(spec.label_id),
+                crop_bounds_source_level=spec.clipped_source_yx.as_xyxy(),
+                crop_bounds_segmentation_level=spec.clipped_frame_seg_yx.as_xyxy(),
                 tile_dim=int(tile_dim),
+                tile_frame_level=tile_frame_level,
+                source_tile_dim=int(tile_dim),
+                segmentation_tile_dim=int(spec.segmentation_tile_dim),
+                scale_y=float(spec.scale_y),
+                scale_x=float(spec.scale_x),
+                frame_debug=spec.debug_dict(),
             )
         )
     return records, int(tile_dim)
@@ -487,15 +455,375 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
+def _bounds_from_debug(debug: dict[str, Any], key: str) -> BoundsYX:
+    payload = debug[key]
+    return BoundsYX(
+        y0=int(payload["y0"]),
+        x0=int(payload["x0"]),
+        y1=int(payload["y1"]),
+        x1=int(payload["x1"]),
+    )
+
+
+def _array_stats(arr: np.ndarray) -> dict[str, Any]:
+    arr = np.asarray(arr)
+    if arr.size == 0:
+        return {
+            "shape": list(arr.shape),
+            "dtype": str(arr.dtype),
+            "size": 0,
+            "min": None,
+            "max": None,
+            "mean": None,
+            "std": None,
+        }
+    stats: dict[str, Any] = {
+        "shape": list(map(int, arr.shape)),
+        "dtype": str(arr.dtype),
+        "size": int(arr.size),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+    }
+    channel_axis: int | None = None
+    if arr.ndim == 3:
+        if arr.shape[-1] in (1, 3, 4):
+            channel_axis = -1
+        elif arr.shape[0] in (1, 3, 4):
+            channel_axis = 0
+
+    if channel_axis is not None:
+        channel_arr = np.moveaxis(arr, channel_axis, -1)
+        channels = min(int(channel_arr.shape[-1]), 4)
+        flat = channel_arr[..., :channels].reshape(-1, channels).astype(np.float64)
+        stats["channel_means"] = [float(v) for v in flat.mean(axis=0)]
+        stats["channel_stds"] = [float(v) for v in flat.std(axis=0)]
+        stats["channel_mins"] = [float(v) for v in flat.min(axis=0)]
+        stats["channel_maxs"] = [float(v) for v in flat.max(axis=0)]
+        if channels >= 3:
+            absdiffs = {
+                "rg": float(np.mean(np.abs(flat[:, 0] - flat[:, 1]))),
+                "rb": float(np.mean(np.abs(flat[:, 0] - flat[:, 2]))),
+                "gb": float(np.mean(np.abs(flat[:, 1] - flat[:, 2]))),
+            }
+            stats["channel_absdiff_means"] = absdiffs
+            stats["channels_nearly_identical"] = bool(max(absdiffs.values()) <= 2.0)
+            corr_flat = flat
+            if corr_flat.shape[0] > 100_000:
+                step = max(1, corr_flat.shape[0] // 100_000)
+                corr_flat = corr_flat[::step]
+            correlations: dict[str, float | None] = {}
+            for name, a_idx, b_idx in (("rg", 0, 1), ("rb", 0, 2), ("gb", 1, 2)):
+                a = corr_flat[:, a_idx]
+                b = corr_flat[:, b_idx]
+                if float(a.std()) == 0.0 or float(b.std()) == 0.0:
+                    correlations[name] = None
+                else:
+                    correlations[name] = float(np.corrcoef(a, b)[0, 1])
+            stats["channel_correlations"] = correlations
+    return stats
+
+
+def _read_ome_zarr_s0_yxc(
+    path: Path,
+    *,
+    max_debug_pixels: int,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    """Read an OME-Zarr ``s0`` array as YXC for diagnostics when small enough."""
+    import zarr
+
+    zarr_path = Path(path)
+    s0_path = zarr_path / "s0"
+    try:
+        arr = zarr.open_array(str(s0_path), mode="r")
+    except Exception as exc:
+        return None, {"skipped": f"could not open {s0_path}: {exc}"}
+
+    shape = tuple(map(int, arr.shape))
+    if len(shape) == 2:
+        y, x = shape
+        channel_axis = None
+    elif len(shape) == 3 and shape[0] in (1, 3, 4):
+        y, x = shape[1], shape[2]
+        channel_axis = 0
+    elif len(shape) == 3 and shape[-1] in (1, 3, 4):
+        y, x = shape[0], shape[1]
+        channel_axis = -1
+    else:
+        return None, {"skipped": f"unsupported readback shape {shape}", "shape": list(shape)}
+
+    if int(y) * int(x) > int(max_debug_pixels):
+        return None, {
+            "skipped": "readback s0 exceeds max_debug_pixels",
+            "shape": list(shape),
+            "pixels": int(y) * int(x),
+            "max_debug_pixels": int(max_debug_pixels),
+        }
+
+    data = np.asarray(arr[...])
+    if channel_axis == 0:
+        data = np.moveaxis(data, 0, -1)
+    elif channel_axis is None:
+        data = np.repeat(data[..., None], 3, axis=2)
+    if data.ndim == 3 and data.shape[-1] == 1:
+        data = np.repeat(data, 3, axis=2)
+    data = data[..., :3]
+    return data, _array_stats(data)
+
+
+def _resolve_readback_ome_zarr_path(
+    readback_path: Path | None,
+    *,
+    tissue_index: int,
+) -> Path | None:
+    """Resolve a readback tissue OME-Zarr from either a direct path or parent directory."""
+    if readback_path is None:
+        return None
+    path = Path(readback_path)
+    if path.name.endswith(".ome.zarr"):
+        return path if path.exists() else None
+    if not path.exists():
+        return None
+    exact_matches = sorted(path.glob(f"*tissue_{int(tissue_index):02d}.ome.zarr"))
+    if exact_matches:
+        return exact_matches[0]
+    all_matches = sorted(path.glob("*.ome.zarr"))
+    if 0 <= int(tissue_index) < len(all_matches):
+        return all_matches[int(tissue_index)]
+    return None
+
+
+def _place_region_in_canvas(
+    *,
+    canvas_shape_yx: tuple[int, int],
+    canvas_bounds: BoundsYX,
+    clipped_bounds: BoundsYX,
+    region: np.ndarray,
+) -> np.ndarray:
+    out = np.zeros((int(canvas_shape_yx[0]), int(canvas_shape_yx[1]), region.shape[2]), dtype=region.dtype)
+    dst_y0 = int(clipped_bounds.y0 - canvas_bounds.y0)
+    dst_x0 = int(clipped_bounds.x0 - canvas_bounds.x0)
+    out[dst_y0 : dst_y0 + region.shape[0], dst_x0 : dst_x0 + region.shape[1], :] = region
+    return out
+
+
+def _resize_panel_yxc(arr: np.ndarray, output_shape_yx: tuple[int, int]) -> np.ndarray:
+    from skimage.transform import resize
+
+    arr = np.asarray(arr)
+    if arr.ndim == 2:
+        arr = np.repeat(arr[..., None], 3, axis=2)
+    if arr.dtype == bool:
+        arr = arr.astype(np.uint8) * 255
+    resized = resize(
+        arr,
+        (*map(int, output_shape_yx), arr.shape[2]),
+        order=0 if arr.dtype == np.uint8 and np.isin(arr, [0, 255]).all() else 1,
+        preserve_range=True,
+        anti_aliasing=arr.ndim == 3 and max(arr.shape[:2]) > max(output_shape_yx),
+    )
+    return np.clip(resized, 0, 255).astype(np.uint8)
+
+
+def _reference_segmentation_crop(
+    image_yxc: np.ndarray,
+    mask: np.ndarray,
+    *,
+    frame_debug: dict[str, Any],
+) -> np.ndarray:
+    logical = _bounds_from_debug(frame_debug, "logical_frame_seg_yx")
+    clipped = _bounds_from_debug(frame_debug, "clipped_frame_seg_yx")
+    side = int(frame_debug["segmentation_tile_dim"])
+    out = np.zeros((side, side, 3), dtype=np.uint8)
+    if clipped.h <= 0 or clipped.w <= 0:
+        return out
+    region = image_yxc[clipped.y0 : clipped.y1, clipped.x0 : clipped.x1, :3]
+    region_mask = mask[clipped.y0 : clipped.y1, clipped.x0 : clipped.x1]
+    region = np.where(region_mask[..., None], region, 0)
+    dst_y0 = int(clipped.y0 - logical.y0)
+    dst_x0 = int(clipped.x0 - logical.x0)
+    out[dst_y0 : dst_y0 + region.shape[0], dst_x0 : dst_x0 + region.shape[1], :] = region
+    return out
+
+
+def _direct_record_debug_arrays(
+    *,
+    ets_path: Path,
+    source_level: int,
+    source_shape_yx: tuple[int, int],
+    lr_labels: np.ndarray,
+    record: TissueTileRecord,
+    full_source_yxc: np.ndarray | None,
+    readback_yxc: np.ndarray | None,
+    readback_stats: dict[str, Any] | None,
+    max_debug_pixels: int,
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """Materialize one direct ETS record for debug stats and panels when small enough."""
+    if record.frame_debug is None:
+        return {"skipped": "record has no frame_debug"}, {}
+    frame_debug = record.frame_debug
+    canvas = _bounds_from_debug(frame_debug, "logical_canvas_source_yx")
+    clipped = _bounds_from_debug(frame_debug, "clipped_source_yx")
+    label_crop = _bounds_from_debug(frame_debug, "label_crop_seg_yx")
+    canvas_pixels = int(canvas.h * canvas.w)
+    if canvas_pixels > int(max_debug_pixels):
+        return {
+            "skipped": "source canvas exceeds max_debug_pixels",
+            "canvas_pixels": canvas_pixels,
+            "max_debug_pixels": int(max_debug_pixels),
+        }, {}
+
+    region = _read_ets_region_yxc(
+        ets_path,
+        level=int(source_level),
+        x0=clipped.x0,
+        y0=clipped.y0,
+        x1=clipped.x1,
+        y1=clipped.y1,
+    )
+    unmasked = _place_region_in_canvas(
+        canvas_shape_yx=(canvas.h, canvas.w),
+        canvas_bounds=canvas,
+        clipped_bounds=clipped,
+        region=region,
+    )
+    mask_region = project_label_mask_to_source_region(
+        lr_labels,
+        label_id=int(record.label_id),
+        source_region_yx=clipped,
+        label_crop_seg_yx=label_crop,
+        scale_y=float(frame_debug["scale_y"]),
+        scale_x=float(frame_debug["scale_x"]),
+    )
+    mask_canvas = np.zeros((canvas.h, canvas.w), dtype=bool)
+    dst_y0 = int(clipped.y0 - canvas.y0)
+    dst_x0 = int(clipped.x0 - canvas.x0)
+    mask_canvas[dst_y0 : dst_y0 + mask_region.shape[0], dst_x0 : dst_x0 + mask_region.shape[1]] = mask_region
+    masked = np.where(mask_canvas[..., None], unmasked, 0)
+    streamed_tile = record.tile.compute()
+
+    stats: dict[str, Any] = {
+        "frame_debug": frame_debug,
+        "unmasked_source_crop": _array_stats(unmasked),
+        "projected_mask": {
+            **_array_stats(mask_canvas.astype(np.uint8)),
+            "sum": int(mask_canvas.sum()),
+            "mean": float(mask_canvas.mean()) if mask_canvas.size else 0.0,
+        },
+        "masked_source_crop": _array_stats(masked),
+        "tile_before_write": _array_stats(streamed_tile),
+        "streamed_vs_materialized_absdiff": _array_stats(
+            np.abs(streamed_tile.astype(np.int16) - masked.astype(np.int16))
+        ),
+    }
+    if full_source_yxc is not None:
+        full_region = full_source_yxc[clipped.y0 : clipped.y1, clipped.x0 : clipped.x1, :3]
+        full_canvas = _place_region_in_canvas(
+            canvas_shape_yx=(canvas.h, canvas.w),
+            canvas_bounds=canvas,
+            clipped_bounds=clipped,
+            region=full_region,
+        )
+        stats["full_read_source_crop"] = _array_stats(full_canvas)
+        stats["direct_vs_full_unmasked_absdiff"] = _array_stats(
+            np.abs(unmasked.astype(np.int16) - full_canvas.astype(np.int16))
+        )
+    if readback_yxc is not None:
+        stats["ome_zarr_readback_s0"] = readback_stats or _array_stats(readback_yxc)
+        if readback_yxc.shape == streamed_tile.shape:
+            stats["readback_vs_tile_absdiff"] = _array_stats(
+                np.abs(readback_yxc.astype(np.int16) - streamed_tile.astype(np.int16))
+            )
+        else:
+            stats["readback_vs_tile_absdiff"] = {
+                "skipped": "shape mismatch",
+                "readback_shape": list(map(int, readback_yxc.shape)),
+                "tile_shape": list(map(int, streamed_tile.shape)),
+            }
+
+    arrays = {
+        "unmasked": unmasked,
+        "mask": mask_canvas,
+        "masked": masked,
+        "streamed_tile": streamed_tile,
+    }
+    if full_source_yxc is not None:
+        arrays["full_read_source_crop"] = full_canvas
+    if readback_yxc is not None:
+        arrays["ome_zarr_readback_s0"] = readback_yxc
+    return stats, arrays
+
+
+def _write_four_panel_debug(
+    output_path: Path,
+    *,
+    tissue_index: int,
+    reference: np.ndarray,
+    unmasked: np.ndarray,
+    mask: np.ndarray,
+    masked: np.ndarray,
+) -> Path:
+    import imageio.v3 as iio
+
+    target_shape = reference.shape[:2]
+    panels = [
+        reference.astype(np.uint8),
+        _resize_panel_yxc(unmasked, target_shape),
+        _resize_panel_yxc(mask.astype(np.uint8) * 255, target_shape),
+        _resize_panel_yxc(masked, target_shape),
+    ]
+    spacer = np.ones((target_shape[0], 8, 3), dtype=np.uint8) * 255
+    panel = np.concatenate([panels[0], spacer, panels[1], spacer, panels[2], spacer, panels[3]], axis=1)
+    out_path = output_path / f"tissue_{int(tissue_index):02d}_four_panel_debug.png"
+    iio.imwrite(out_path, panel)
+    return out_path
+
+
+def _write_pixel_path_debug(
+    output_path: Path,
+    *,
+    tissue_index: int,
+    full_level: np.ndarray | None,
+    crop_from_full: np.ndarray | None,
+    direct_crop: np.ndarray,
+    readback_or_streamed: np.ndarray,
+    target_shape_yx: tuple[int, int],
+) -> Path:
+    """Write A/B/C/D pixel-path panels for source/readback isolation."""
+    import imageio.v3 as iio
+
+    target_shape = tuple(map(int, target_shape_yx))
+    blank = np.zeros((*target_shape, 3), dtype=np.uint8)
+    full_panel = _resize_panel_yxc(full_level, target_shape) if full_level is not None else blank
+    full_crop_panel = (
+        _resize_panel_yxc(crop_from_full, target_shape) if crop_from_full is not None else blank
+    )
+    panels = [
+        full_panel,
+        full_crop_panel,
+        _resize_panel_yxc(direct_crop, target_shape),
+        _resize_panel_yxc(readback_or_streamed, target_shape),
+    ]
+    spacer = np.ones((target_shape[0], 8, 3), dtype=np.uint8) * 255
+    panel = np.concatenate([panels[0], spacer, panels[1], spacer, panels[2], spacer, panels[3]], axis=1)
+    out_path = output_path / f"tissue_{int(tissue_index):02d}_pixel_path_debug.png"
+    iio.imwrite(out_path, panel)
+    return out_path
+
+
 def diagnose_vsi_replating(
     vsi_path: str | Path,
     output_dir: str | Path | None = None,
     *,
     flat_image_path: str | Path | None = None,
+    readback_ome_zarr: str | Path | None = None,
     source_level: int | str = 7,
     segmentation_level: int | str | None = 7,
+    tile_frame_level: str = "segmentation",
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
+    max_debug_pixels: int = 50_000_000,
 ) -> dict[str, Any]:
     """
     Read only the requested ETS levels and report segmentation/crop diagnostics.
@@ -506,11 +834,13 @@ def diagnose_vsi_replating(
     """
     vsi_path = Path(vsi_path)
     output_path = Path(output_dir) if output_dir is not None else None
+    readback_root = Path(readback_ome_zarr) if readback_ome_zarr is not None else None
     if output_path is not None:
         output_path.mkdir(parents=True, exist_ok=True)
 
     config = segmentation_config or SegmentationConfig()
     tile_cfg = tile_config or TileConfig()
+    tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
 
     ets_path = find_ets_file(vsi_path)
     if ets_path is None:
@@ -541,6 +871,7 @@ def diagnose_vsi_replating(
         struct_elem_px=config.struct_elem_px,
     )
     ets_mask = np.asarray(ets_mask, dtype=bool)
+    lr_labels = _filled_lr_labels(ets_mask)
     tile_records, tile_dim = _direct_ets_tissue_tile_records(
         ets_path=ets_path,
         source_level=source_idx,
@@ -549,10 +880,32 @@ def diagnose_vsi_replating(
         chunk=tile_cfg.chunk_size,
         pad_multiple=tile_cfg.pad_multiple,
         extra_margin_px=tile_cfg.extra_margin_px,
+        tile_frame_level=tile_frame_level,
     )
+    scale_y = float(source_shape_yx[0] / ets_mask.shape[0])
+    scale_x = float(source_shape_yx[1] / ets_mask.shape[1])
+    nominal_scale = float(2 ** (int(segmentation_idx) - int(source_idx)))
+    first_record = tile_records[0] if tile_records else None
+    source_tile_dim = int(first_record.source_tile_dim or first_record.tile_dim) if first_record else int(tile_dim)
+    segmentation_tile_dim = (
+        int(first_record.segmentation_tile_dim)
+        if first_record and first_record.segmentation_tile_dim is not None
+        else int(np.ceil(source_tile_dim / max(scale_y, scale_x)))
+        if source_tile_dim
+        else 0
+    )
+    effective_segmentation_tile_dim = (
+        float(source_tile_dim / max(scale_y, scale_x)) if source_tile_dim else 0.0
+    )
+    full_source_yxc: np.ndarray | None = None
+    if int(source_shape_yx[0]) * int(source_shape_yx[1]) <= int(max_debug_pixels):
+        with ETSFile(ets_path) as ets:
+            full_source_yxc = ets.read_level(source_idx)
 
     flat_summary: dict[str, Any] | None = None
     comparison: dict[str, Any] | None = None
+    reference_image_yxc = segmentation_yxc
+    reference_mask = ets_mask
     if flat_image_path is not None:
         import imageio.v3 as iio
 
@@ -566,6 +919,8 @@ def diagnose_vsi_replating(
             struct_elem_px=config.struct_elem_px,
         )
         flat_mask = np.asarray(flat_mask, dtype=bool)
+        reference_image_yxc = flat_yxc
+        reference_mask = flat_mask
         flat_summary = {
             "path": str(flat_path),
             "shape": list(map(int, flat_yxc.shape)),
@@ -578,12 +933,100 @@ def diagnose_vsi_replating(
         if output_path is not None:
             iio.imwrite(output_path / "flat_overlay.png", _to_overlay_rgb(flat_yxc, flat_mask))
 
+    debug_rows: list[dict[str, Any]] = []
+    four_panel_paths: list[str] = []
+    pixel_path_panel_paths: list[str] = []
+    for record in tile_records:
+        readback_yxc: np.ndarray | None = None
+        readback_stats: dict[str, Any] | None = None
+        readback_path = _resolve_readback_ome_zarr_path(
+            readback_root,
+            tissue_index=record.tissue_index,
+        )
+        if readback_path is not None:
+            readback_yxc, readback_stats = _read_ome_zarr_s0_yxc(
+                readback_path,
+                max_debug_pixels=max_debug_pixels,
+            )
+            if readback_stats is not None:
+                readback_stats["path"] = str(readback_path)
+
+        debug_stats, debug_arrays = _direct_record_debug_arrays(
+            ets_path=ets_path,
+            source_level=source_idx,
+            source_shape_yx=source_shape_yx,
+            lr_labels=lr_labels,
+            record=record,
+            full_source_yxc=full_source_yxc,
+            readback_yxc=readback_yxc,
+            readback_stats=readback_stats,
+            max_debug_pixels=max_debug_pixels,
+        )
+        if readback_root is not None and readback_path is None:
+            debug_stats["ome_zarr_readback_s0"] = {
+                "skipped": f"no readback OME-Zarr found for tissue {int(record.tissue_index)}",
+                "readback_root": str(readback_root),
+            }
+        debug_rows.append(
+            {
+                "tissue_index": int(record.tissue_index),
+                "label_id": int(record.label_id),
+                **debug_stats,
+            }
+        )
+        if output_path is not None and record.tissue_index == 0 and debug_arrays:
+            reference = _reference_segmentation_crop(
+                reference_image_yxc,
+                reference_mask,
+                frame_debug=record.frame_debug or {},
+            )
+            four_panel_path = _write_four_panel_debug(
+                output_path,
+                tissue_index=record.tissue_index,
+                reference=reference,
+                unmasked=debug_arrays["unmasked"],
+                mask=debug_arrays["mask"],
+                masked=debug_arrays["masked"],
+            )
+            four_panel_paths.append(str(four_panel_path))
+            pixel_reference_shape = reference.shape[:2]
+            pixel_path = _write_pixel_path_debug(
+                output_path,
+                tissue_index=record.tissue_index,
+                full_level=full_source_yxc,
+                crop_from_full=debug_arrays.get("full_read_source_crop"),
+                direct_crop=debug_arrays["unmasked"],
+                readback_or_streamed=debug_arrays.get(
+                    "ome_zarr_readback_s0",
+                    debug_arrays["streamed_tile"],
+                ),
+                target_shape_yx=pixel_reference_shape,
+            )
+            pixel_path_panel_paths.append(str(pixel_path))
+
     result: dict[str, Any] = {
         "vsi_path": str(vsi_path),
         "ets_path": str(ets_path),
         "source_level": int(source_idx),
         "segmentation_level": int(segmentation_idx),
+        "tile_frame_level": str(tile_frame_level),
         "source_shape_yx": list(source_shape_yx),
+        "source_full_read_level": _array_stats(full_source_yxc)
+        if full_source_yxc is not None
+        else {
+            "skipped": "source level exceeds max_debug_pixels",
+            "source_pixels": int(source_shape_yx[0]) * int(source_shape_yx[1]),
+            "max_debug_pixels": int(max_debug_pixels),
+        },
+        "readback_ome_zarr": str(readback_root) if readback_root is not None else None,
+        "scale_y": scale_y,
+        "scale_x": scale_x,
+        "nominal_power_of_two_scale": nominal_scale,
+        "source_tile_dim": source_tile_dim,
+        "segmentation_tile_dim": segmentation_tile_dim,
+        "effective_segmentation_tile_dim": effective_segmentation_tile_dim,
+        "notebook_equivalent_frame": str(tile_frame_level).strip().lower().replace("_", "-")
+        == "segmentation",
         "ets_segmentation_input": {
             "shape": list(map(int, segmentation_yxc.shape)),
             "dtype": str(segmentation_yxc.dtype),
@@ -594,6 +1037,12 @@ def diagnose_vsi_replating(
         "flat_input": flat_summary,
         "comparison": comparison,
         "tile_dim": int(tile_dim),
+        "debug_sidecars": {
+            "diagnostics_json": str(output_path / "diagnostics.json") if output_path is not None else None,
+            "four_panel_pngs": four_panel_paths,
+            "pixel_path_pngs": pixel_path_panel_paths,
+        },
+        "debug_rows": debug_rows,
         "tile_records": [
             {
                 "tissue_index": int(record.tissue_index),
@@ -601,6 +1050,16 @@ def diagnose_vsi_replating(
                 "crop_bounds_source_level": list(record.crop_bounds_source_level),
                 "crop_bounds_segmentation_level": list(record.crop_bounds_segmentation_level),
                 "tile_dim": int(record.tile_dim),
+                "frame_debug": record.frame_debug,
+                "source_tile_dim": int(record.source_tile_dim or record.tile_dim),
+                "segmentation_tile_dim": int(
+                    record.segmentation_tile_dim
+                    if record.segmentation_tile_dim is not None
+                    else segmentation_tile_dim
+                ),
+                "effective_segmentation_tile_dim": float(
+                    (record.source_tile_dim or record.tile_dim) / max(scale_y, scale_x)
+                ),
             }
             for record in tile_records
         ],
@@ -736,6 +1195,7 @@ def process_vsi_with_direct_plating(
     segment_fn=None,
     source_level: int | str = 0,
     segmentation_level: int | str | None = None,
+    tile_frame_level: str = "segmentation",
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
     metadata_backend: str = "auto",
@@ -759,6 +1219,7 @@ def process_vsi_with_direct_plating(
     vsi_path = Path(vsi_path)
     out_ngff_dir = Path(out_ngff_dir)
     out_ngff_dir.mkdir(parents=True, exist_ok=True)
+    tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
 
     ets_path = find_ets_file(vsi_path)
     if ets_path is None:
@@ -825,6 +1286,7 @@ def process_vsi_with_direct_plating(
         chunk=plate_chunk_xy,
         pad_multiple=tile_pad_multiple,
         extra_margin_px=tile_extra_margin_px,
+        tile_frame_level=tile_frame_level,
     )
     if not tile_records:
         logger.warning("[%s] no tissue regions found.", vsi_path.name)
@@ -984,6 +1446,7 @@ def process_vsi_directory_with_plating(
     per_tissue_dir: str | Path | None = None,
     source_level: int | str = 0,
     segmentation_level: int | str | None = 7,
+    tile_frame_level: str = "segmentation",
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
     metadata_backend: str = "auto",
@@ -1010,6 +1473,7 @@ def process_vsi_directory_with_plating(
     if materialize_source:
         source_ome_zarr_dir.mkdir(parents=True, exist_ok=True)
     per_tissue_dir.mkdir(parents=True, exist_ok=True)
+    tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
 
     results: dict[str, list[Path]] = {}
     vsi_paths = sorted(input_dir.glob(pattern))
@@ -1035,6 +1499,7 @@ def process_vsi_directory_with_plating(
                 per_tissue_dir,
                 source_level=source_level,
                 segmentation_level=segmentation_level,
+                tile_frame_level=tile_frame_level,
                 segmentation_config=segmentation_config,
                 tile_config=tile_config,
                 parallel=parallel,
@@ -1057,6 +1522,7 @@ def process_vsi_directory_with_plating(
                 per_tissue_dir,
                 source_level=source_level,
                 segmentation_level=segmentation_level,
+                tile_frame_level=tile_frame_level,
                 segmentation_config=segmentation_config,
                 tile_config=tile_config,
                 metadata_backend=metadata_backend,

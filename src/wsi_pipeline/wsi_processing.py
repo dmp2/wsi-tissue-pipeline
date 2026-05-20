@@ -523,6 +523,7 @@ def extract_tissue_tiles(
     tiles, _tile_dim = generate_tissue_tiles(
         s0_cyx=s0_cyx,
         low_res_filled=np.asarray(mask, dtype=bool),
+        tile_frame_level="source",
         chunk=chunk_size,
         pad_multiple=pad_multiple,
         extra_margin_px=extra_margin_px,

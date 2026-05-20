@@ -21,6 +21,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 logger = logging.getLogger(__name__)
 
+NGFF_THUMBNAIL_FULL_RES_MAX_PIXELS = 25_000_000
+NGFF_STATS_FULL_RES_MAX_PIXELS = 50_000_000
+
 # Try to import torch for faster grid generation
 try:
     import torch
@@ -119,6 +122,14 @@ class QCArtifacts:
 class QCWorkflowResult:
     records: list[QCRecord]
     artifacts: QCArtifacts
+
+
+@dataclass(frozen=True)
+class NGFFLevelSelection:
+    dataset_path: str
+    axes: tuple[str, ...] | None
+    raw_shape: tuple[int, ...]
+    array_yxc: np.ndarray
 
 
 def find_images(
@@ -280,7 +291,30 @@ def _ngff_dataset_paths(path: Path) -> list[str]:
     return [str(dataset["path"]) for dataset in datasets]
 
 
-def _array_yx_shape(shape: tuple[int, ...]) -> tuple[int, int]:
+def _ngff_axes(path: Path) -> tuple[str, ...] | None:
+    """Return NGFF axis names for the first multiscales entry when available."""
+    root = zarr.open_group(str(path), mode="r")
+    multiscales = root.attrs.get("multiscales")
+    if not isinstance(multiscales, list) or not multiscales:
+        return None
+    axes = multiscales[0].get("axes")
+    if not isinstance(axes, list):
+        return None
+    names: list[str] = []
+    for axis in axes:
+        if isinstance(axis, dict):
+            name = axis.get("name")
+        else:
+            name = axis
+        if name is None:
+            return None
+        names.append(str(name).lower())
+    return tuple(names)
+
+
+def _array_yx_shape(shape: tuple[int, ...], axes: tuple[str, ...] | None = None) -> tuple[int, int]:
+    if axes is not None and len(axes) == len(shape) and "y" in axes and "x" in axes:
+        return int(shape[axes.index("y")]), int(shape[axes.index("x")])
     if len(shape) == 2:
         return int(shape[0]), int(shape[1])
     if len(shape) != 3:
@@ -290,10 +324,29 @@ def _array_yx_shape(shape: tuple[int, ...]) -> tuple[int, int]:
     return int(shape[0]), int(shape[1])
 
 
-def _to_display_uint8(arr: np.ndarray) -> np.ndarray:
+def _to_yxc_array(arr: np.ndarray, axes: tuple[str, ...] | None = None) -> np.ndarray:
+    """Normalize NGFF/image arrays to YXC or YX before display/statistics."""
     arr = np.asarray(arr)
-    if arr.ndim == 3 and arr.shape[0] in (1, 3, 4) and arr.shape[-1] not in (1, 3, 4):
-        arr = np.moveaxis(arr, 0, -1)
+    if axes is not None and len(axes) == arr.ndim and "y" in axes and "x" in axes:
+        y_axis = axes.index("y")
+        x_axis = axes.index("x")
+        c_axis = axes.index("c") if "c" in axes else None
+        if c_axis is None:
+            return np.moveaxis(arr, (y_axis, x_axis), (0, 1))
+        return np.moveaxis(arr, (y_axis, x_axis, c_axis), (0, 1, 2))
+
+    if arr.ndim == 3:
+        if arr.shape[-1] in (1, 3, 4) and not (
+            arr.shape[0] in (1, 3, 4) and arr.shape[1] > 4
+        ):
+            return arr
+        if arr.shape[0] in (1, 3, 4):
+            return np.moveaxis(arr, 0, -1)
+    return arr
+
+
+def _to_display_uint8(arr: np.ndarray, axes: tuple[str, ...] | None = None) -> np.ndarray:
+    arr = _to_yxc_array(arr, axes)
     if arr.ndim == 3 and arr.shape[-1] == 1:
         arr = arr[:, :, 0]
 
@@ -310,25 +363,97 @@ def _to_display_uint8(arr: np.ndarray) -> np.ndarray:
     return np.nan_to_num(arr_f, nan=0.0).clip(0, 255).astype(np.uint8)
 
 
-def _load_ngff_level_array(path: Path, *, preferred_size: int = 512) -> np.ndarray:
+def _choose_ngff_dataset_path(
+    path: Path,
+    *,
+    preferred_size: int,
+    prefer_full_resolution: bool = False,
+    max_full_res_pixels: int | None = None,
+) -> str:
     dataset_paths = _ngff_dataset_paths(path)
+    axes = _ngff_axes(path)
+    if prefer_full_resolution and dataset_paths:
+        first = dataset_paths[0]
+        arr = zarr.open_array(str(path / first), mode="r")
+        y, x = _array_yx_shape(tuple(arr.shape), axes)
+        if max_full_res_pixels is None or int(y) * int(x) <= int(max_full_res_pixels):
+            return first
+
     chosen = dataset_paths[-1]
     for dataset_path in reversed(dataset_paths):
         arr = zarr.open_array(str(path / dataset_path), mode="r")
-        y, x = _array_yx_shape(tuple(arr.shape))
+        y, x = _array_yx_shape(tuple(arr.shape), axes)
         if max(y, x) >= preferred_size:
             chosen = dataset_path
             break
-    return np.asarray(zarr.open_array(str(path / chosen), mode="r")[...])
+    return chosen
+
+
+def _load_ngff_level(
+    path: Path,
+    *,
+    preferred_size: int = 512,
+    prefer_full_resolution: bool = False,
+    max_full_res_pixels: int | None = None,
+) -> NGFFLevelSelection:
+    axes = _ngff_axes(path)
+    chosen = _choose_ngff_dataset_path(
+        path,
+        preferred_size=preferred_size,
+        prefer_full_resolution=prefer_full_resolution,
+        max_full_res_pixels=max_full_res_pixels,
+    )
+    arr = zarr.open_array(str(path / chosen), mode="r")
+    raw = np.asarray(arr[...])
+    return NGFFLevelSelection(
+        dataset_path=chosen,
+        axes=axes,
+        raw_shape=tuple(map(int, raw.shape)),
+        array_yxc=_to_yxc_array(raw, axes),
+    )
+
+
+def _load_ngff_level_array(path: Path, *, preferred_size: int = 512) -> np.ndarray:
+    return _load_ngff_level(path, preferred_size=preferred_size).array_yxc
 
 
 def _load_ngff_thumbnail(path: Path, *, size: int, mode: str) -> Image.Image:
-    arr = _to_display_uint8(_load_ngff_level_array(path, preferred_size=size))
+    selection = _load_ngff_level(
+        path,
+        preferred_size=size,
+        prefer_full_resolution=True,
+        max_full_res_pixels=NGFF_THUMBNAIL_FULL_RES_MAX_PIXELS,
+    )
+    arr = _to_display_uint8(selection.array_yxc)
     img = Image.fromarray(arr)
     if img.mode != mode:
         img = img.convert(mode)
     img.thumbnail((size, size), Image.BICUBIC)
     return img.copy()
+
+
+def _channel_stats(arr: np.ndarray) -> dict[str, float | bool]:
+    arr = np.asarray(arr)
+    if arr.ndim != 3 or arr.shape[-1] < 3:
+        return {}
+    rgb = arr[..., :3].reshape(-1, 3).astype(np.float64)
+    absdiffs = {
+        "rg": float(np.mean(np.abs(rgb[:, 0] - rgb[:, 1]))),
+        "rb": float(np.mean(np.abs(rgb[:, 0] - rgb[:, 2]))),
+        "gb": float(np.mean(np.abs(rgb[:, 1] - rgb[:, 2]))),
+    }
+    return {
+        "image_mean_red": float(rgb[:, 0].mean()),
+        "image_mean_green": float(rgb[:, 1].mean()),
+        "image_mean_blue": float(rgb[:, 2].mean()),
+        "image_std_red": float(rgb[:, 0].std()),
+        "image_std_green": float(rgb[:, 1].std()),
+        "image_std_blue": float(rgb[:, 2].std()),
+        "channel_absdiff_rg": absdiffs["rg"],
+        "channel_absdiff_rb": absdiffs["rb"],
+        "channel_absdiff_gb": absdiffs["gb"],
+        "channels_nearly_identical": bool(max(absdiffs.values()) <= 2.0),
+    }
 
 
 def annotate_image(
@@ -529,9 +654,10 @@ def _normalize_backend(backend: str) -> str:
 
 def _image_size(path: Path) -> tuple[int, int]:
     if _is_ome_zarr_path(path):
+        axes = _ngff_axes(path)
         dataset_path = _ngff_dataset_paths(path)[0]
         arr = zarr.open_array(str(path / dataset_path), mode="r")
-        y, x = _array_yx_shape(tuple(arr.shape))
+        y, x = _array_yx_shape(tuple(arr.shape), axes)
         return x, y
     with Image.open(path) as img:
         return img.width, img.height
@@ -828,45 +954,54 @@ def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataF
     for record in records:
         path = record.path(input_dir)
         if _is_ome_zarr_path(path):
-            arr = _to_display_uint8(_load_ngff_level_array(path, preferred_size=512))
-            rows.append(
-                {
-                    "relative_path": record.relative_path,
-                    "filename": record.filename,
-                    "source_image": record.source_image,
-                    "tile_index_on_source": record.tile_index_on_source,
-                    "overall_index": record.overall_index,
-                    "overall_label": record.overall_label,
-                    "width": record.width,
-                    "height": record.height,
-                    "area_px": record.width * record.height,
-                    "image_mean_intensity": float(arr.mean()),
-                    "image_std_intensity": float(arr.std()),
-                    "artifact_likely": _record_artifact_likely(record),
-                    "artifact_reason": _record_artifact_reason(record),
-                }
+            selection = _load_ngff_level(
+                path,
+                preferred_size=512,
+                prefer_full_resolution=True,
+                max_full_res_pixels=NGFF_STATS_FULL_RES_MAX_PIXELS,
             )
+            arr = _to_display_uint8(selection.array_yxc)
+            row = {
+                "relative_path": record.relative_path,
+                "filename": record.filename,
+                "source_image": record.source_image,
+                "tile_index_on_source": record.tile_index_on_source,
+                "overall_index": record.overall_index,
+                "overall_label": record.overall_label,
+                "width": record.width,
+                "height": record.height,
+                "area_px": record.width * record.height,
+                "image_mean_intensity": float(arr.mean()),
+                "image_std_intensity": float(arr.std()),
+                "ngff_dataset_path": selection.dataset_path,
+                "ngff_axes": ",".join(selection.axes) if selection.axes is not None else "",
+                "ngff_raw_shape": "x".join(str(dim) for dim in selection.raw_shape),
+                "artifact_likely": _record_artifact_likely(record),
+                "artifact_reason": _record_artifact_reason(record),
+            }
+            row.update(_channel_stats(arr))
+            rows.append(row)
             continue
 
         with Image.open(path) as img:
             arr = np.asarray(img)
-            rows.append(
-                {
-                    "relative_path": record.relative_path,
-                    "filename": record.filename,
-                    "source_image": record.source_image,
-                    "tile_index_on_source": record.tile_index_on_source,
-                    "overall_index": record.overall_index,
-                    "overall_label": record.overall_label,
-                    "width": img.width,
-                    "height": img.height,
-                    "area_px": img.width * img.height,
-                    "image_mean_intensity": float(arr.mean()),
-                    "image_std_intensity": float(arr.std()),
-                    "artifact_likely": _record_artifact_likely(record),
-                    "artifact_reason": _record_artifact_reason(record),
-                }
-            )
+            row = {
+                "relative_path": record.relative_path,
+                "filename": record.filename,
+                "source_image": record.source_image,
+                "tile_index_on_source": record.tile_index_on_source,
+                "overall_index": record.overall_index,
+                "overall_label": record.overall_label,
+                "width": img.width,
+                "height": img.height,
+                "area_px": img.width * img.height,
+                "image_mean_intensity": float(arr.mean()),
+                "image_std_intensity": float(arr.std()),
+                "artifact_likely": _record_artifact_likely(record),
+                "artifact_reason": _record_artifact_reason(record),
+            }
+            row.update(_channel_stats(arr))
+            rows.append(row)
             component_qc = _record_component_qc(record)
             if component_qc:
                 rows[-1].update(

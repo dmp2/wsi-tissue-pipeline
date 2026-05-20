@@ -209,8 +209,8 @@ class TileConfig(BaseModel):
         default=0,
         ge=0,
         description=(
-            "Extra padding (px, at full resolution) added around each tissue bounding box "
-            "before writing. Useful to avoid clipping edge tissue."
+            "Extra padding (px, at the selected tile frame level) added around each tissue "
+            "bounding box before writing. Useful to avoid clipping edge tissue."
         ),
     )
 

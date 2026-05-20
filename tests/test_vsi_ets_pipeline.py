@@ -235,6 +235,7 @@ def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(mo
     assert all(len(paths) == 2 for paths in results.values())
     assert [call["source_level"] for call in plating_calls] == [0, 0]
     assert [call["segmentation_level"] for call in plating_calls] == [7, 7]
+    assert [call["tile_frame_level"] for call in plating_calls] == ["segmentation", "segmentation"]
     assert plating_calls[0]["source_context"]["source_vsi"] == str(vsi_a)
     assert plating_calls[0]["source_context"]["source_ets"] == "/ets/a.ets"
 
@@ -277,6 +278,7 @@ def test_process_vsi_directory_with_plating_uses_direct_ets_by_default(monkeypat
     assert direct_calls[0]["vsi_path"] == vsi_path
     assert direct_calls[0]["source_level"] == 0
     assert direct_calls[0]["segmentation_level"] == 7
+    assert direct_calls[0]["tile_frame_level"] == "segmentation"
 
 
 def test_direct_ets_tissue_tile_records_read_only_tissue_blocks(monkeypatch, tmp_path):
@@ -303,6 +305,7 @@ def test_direct_ets_tissue_tile_records_read_only_tissue_blocks(monkeypatch, tmp
         chunk=2,
         pad_multiple=2,
         extra_margin_px=0,
+        tile_frame_level="source",
     )
 
     assert tile_dim == 4
@@ -345,6 +348,7 @@ def _assert_direct_ets_records_match_shared_generator(
     shared_records, shared_dim = generate_tissue_tile_records(
         s0_cyx=da.from_array(np.moveaxis(source_yxc, -1, 0), chunks=(3, 4, 4)),
         low_res_filled=mask,
+        tile_frame_level="source",
         chunk=4,
         pad_multiple=4,
         extra_margin_px=0,
@@ -357,6 +361,7 @@ def _assert_direct_ets_records_match_shared_generator(
         chunk=4,
         pad_multiple=4,
         extra_margin_px=0,
+        tile_frame_level="source",
     )
 
     assert direct_dim == shared_dim
@@ -392,6 +397,77 @@ def test_direct_ets_tissue_tile_records_match_shared_generator_cross_level(
     )
 
 
+def test_direct_ets_tissue_tile_records_can_frame_at_segmentation_level(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    source_yxc = np.zeros((80, 160, 3), dtype=np.uint8)
+
+    def _fake_read_region(_ets_path, *, level, x0, y0, x1, y1):  # noqa: ARG001
+        return source_yxc[y0:y1, x0:x1, :]
+
+    monkeypatch.setattr(vsi_ets, "_read_ets_region_yxc", _fake_read_region)
+    mask = np.zeros((40, 80), dtype=bool)
+    mask[12:32, 20:60] = True
+
+    records, tile_dim = vsi_ets._direct_ets_tissue_tile_records(
+        ets_path=tmp_path / "fake.ets",
+        source_level=6,
+        source_shape_yx=(80, 160),
+        low_res_filled=mask,
+        chunk=16,
+        pad_multiple=16,
+        extra_margin_px=0,
+        tile_frame_level="segmentation",
+    )
+
+    assert tile_dim == 96
+    assert len(records) == 1
+    assert records[0].segmentation_tile_dim == 48
+    assert records[0].source_tile_dim == 96
+    assert records[0].crop_bounds_segmentation_level == (16, 0, 64, 40)
+    assert records[0].crop_bounds_source_level == (32, 0, 128, 80)
+    assert records[0].tile.shape == (96, 96, 3)
+
+
+def test_array_stats_flags_channel_collapsed_pixels():
+    from wsi_pipeline.pipeline import vsi_ets
+
+    gray = np.repeat(np.arange(16, dtype=np.uint8).reshape(4, 4, 1), 3, axis=2)
+    stats = vsi_ets._array_stats(gray)
+
+    assert stats["channel_means"] == [7.5, 7.5, 7.5]
+    assert stats["channel_absdiff_means"] == {"rg": 0.0, "rb": 0.0, "gb": 0.0}
+    assert stats["channels_nearly_identical"] is True
+
+
+def test_read_ome_zarr_s0_yxc_reports_rgb_channel_stats(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+
+    from wsi_pipeline.pipeline import vsi_ets
+
+    root = tmp_path / "tile.ome.zarr"
+    data = np.zeros((3, 4, 4), dtype=np.uint8)
+    data[0, :, :] = 10
+    data[1, :, :] = 20
+    data[2, :, :] = 30
+
+    class _FakeArray:
+        shape = data.shape
+
+        def __getitem__(self, key):
+            return data[key]
+
+    monkeypatch_module = SimpleNamespace(open_array=lambda *args, **kwargs: _FakeArray())
+    monkeypatch.setitem(sys.modules, "zarr", monkeypatch_module)
+
+    readback, stats = vsi_ets._read_ome_zarr_s0_yxc(root, max_debug_pixels=100)
+
+    assert readback.shape == (4, 4, 3)
+    assert stats["channel_means"] == [10.0, 20.0, 30.0]
+    assert stats["channels_nearly_identical"] is False
+
+
 def test_diagnose_vsi_replating_writes_lightweight_outputs(monkeypatch, tmp_path):
     from wsi_pipeline.pipeline import vsi_ets
 
@@ -417,8 +493,8 @@ def test_diagnose_vsi_replating_writes_lightweight_outputs(monkeypatch, tmp_path
             return [(16, 32), (8, 16), (4, 8)][level]
 
         def read_level(self, level):
-            assert level == 2
-            arr = np.zeros((4, 8, 3), dtype=np.uint8)
+            shape = self.level_shape(level)
+            arr = np.zeros((*shape, 3), dtype=np.uint8)
             arr[..., 0] = 120
             arr[..., 1] = 80
             arr[..., 2] = 40
@@ -435,6 +511,12 @@ def test_diagnose_vsi_replating_writes_lightweight_outputs(monkeypatch, tmp_path
     monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
     monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
     monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
+    monkeypatch.setattr(
+        vsi_ets,
+        "_read_ets_region_yxc",
+        lambda _ets_path, *, level, x0, y0, x1, y1: np.ones((y1 - y0, x1 - x0, 3), dtype=np.uint8)
+        * 100,
+    )
 
     result = vsi_ets.diagnose_vsi_replating(
         vsi_path,
@@ -447,5 +529,10 @@ def test_diagnose_vsi_replating_writes_lightweight_outputs(monkeypatch, tmp_path
     assert (tmp_path / "diag" / "ets_overlay.png").is_file()
     assert result["source_level"] == 1
     assert result["segmentation_level"] == 2
+    assert result["tile_frame_level"] == "segmentation"
+    assert result["source_tile_dim"] == 1024
+    assert result["segmentation_tile_dim"] == 512
+    assert result["effective_segmentation_tile_dim"] == 512.0
+    assert result["notebook_equivalent_frame"] is True
     assert result["ets_segmentation_input"]["component_count"] == 2
     assert [record["tissue_index"] for record in result["tile_records"]] == [0, 1]

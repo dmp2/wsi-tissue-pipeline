@@ -473,6 +473,11 @@ def doctor(strict: bool):
     help="Optional flat level image to compare against the ETS path.",
 )
 @click.option(
+    "--readback-ome-zarr",
+    type=click.Path(exists=True, path_type=Path),
+    help="Optional tissue OME-Zarr path, or directory of tissue OME-Zarrs, for s0 readback comparison.",
+)
+@click.option(
     "--source-level",
     default="7",
     show_default=True,
@@ -485,6 +490,13 @@ def doctor(strict: bool):
     help="ETS level used for segmentation.",
 )
 @click.option(
+    "--tile-frame-level",
+    default="segmentation",
+    show_default=True,
+    type=click.Choice(["segmentation", "source"]),
+    help="Coordinate level where crop size, padding, and margin are defined.",
+)
+@click.option(
     "--config",
     "-c",
     "config_path",
@@ -495,8 +507,10 @@ def diagnose_vsi_replating_cmd(
     vsi_path: Path,
     output_dir: Path,
     flat_image: Path | None,
+    readback_ome_zarr: Path | None,
     source_level: str,
     segmentation_level: str,
+    tile_frame_level: str,
     config_path: Path | None,
 ):
     """Run a no-full-rerun VSI/ETS segmentation and crop diagnostic."""
@@ -507,8 +521,10 @@ def diagnose_vsi_replating_cmd(
         vsi_path,
         output_dir,
         flat_image_path=flat_image,
+        readback_ome_zarr=readback_ome_zarr,
         source_level=source_level,
         segmentation_level=segmentation_level,
+        tile_frame_level=tile_frame_level,
         segmentation_config=config.segmentation,
         tile_config=config.tiles,
     )
@@ -518,9 +534,18 @@ def diagnose_vsi_replating_cmd(
         "[bold blue]ETS components:[/] "
         f"{ets_summary['component_count']} at level {result['segmentation_level']}"
     )
+    console.print(
+        "[bold blue]Frame:[/] "
+        f"{result['tile_frame_level']} "
+        f"source_tile_dim={result['source_tile_dim']} "
+        f"effective_segmentation_tile_dim={result['effective_segmentation_tile_dim']:.2f}"
+    )
     if result.get("comparison"):
         iou = result["comparison"]["flat_vs_ets_mask"]["iou"]
         console.print(f"[bold blue]Flat/ETS mask IoU:[/] {iou:.4f}")
+    pixel_paths = result.get("debug_sidecars", {}).get("pixel_path_pngs") or []
+    if pixel_paths:
+        console.print(f"[bold blue]Pixel path debug:[/] {pixel_paths[0]}")
 
 
 @main.command()

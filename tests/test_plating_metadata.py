@@ -241,6 +241,76 @@ def test_tile_metadata_projection_uses_selected_source_level_scale():
     assert datasets[1]["coordinateTransformations"][0]["scale"] == [1.0, 8.0, 4.0]
 
 
+def test_tissue_frame_debug_sidecar_is_separate_from_manifest(tmp_path):
+    record = plating_mod.TissueTileRecord(
+        tile=da.from_array(np.zeros((4, 4, 3), dtype=np.uint8), chunks=(4, 4, 3)),
+        tissue_index=0,
+        label_id=1,
+        crop_bounds_source_level=(0, 0, 4, 4),
+        crop_bounds_segmentation_level=(0, 0, 2, 2),
+        tile_dim=4,
+        frame_debug={
+            "logical_canvas_source_yx": {"y0": 0, "x0": 0, "y1": 4, "x1": 4, "h": 4, "w": 4},
+            "clipped_source_yx": {"y0": 0, "x0": 0, "y1": 4, "x1": 4, "h": 4, "w": 4},
+        },
+    )
+    out_dir = tmp_path / "tile.ome.zarr"
+    out_dir.mkdir()
+
+    plating_mod._write_tissue_frame_debug(
+        out_dir,
+        record=record,
+        source_level=6,
+        segmentation_level=7,
+    )
+
+    debug = json.loads((out_dir / "tissue_frame_debug.json").read_text(encoding="utf-8"))
+    assert debug["source_level"] == 6
+    assert debug["segmentation_level"] == 7
+    assert debug["frame_debug"]["logical_canvas_source_yx"]["h"] == 4
+    assert not (out_dir / "tissue_manifest.json").exists()
+
+
+def test_tissue_manifest_includes_logical_canvas_and_padding_when_available(tmp_path):
+    record = plating_mod.TissueTileRecord(
+        tile=da.from_array(np.zeros((4, 4, 3), dtype=np.uint8), chunks=(4, 4, 3)),
+        tissue_index=2,
+        label_id=7,
+        crop_bounds_source_level=(0, 0, 4, 4),
+        crop_bounds_segmentation_level=(10, 20, 12, 22),
+        tile_dim=4,
+        frame_debug={
+            "tile_frame_level": "segmentation",
+            "logical_canvas_source_yx": {"y0": -1, "x0": -2, "y1": 5, "x1": 6},
+            "clipped_source_yx": {"y0": 0, "x0": 0, "y1": 4, "x1": 4},
+            "logical_frame_seg_yx": {"y0": 20, "x0": 10, "y1": 23, "x1": 13},
+            "clipped_frame_seg_yx": {"y0": 20, "x0": 10, "y1": 22, "x1": 12},
+            "padding_source_level": {"top": 1, "bottom": 1, "left": 2, "right": 2},
+        },
+    )
+    out_dir = tmp_path / "tile.ome.zarr"
+    out_dir.mkdir()
+
+    plating_mod._write_tissue_manifest(
+        out_dir,
+        record=record,
+        source_context={"source_vsi": "/data/source.vsi", "source_ets": "/data/source.ets"},
+        source_ome_zarr=None,
+        source_level=6,
+        segmentation_level=7,
+        phys_xy_um=(2.0, 3.0),
+    )
+
+    manifest = json.loads((out_dir / "tissue_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["crop_bounds_source_level"] == [0, 0, 4, 4]
+    assert manifest["logical_crop_bounds_source_level"] == [-2, -1, 6, 5]
+    assert manifest["clipped_crop_bounds_source_level"] == [0, 0, 4, 4]
+    assert manifest["logical_crop_bounds_segmentation_level"] == [10, 20, 13, 23]
+    assert manifest["clipped_crop_bounds_segmentation_level"] == [10, 20, 12, 22]
+    assert manifest["padding_source_level"] == {"top": 1, "bottom": 1, "left": 2, "right": 2}
+    assert manifest["tile_frame_level"] == "segmentation"
+
+
 def test_plating_vsi_context_fetches_metadata_once(monkeypatch, tmp_path):
     payload = _make_metadata_payload()
     call_counter = {"count": 0}

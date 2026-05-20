@@ -447,6 +447,67 @@ def test_run_qc_workflow_consumes_tissue_ome_zarr_manifests(monkeypatch, temp_di
     }
 
 
+def test_ome_zarr_qc_uses_axes_and_s0_for_small_stats(monkeypatch, temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    input_dir = temp_dir / "per_tissue_ngff"
+    input_dir.mkdir()
+    output_dir = input_dir / "_qc_grids"
+
+    _write_tissue_ome_zarr(input_dir / "source_tissue_00.ome.zarr", value=0, tissue_index=0)
+
+    class _FakeRoot:
+        attrs = {
+            "multiscales": [
+                {
+                    "axes": [
+                        {"name": "c", "type": "channel"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"},
+                    ],
+                    "datasets": [
+                        {"path": "s0", "coordinateTransformations": []},
+                        {"path": "s1", "coordinateTransformations": []},
+                    ],
+                }
+            ]
+        }
+
+    class _FakeArray:
+        def __init__(self, path: str):
+            if path.endswith("s0"):
+                self.data = np.zeros((3, 8, 10), dtype=np.uint8)
+                self.data[0, :, :] = 10
+                self.data[1, :, :] = 20
+                self.data[2, :, :] = 30
+            else:
+                self.data = np.full((3, 4, 5), 99, dtype=np.uint8)
+
+        @property
+        def shape(self):
+            return self.data.shape
+
+        def __getitem__(self, item):
+            return self.data[item]
+
+    monkeypatch.setattr(qc_grid.zarr, "open_group", lambda *args, **kwargs: _FakeRoot())
+    monkeypatch.setattr(qc_grid.zarr, "open_array", lambda path, **kwargs: _FakeArray(str(path)))
+
+    result = qc_grid.run_qc_workflow(input_dir, output_dir)
+
+    assert result.artifacts.stats_csv is not None
+    stats_df = pd.read_csv(result.artifacts.stats_csv)
+    row = stats_df.iloc[0]
+    assert row["ngff_dataset_path"] == "s0"
+    assert row["ngff_axes"] == "c,y,x"
+    assert row["ngff_raw_shape"] == "3x8x10"
+    assert row["image_mean_intensity"] == 20.0
+    assert row["image_mean_red"] == 10.0
+    assert row["image_mean_green"] == 20.0
+    assert row["image_mean_blue"] == 30.0
+    assert not bool(row["channels_nearly_identical"])
+
+
 def test_build_qc_grids_uses_pil_default_even_when_torch_available(
     monkeypatch,
     temp_dir: Path,
