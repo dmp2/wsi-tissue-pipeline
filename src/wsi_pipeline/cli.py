@@ -589,6 +589,19 @@ def diagnose_vsi_replating_cmd(
     help="Coordinate level where crop size, padding, and margin are defined.",
 )
 @click.option(
+    "--output-profile",
+    default="validation",
+    show_default=True,
+    type=click.Choice(["validation", "production", "upload_staging"]),
+    help="Output profile whose defaults should be estimated.",
+)
+@click.option(
+    "--crop-shape-policy",
+    default=None,
+    type=click.Choice(["notebook_square", "compact_square", "compact_rectangle"]),
+    help="Optional crop shape policy override.",
+)
+@click.option(
     "--metadata-backend",
     default="auto",
     show_default=True,
