@@ -497,6 +497,19 @@ def doctor(strict: bool):
     help="Coordinate level where crop size, padding, and margin are defined.",
 )
 @click.option(
+    "--output-profile",
+    default="validation",
+    show_default=True,
+    type=click.Choice(["validation", "production", "upload_staging"]),
+    help="Output profile whose defaults should be estimated.",
+)
+@click.option(
+    "--crop-shape-policy",
+    default=None,
+    type=click.Choice(["notebook_square", "compact_square", "compact_rectangle"]),
+    help="Optional crop shape policy override.",
+)
+@click.option(
     "--config",
     "-c",
     "config_path",
@@ -605,6 +618,8 @@ def estimate_vsi_plating_cmd(
     source_level: str,
     segmentation_level: str,
     tile_frame_level: str,
+    output_profile: str,
+    crop_shape_policy: str | None,
     metadata_backend: str,
     metadata_schema: str,
     config_path: Path | None,
@@ -620,7 +635,9 @@ def estimate_vsi_plating_cmd(
         vsi_path,
         source_level=source_level,
         segmentation_level=segmentation_level,
+        output_profile=output_profile,
         tile_frame_level=tile_frame_level,
+        crop_shape_policy=crop_shape_policy,
         segmentation_config=config.segmentation,
         tile_config=config.tiles,
         metadata_backend=metadata_backend,

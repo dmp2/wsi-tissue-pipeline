@@ -475,12 +475,15 @@ def test_write_ngff_from_tile_streaming_ome_progress_and_uncompressed(tmp_path, 
         progress_mode="log",
         progress_interval_s=0.0,
         progress_callback=events.append,
+        fill_value=0,
+        sparse_zero_chunks=True,
     )
 
     assert len(events) == 4
     assert events[-1]["blocks_done"] == 4
     assert events[-1]["total_blocks"] == 4
     assert created["s0"]["compressor"] is None
+    assert created["s0"]["fill_value"] == 0
     assert fake_group.attrs["omero"]["channels"][0]["color"] == "FF0000"
 
 

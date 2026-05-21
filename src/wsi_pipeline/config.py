@@ -205,6 +205,15 @@ class TileConfig(BaseModel):
 
     pad_multiple: int = Field(default=512, ge=64, description="Padding multiple for tiles")
 
+    crop_shape_policy: Literal["notebook_square", "compact_square", "compact_rectangle"] = Field(
+        default="notebook_square",
+        description=(
+            "Crop/canvas policy for tissue derivatives. 'notebook_square' preserves "
+            "the notebook-equivalent common square canvas; compact policies use "
+            "per-tissue chunk-aligned crops."
+        ),
+    )
+
     extra_margin_px: int = Field(
         default=0,
         ge=0,
@@ -218,12 +227,36 @@ class TileConfig(BaseModel):
 class OutputConfig(BaseModel):
     """Configuration for output format and storage."""
 
+    output_profile: Literal["validation", "production", "upload_staging"] = Field(
+        default="validation",
+        description=(
+            "Named output profile. 'validation' preserves notebook-compatible output; "
+            "'production' writes compact lossless derivatives; 'upload_staging' is "
+            "temporary physically uncompressed export."
+        ),
+    )
+
     format: Literal["ome-zarr", "tiff", "ome-tiff", "both"] = Field(
         default="ome-zarr", description="Output format for tissue sections"
     )
 
     compression: str | None = Field(
         default="zstd", description="Compression algorithm (zstd, lz4, gzip, or None)"
+    )
+
+    sparse_zero_chunks: bool = Field(
+        default=False,
+        description="Skip writing all-zero chunks and rely on Zarr fill_value=0.",
+    )
+
+    store_tissue_mask: bool = Field(
+        default=False,
+        description="Write labels/tissue_mask as an OME-Zarr label image.",
+    )
+
+    materialize_masked_rgb: bool = Field(
+        default=True,
+        description="Write masked RGB as the primary RGB payload instead of unmasked source RGB.",
     )
 
     compression_level: int = Field(default=5, ge=1, le=9, description="Compression level")

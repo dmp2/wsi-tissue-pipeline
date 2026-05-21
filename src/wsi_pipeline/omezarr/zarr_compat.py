@@ -99,6 +99,7 @@ def create_group_array(
     chunks: tuple[int, ...],
     dtype: Any,
     compressor: Any | None = None,
+    fill_value: Any | None = None,
     overwrite: bool = True,
     zarr_format: int | None = None,
 ) -> Any:
@@ -113,6 +114,8 @@ def create_group_array(
         "dtype": dtype,
         "overwrite": overwrite,
     }
+    if fill_value is not None:
+        kwargs["fill_value"] = fill_value
     kwargs.update(compression_kwargs(compressor, zarr_format=zarr_format))
 
     create_array = getattr(group, "create_array", None)

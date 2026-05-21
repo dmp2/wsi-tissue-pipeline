@@ -248,6 +248,68 @@ def test_estimate_vsi_direct_plating_reports_chunks_and_bytes(monkeypatch, tmp_p
     assert estimate["totals"]["uncompressed_bytes_all_mips"] == 61440
 
 
+def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, tmp_path):
+    from wsi_pipeline.config import TileConfig
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+
+    class _DummyETS:
+        nlevels = 2
+
+        def __init__(self, path):
+            assert Path(path) == ets_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(256, 512), (64, 128)][level]
+
+        def read_level(self, level):
+            return np.zeros((*self.level_shape(level), 3), dtype=np.uint8)
+
+    def _fake_segment(image, **kwargs):  # noqa: ARG001
+        mask = np.zeros((64, 128), dtype=bool)
+        mask[10:20, 30:55] = True
+        return mask, {}
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: {
+        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}
+    })
+    monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
+    monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
+
+    estimate = vsi_ets.estimate_vsi_direct_plating(
+        vsi_path,
+        source_level=0,
+        segmentation_level=1,
+        output_profile="production",
+        tile_config=TileConfig(chunk_size=64, pad_multiple=64, extra_margin_px=0),
+        min_side_for_mips=64,
+    )
+
+    tissue = estimate["tissues"][0]
+    assert estimate["output_profile"] == "production"
+    assert estimate["crop_shape_policy"] == "compact_rectangle"
+    assert estimate["store_tissue_mask"] is True
+    assert estimate["sparse_zero_chunks"] is True
+    assert tissue["tile_shape_yx"][0] % 64 == 0
+    assert tissue["tile_shape_yx"][1] % 64 == 0
+    assert tissue["s0_shape_yxc"][:2] == tissue["tile_shape_yx"]
+    assert tissue["mask_s0_shape_yx"] == tissue["tile_shape_yx"]
+    assert tissue["uncompressed_bytes_estimate"] > tissue["uncompressed_bytes_all_mips"]
+    assert estimate["compression"]["mode"] == "lossless"
+
+
 def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(monkeypatch, tmp_path):
     from wsi_pipeline.pipeline import vsi_ets
 

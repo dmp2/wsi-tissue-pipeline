@@ -27,11 +27,19 @@ from ..omezarr.metadata import (
     default_channel_labels,
 )
 from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
-from ..omezarr.streaming import write_ngff_from_tile_streaming_ome, write_ngff_from_tile_ts
+from ..omezarr.streaming import (
+    write_ngff_from_tile_streaming_ome,
+    write_ngff_from_tile_ts,
+    write_tissue_mask_label_pyramid,
+)
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
 from ..precomputed.plate_writer import PlatePrecomputedWriter
 from ..segmentation.segmenter import make_lowres_mask
-from ..tiles.generator import TissueTileRecord, generate_tissue_tile_records
+from ..tiles.generator import (
+    TissueTileRecord,
+    _normalize_crop_shape_policy,
+    generate_tissue_tile_records,
+)
 from ..wsi_processing import segment_tissue
 
 logger = logging.getLogger(__name__)
@@ -61,6 +69,47 @@ def _compressor_for_compression_mode(compression: str):
     if compression == "none":
         return None
     return Blosc(cname="zstd", clevel=5, shuffle=Blosc.BITSHUFFLE)
+
+
+def _normalize_output_profile(output_profile: str | None) -> str:
+    normalized = str(output_profile or "validation").strip().lower().replace("-", "_")
+    if normalized in {"validation", "notebook", "notebook_square"}:
+        return "validation"
+    if normalized in {"production", "prod"}:
+        return "production"
+    if normalized in {"upload", "upload_staging", "database"}:
+        return "upload_staging"
+    raise ValueError("output_profile must be one of 'validation', 'production', or 'upload_staging'.")
+
+
+def _profile_defaults(output_profile: str) -> dict[str, Any]:
+    output_profile = _normalize_output_profile(output_profile)
+    if output_profile == "production":
+        return {
+            "crop_shape_policy": "compact_rectangle",
+            "extra_margin_px": 64,
+            "compression": "lossless",
+            "store_tissue_mask": True,
+            "materialize_masked_rgb": False,
+            "sparse_zero_chunks": True,
+        }
+    if output_profile == "upload_staging":
+        return {
+            "crop_shape_policy": "compact_rectangle",
+            "extra_margin_px": 64,
+            "compression": "none",
+            "store_tissue_mask": True,
+            "materialize_masked_rgb": True,
+            "sparse_zero_chunks": False,
+        }
+    return {
+        "crop_shape_policy": "notebook_square",
+        "extra_margin_px": 0,
+        "compression": "none",
+        "store_tissue_mask": False,
+        "materialize_masked_rgb": True,
+        "sparse_zero_chunks": False,
+    }
 
 
 def _is_big_tile(tile_da, bytes_per_px=1, min_side=8192, max_bytes=1_500_000_000):
@@ -402,6 +451,28 @@ def _write_tissue_manifest(
             }
         if frame_debug.get("tile_frame_level") is not None:
             payload["tile_frame_level"] = str(frame_debug["tile_frame_level"])
+        if frame_debug.get("crop_shape_policy") is not None:
+            payload["crop_shape_policy"] = str(frame_debug["crop_shape_policy"])
+        if frame_debug.get("tile_shape_yx") is not None:
+            payload["tile_shape_yx"] = list(frame_debug["tile_shape_yx"])
+        if logical_source is not None:
+            payload["child_origin_in_parent_source_level"] = [
+                int(logical_source[0]),
+                int(logical_source[1]),
+            ]
+            payload["parent_transform"] = {
+                "parent_source": payload["source_vsi"]
+                or payload["source_ome_zarr"]
+                or payload["source_ets"],
+                "source_level": int(source_level),
+                "logical_crop_bounds_source_level": logical_source,
+                "clipped_crop_bounds_source_level": clipped_source,
+                "padding_source_level": payload.get("padding_source_level"),
+                "child_origin_in_parent_source_level": [
+                    int(logical_source[0]),
+                    int(logical_source[1]),
+                ],
+            }
 
     manifest_path = ngff_dir / "tissue_manifest.json"
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -467,7 +538,9 @@ def process_slide_with_plating(
     segment_fn=None,  # callable(dask_arr)->(filled_mask_bool, _)
     source_level: int | str = 0,
     segmentation_level: int | str | None = None,
+    output_profile: str = "validation",
     tile_frame_level: str = "segmentation",
+    crop_shape_policy: str | None = None,
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
     struct_elem_px: int = 9,  # structuring element radius in pixels
@@ -485,7 +558,10 @@ def process_slide_with_plating(
     # dtype policy
     dtype: np.dtype | None = "uint8",  # cast ROI to uint8 before mip (recommended for imagery)
     source_context: Mapping[str, Any] | None = None,
-    compression: str = "none",
+    compression: str | None = None,
+    store_tissue_mask: bool | None = None,
+    materialize_masked_rgb: bool | None = None,
+    sparse_zero_chunks: bool | None = None,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
 ) -> list[Path]:
@@ -513,14 +589,35 @@ def process_slide_with_plating(
     # Make the output directory if it doesn't already exist
     out_ngff_dir = Path(out_ngff_dir)
     out_ngff_dir.mkdir(parents=True, exist_ok=True)
+    output_profile = _normalize_output_profile(output_profile)
+    defaults = _profile_defaults(output_profile)
+    if crop_shape_policy is None:
+        crop_shape_policy = str(defaults["crop_shape_policy"])
+    if compression is None:
+        compression = str(defaults["compression"])
+    if store_tissue_mask is None:
+        store_tissue_mask = bool(defaults["store_tissue_mask"])
+    if materialize_masked_rgb is None:
+        materialize_masked_rgb = bool(defaults["materialize_masked_rgb"])
+    if sparse_zero_chunks is None:
+        sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
+    crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
     compressor = _compressor_for_compression_mode(compression)
     if tile_config is not None:
         plate_chunk_xy = tile_config.chunk_size
         tile_extra_margin_px = tile_config.extra_margin_px
         tile_pad_multiple = tile_config.pad_multiple
+        if output_profile in {"production", "upload_staging"} and tile_extra_margin_px == 0:
+            tile_extra_margin_px = int(defaults["extra_margin_px"])
+        if crop_shape_policy == "notebook_square":
+            crop_shape_policy = _normalize_crop_shape_policy(tile_config.crop_shape_policy)
     else:
+        tile_extra_margin_px = int(defaults["extra_margin_px"])
         tile_pad_multiple = plate_chunk_xy
+
+    if precomputed_plate_path and crop_shape_policy == "compact_rectangle":
+        raise ValueError("compact_rectangle outputs are variable-shape and cannot be written as a single plate stack.")
 
     # Step 1: Load the NGFF root, find image and metadata for the levels
     logger.info("Loading the NGFF root.")
@@ -609,6 +706,8 @@ def process_slide_with_plating(
         pad_multiple=tile_pad_multiple,
         extra_margin_px=tile_extra_margin_px,
         tile_frame_level=tile_frame_level,
+        crop_shape_policy=crop_shape_policy,
+        materialize_masked_rgb=bool(materialize_masked_rgb),
     )
     # Break out early if there are no tissue sections
     if not tile_records:
@@ -652,7 +751,13 @@ def process_slide_with_plating(
     n_tiles_threshold = 16
     n_tiles = len(tile_records)
     # If any tile is huge, avoid distributed 'compute-then-write' path
-    use_distributed = bool(parallel) and (n_tiles >= n_tiles_threshold) and not any_big
+    force_streaming = bool(store_tissue_mask or sparse_zero_chunks or crop_shape_policy != "notebook_square")
+    use_distributed = (
+        bool(parallel)
+        and (n_tiles >= n_tiles_threshold)
+        and not any_big
+        and not force_streaming
+    )
 
     if use_distributed:
         from dask.distributed import Client, LocalCluster, as_completed
@@ -835,7 +940,7 @@ def process_slide_with_plating(
                 tile = None
 
                 # For big tiles, don't build mips_yxc in memory. Instead, write directly from the base tile with the streaming writer
-                if any_big:
+                if any_big or force_streaming:
                     # DO NOT compute() -- keep it lazy and (optionally) cast lazily
                     # tlazy = tile_dask.astype(np.uint8) if dtype and tile_dask.dtype != np.uint8 else tile_dask
                     num_mips = compute_num_mips_min_side(
@@ -875,9 +980,22 @@ def process_slide_with_plating(
                         channel_colors=_channel_colors_for_count(int(tile_dask.shape[2])),
                         ngff_metadata=tile_ngff_metadata,
                         metadata_schema=source_metadata_schema,
+                        fill_value=0,
+                        sparse_zero_chunks=bool(sparse_zero_chunks),
                         progress_mode=progress_mode,
                         progress_interval_s=progress_interval_s,
                     )
+                    if store_tissue_mask and record.mask is not None:
+                        write_tissue_mask_label_pyramid(
+                            record.mask,
+                            ngff_dir,
+                            (px_um, py_um),
+                            block_xy=plate_chunk_xy,
+                            num_mips=num_mips,
+                            compressor=compressor,
+                            sparse_zero_chunks=bool(sparse_zero_chunks),
+                            metadata_schema=source_metadata_schema,
+                        )
 
                     # Append to precomputed plate (optional)
                     if plate is not None:

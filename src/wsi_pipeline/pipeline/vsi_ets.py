@@ -22,13 +22,14 @@ from ..etsfile import ETSFile
 from ..omezarr.ets_writer import write_ets_pyramid_to_ngff_zarr
 from ..omezarr.metadata import default_channel_colors, default_channel_labels
 from ..omezarr.pyramid import build_mips_from_yxc, compute_num_mips_min_side
-from ..omezarr.streaming import write_ngff_from_tile_streaming_ome
+from ..omezarr.streaming import write_ngff_from_tile_streaming_ome, write_tissue_mask_label_pyramid
 from ..omezarr.writers import write_ngff_from_mips_ngffzarr
 from ..precomputed.plate_writer import PlatePrecomputedWriter
 from ..tiles.generator import (
     BoundsYX,
     TissueTileRecord,
     _build_tissue_frame_specs,
+    _normalize_crop_shape_policy,
     _normalize_tile_frame_level,
     project_label_mask_to_source_region,
 )
@@ -174,6 +175,69 @@ def _compressor_for_compression_mode(compression: str):
     return Blosc(cname="zstd", clevel=5, shuffle=Blosc.BITSHUFFLE)
 
 
+def _normalize_output_profile(output_profile: str | None) -> str:
+    normalized = str(output_profile or "validation").strip().lower().replace("-", "_")
+    aliases = {
+        "validation": "validation",
+        "notebook": "validation",
+        "notebook_square": "validation",
+        "production": "production",
+        "prod": "production",
+        "upload": "upload_staging",
+        "upload_staging": "upload_staging",
+        "database": "upload_staging",
+    }
+    if normalized not in aliases:
+        raise ValueError("output_profile must be one of 'validation', 'production', or 'upload_staging'.")
+    return aliases[normalized]
+
+
+def _profile_defaults(output_profile: str) -> dict[str, Any]:
+    profile = _normalize_output_profile(output_profile)
+    if profile == "production":
+        return {
+            "crop_shape_policy": "compact_rectangle",
+            "tile_frame_level": "segmentation",
+            "extra_margin_px": 64,
+            "compression": "lossless",
+            "store_tissue_mask": True,
+            "materialize_masked_rgb": False,
+            "sparse_zero_chunks": True,
+        }
+    if profile == "upload_staging":
+        return {
+            "crop_shape_policy": "compact_rectangle",
+            "tile_frame_level": "segmentation",
+            "extra_margin_px": 64,
+            "compression": "none",
+            "store_tissue_mask": True,
+            "materialize_masked_rgb": True,
+            "sparse_zero_chunks": False,
+        }
+    return {
+        "crop_shape_policy": "notebook_square",
+        "tile_frame_level": "segmentation",
+        "extra_margin_px": 0,
+        "compression": "none",
+        "store_tissue_mask": False,
+        "materialize_masked_rgb": True,
+        "sparse_zero_chunks": False,
+    }
+
+
+def _compression_descriptor(compression: str) -> dict[str, Any]:
+    compression = _normalize_compression_mode(compression)
+    if compression == "none":
+        return {"mode": "none", "codec": None}
+    return {
+        "mode": "lossless",
+        "codec": "blosc",
+        "cname": "zstd",
+        "clevel": 5,
+        "shuffle": "bitshuffle",
+    }
+
+
 def _human_bytes(num_bytes: int) -> str:
     value = float(num_bytes)
     for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
@@ -313,6 +377,7 @@ def _read_masked_ets_block(
     label_crop_seg_yx: tuple[int, int, int, int],
     lr_labels: np.ndarray,
     label_id: int,
+    output_kind: str = "masked_rgb",
     block_info: dict | None = None,
 ) -> np.ndarray:
     """Dask block callback for direct ETS tissue tile extraction."""
@@ -324,7 +389,10 @@ def _read_masked_ets_block(
     out_x0, out_x1 = map(int, loc[1])
     block_h = out_y1 - out_y0
     block_w = out_x1 - out_x0
-    out = np.zeros((block_h, block_w, block.shape[2]), dtype=block.dtype)
+    if output_kind == "mask":
+        out = np.zeros((block_h, block_w), dtype=np.uint8)
+    else:
+        out = np.zeros((block_h, block_w, block.shape[2]), dtype=block.dtype)
 
     tile_y0, tile_x0 = map(int, tile_origin_yx)
     canvas = BoundsYX(*map(int, logical_canvas_source_yx))
@@ -341,14 +409,16 @@ def _read_masked_ets_block(
     if valid_y1 <= valid_y0 or valid_x1 <= valid_x0:
         return out
 
-    region = _read_ets_region_yxc(
-        ets_path,
-        level=source_level,
-        x0=valid_x0,
-        y0=valid_y0,
-        x1=valid_x1,
-        y1=valid_y1,
-    )
+    region = None
+    if output_kind != "mask":
+        region = _read_ets_region_yxc(
+            ets_path,
+            level=source_level,
+            x0=valid_x0,
+            y0=valid_y0,
+            x1=valid_x1,
+            y1=valid_y1,
+        )
 
     if canvas.y0 != tile_y0 or canvas.x0 != tile_x0:
         raise ValueError("logical_canvas_source_yx origin must match tile_origin_yx.")
@@ -365,11 +435,19 @@ def _read_masked_ets_block(
         scale_y=yr,
         scale_x=xr,
     )
-    region = np.where(mask[..., None], region, 0)
-
     dst_y0 = valid_y0 - source_y0
     dst_x0 = valid_x0 - source_x0
-    out[dst_y0 : dst_y0 + region.shape[0], dst_x0 : dst_x0 + region.shape[1], :] = region
+    if output_kind == "mask":
+        out[dst_y0 : dst_y0 + mask.shape[0], dst_x0 : dst_x0 + mask.shape[1]] = mask.astype(
+            np.uint8
+        )
+    elif output_kind == "rgb":
+        assert region is not None
+        out[dst_y0 : dst_y0 + region.shape[0], dst_x0 : dst_x0 + region.shape[1], :] = region
+    else:
+        assert region is not None
+        masked = np.where(mask[..., None], region, 0)
+        out[dst_y0 : dst_y0 + masked.shape[0], dst_x0 : dst_x0 + masked.shape[1], :] = masked
     return out
 
 
@@ -383,6 +461,8 @@ def _direct_ets_tissue_tile_records(
     pad_multiple: int | None,
     extra_margin_px: int,
     tile_frame_level: str,
+    crop_shape_policy: str = "notebook_square",
+    materialize_masked_rgb: bool = True,
 ) -> tuple[list[TissueTileRecord], int]:
     """Build lazy per-tissue tile records that read directly from ETS source blocks."""
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
@@ -399,6 +479,7 @@ def _direct_ets_tissue_tile_records(
         tile_frame_level=tile_frame_level,
         pad_multiple=pad_multiple,
         extra_margin_px=extra_margin_px,
+        crop_shape_policy=crop_shape_policy,
     )
 
     records: list[TissueTileRecord] = []
@@ -408,9 +489,10 @@ def _direct_ets_tissue_tile_records(
         if clipped.h <= 0 or clipped.w <= 0:
             continue
 
-        chunks = (min(chunk, tile_dim), min(chunk, tile_dim), 3)
-        dummy = da.zeros((tile_dim, tile_dim, 3), chunks=chunks, dtype=np.uint8)
-        tile = dummy.map_blocks(
+        tile_h, tile_w = spec.source_canvas_shape_yx
+        rgb_chunks = (min(chunk, tile_h), min(chunk, tile_w), 3)
+        dummy_rgb = da.zeros((tile_h, tile_w, 3), chunks=rgb_chunks, dtype=np.uint8)
+        rgb = dummy_rgb.map_blocks(
             _read_masked_ets_block,
             dtype=np.uint8,
             ets_path=str(ets_path),
@@ -421,7 +503,25 @@ def _direct_ets_tissue_tile_records(
             label_crop_seg_yx=spec.label_crop_seg_yx.as_yx(),
             lr_labels=lr_labels,
             label_id=int(spec.label_id),
+            output_kind="rgb",
         )
+        mask_chunks = (min(chunk, tile_h), min(chunk, tile_w))
+        dummy_mask = da.zeros((tile_h, tile_w), chunks=mask_chunks, dtype=np.uint8)
+        mask = dummy_mask.map_blocks(
+            _read_masked_ets_block,
+            dtype=np.uint8,
+            ets_path=str(ets_path),
+            source_level=int(source_level),
+            source_shape_yx=(source_h, source_w),
+            tile_origin_yx=(canvas.y0, canvas.x0),
+            logical_canvas_source_yx=canvas.as_yx(),
+            label_crop_seg_yx=spec.label_crop_seg_yx.as_yx(),
+            lr_labels=lr_labels,
+            label_id=int(spec.label_id),
+            output_kind="mask",
+        )
+        tile = da.where(mask[..., None].astype(bool), rgb, 0) if materialize_masked_rgb else rgb
+        record_tile_dim = int(tile_h) if int(tile_h) == int(tile_w) else int(max(tile_h, tile_w))
         records.append(
             TissueTileRecord(
                 tile=tile,
@@ -429,9 +529,12 @@ def _direct_ets_tissue_tile_records(
                 label_id=int(spec.label_id),
                 crop_bounds_source_level=spec.clipped_source_yx.as_xyxy(),
                 crop_bounds_segmentation_level=spec.clipped_frame_seg_yx.as_xyxy(),
-                tile_dim=int(tile_dim),
+                tile_dim=record_tile_dim,
+                tile_shape_yx=(int(tile_h), int(tile_w)),
+                mask=mask,
                 tile_frame_level=tile_frame_level,
-                source_tile_dim=int(tile_dim),
+                crop_shape_policy=crop_shape_policy,
+                source_tile_dim=record_tile_dim,
                 segmentation_tile_dim=int(spec.segmentation_tile_dim),
                 scale_y=float(spec.scale_y),
                 scale_x=float(spec.scale_x),
@@ -1155,7 +1258,9 @@ def estimate_vsi_direct_plating(
     segment_fn=None,
     source_level: int | str = 0,
     segmentation_level: int | str | None = 7,
+    output_profile: str = "validation",
     tile_frame_level: str = "segmentation",
+    crop_shape_policy: str | None = None,
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
     metadata_backend: str = "auto",
@@ -1165,6 +1270,9 @@ def estimate_vsi_direct_plating(
     plate_chunk_xy: int = 512,
     min_side_for_mips: int | None = None,
     dtype: np.dtype | str | None = "uint8",
+    compression: str | None = None,
+    store_tissue_mask: bool | None = None,
+    sparse_zero_chunks: bool | None = None,
 ) -> dict[str, Any]:
     """
     Estimate a direct VSI/ETS plating run without writing tissue OME-Zarrs.
@@ -1175,7 +1283,21 @@ def estimate_vsi_direct_plating(
     """
     started = time.monotonic()
     vsi_path = Path(vsi_path)
+    output_profile = _normalize_output_profile(output_profile)
+    defaults = _profile_defaults(output_profile)
+    if crop_shape_policy is None:
+        crop_shape_policy = str(defaults["crop_shape_policy"])
+    if compression is None:
+        compression = str(defaults["compression"])
+    if store_tissue_mask is None:
+        store_tissue_mask = bool(defaults["store_tissue_mask"])
+    if sparse_zero_chunks is None:
+        sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
+    if tile_frame_level == "segmentation" and output_profile in {"production", "upload_staging"}:
+        tile_frame_level = str(defaults["tile_frame_level"])
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+    crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
+    compression = _normalize_compression_mode(compression)
 
     ets_path = find_ets_file(vsi_path)
     if ets_path is None:
@@ -1194,8 +1316,12 @@ def estimate_vsi_direct_plating(
         plate_chunk_xy = int(tile_config.chunk_size)
         tile_extra_margin_px = int(tile_config.extra_margin_px)
         tile_pad_multiple = int(tile_config.pad_multiple)
+        if output_profile in {"production", "upload_staging"} and tile_extra_margin_px == 0:
+            tile_extra_margin_px = int(defaults["extra_margin_px"])
+        if crop_shape_policy == "notebook_square":
+            crop_shape_policy = _normalize_crop_shape_policy(tile_config.crop_shape_policy)
     else:
-        tile_extra_margin_px = 0
+        tile_extra_margin_px = int(defaults["extra_margin_px"])
         tile_pad_multiple = int(plate_chunk_xy)
 
     with ETSFile(ets_path) as ets:
@@ -1242,6 +1368,8 @@ def estimate_vsi_direct_plating(
                 "source_level": int(source_idx),
                 "segmentation_level": int(segmentation_idx),
                 "tile_frame_level": tile_frame_level,
+                "crop_shape_policy": crop_shape_policy,
+                "output_profile": output_profile,
                 "source_shape_yx": list(source_shape_yx),
                 "segmentation_shape_yx": list(map(int, lr_labels.shape)),
                 "tissue_count": 0,
@@ -1264,6 +1392,7 @@ def estimate_vsi_direct_plating(
         tile_frame_level=tile_frame_level,
         pad_multiple=tile_pad_multiple,
         extra_margin_px=tile_extra_margin_px,
+        crop_shape_policy=crop_shape_policy,
     )
 
     dtype_obj = np.dtype(dtype if dtype else np.uint8)
@@ -1286,13 +1415,22 @@ def estimate_vsi_direct_plating(
             base_shape_yxc=(canvas.h, canvas.w, channels),
             num_mips=num_mips,
         )
+        mask_shapes_yx = [(y, x) for y, x, _c in shapes_yxc]
         s0_chunks = _chunk_count_yx(y=canvas.h, x=canvas.w, chunk_xy=plate_chunk_xy)
         all_mip_chunks = sum(
             _chunk_count_yx(y=y, x=x, chunk_xy=plate_chunk_xy) for y, x, _c in shapes_yxc
         )
+        mask_mip_chunks = (
+            sum(_chunk_count_yx(y=y, x=x, chunk_xy=plate_chunk_xy) for y, x in mask_shapes_yx)
+            if store_tissue_mask
+            else 0
+        )
         bytes_all_mips = _estimate_pyramid_bytes(
             shapes_yxc=shapes_yxc,
             bytes_per_pixel=bytes_per_pixel,
+        )
+        mask_bytes_all_mips = (
+            int(sum(y * x for y, x in mask_shapes_yx)) if store_tissue_mask else 0
         )
         warning = _estimate_warning(bytes_all_mips=bytes_all_mips, s0_chunks=s0_chunks)
         if warning is not None:
@@ -1310,6 +1448,9 @@ def estimate_vsi_direct_plating(
                 "padding_source_level": spec.padding_source_level.as_dict(),
                 "logical_frame_segmentation_yx": spec.logical_frame_seg_yx.as_dict(),
                 "clipped_frame_segmentation_yx": spec.clipped_frame_seg_yx.as_dict(),
+                "crop_shape_policy": crop_shape_policy,
+                "tile_shape_yx": [int(canvas.h), int(canvas.w)],
+                "child_origin_in_parent_source_level": [int(canvas.x0), int(canvas.y0)],
                 "source_tile_dim": int(spec.source_canvas_dim),
                 "segmentation_tile_dim": int(spec.segmentation_tile_dim),
                 "effective_segmentation_tile_dim": float(
@@ -1318,12 +1459,18 @@ def estimate_vsi_direct_plating(
                 "scale_y": float(spec.scale_y),
                 "scale_x": float(spec.scale_x),
                 "s0_shape_yxc": [int(canvas.h), int(canvas.w), channels],
+                "mask_s0_shape_yx": [int(canvas.h), int(canvas.w)] if store_tissue_mask else None,
                 "s0_chunks": int(s0_chunks),
                 "num_mips": int(num_mips),
                 "mip_shapes_yxc": [list(map(int, shape)) for shape in shapes_yxc],
                 "all_mip_chunks": int(all_mip_chunks),
+                "mask_all_mip_chunks": int(mask_mip_chunks),
                 "uncompressed_bytes_all_mips": int(bytes_all_mips),
+                "uncompressed_bytes_estimate": int(bytes_all_mips + mask_bytes_all_mips),
+                "mask_uncompressed_bytes_all_mips": int(mask_bytes_all_mips),
                 "uncompressed_size_all_mips": _human_bytes(bytes_all_mips),
+                "compressed_bytes_sample_estimate": None,
+                "compressed_estimate_method": None,
                 "warning": warning,
             }
         )
@@ -1343,7 +1490,12 @@ def estimate_vsi_direct_plating(
         "metadata_schema": metadata_schema,
         "source_level": int(source_idx),
         "segmentation_level": int(segmentation_idx),
+        "output_profile": output_profile,
         "tile_frame_level": tile_frame_level,
+        "crop_shape_policy": crop_shape_policy,
+        "compression": _compression_descriptor(compression),
+        "store_tissue_mask": bool(store_tissue_mask),
+        "sparse_zero_chunks": bool(sparse_zero_chunks),
         "source_shape_yx": list(source_shape_yx),
         "segmentation_shape_yx": list(map(int, lr_labels.shape)),
         "source_physical_pixel_size": {
@@ -1363,7 +1515,12 @@ def estimate_vsi_direct_plating(
             "s0_chunks": int(total_s0_chunks),
             "all_mip_chunks": int(total_all_mip_chunks),
             "uncompressed_bytes_all_mips": int(total_bytes),
+            "uncompressed_bytes_estimate": int(
+                total_bytes + sum(int(t["mask_uncompressed_bytes_all_mips"]) for t in tissues)
+            ),
             "uncompressed_size_all_mips": _human_bytes(total_bytes),
+            "compressed_bytes_sample_estimate": None,
+            "compressed_estimate_method": None,
             "warnings": warnings,
         },
         "segmentation_info": segmentation_info,
@@ -1488,7 +1645,9 @@ def process_vsi_with_direct_plating(
     segment_fn=None,
     source_level: int | str = 0,
     segmentation_level: int | str | None = None,
+    output_profile: str = "validation",
     tile_frame_level: str = "segmentation",
+    crop_shape_policy: str | None = None,
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
     metadata_backend: str = "auto",
@@ -1503,7 +1662,11 @@ def process_vsi_with_direct_plating(
     min_side_for_mips: int | None = None,
     tile_extra_margin_px: int = 0,
     dtype: np.dtype | str | None = "uint8",
-    compression: str = "none",
+    compression: str | None = None,
+    store_tissue_mask: bool | None = None,
+    materialize_masked_rgb: bool | None = None,
+    sparse_zero_chunks: bool | None = None,
+    resume: bool = False,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
 ) -> list[Path]:
@@ -1515,7 +1678,20 @@ def process_vsi_with_direct_plating(
     vsi_path = Path(vsi_path)
     out_ngff_dir = Path(out_ngff_dir)
     out_ngff_dir.mkdir(parents=True, exist_ok=True)
+    output_profile = _normalize_output_profile(output_profile)
+    defaults = _profile_defaults(output_profile)
+    if crop_shape_policy is None:
+        crop_shape_policy = str(defaults["crop_shape_policy"])
+    if compression is None:
+        compression = str(defaults["compression"])
+    if store_tissue_mask is None:
+        store_tissue_mask = bool(defaults["store_tissue_mask"])
+    if materialize_masked_rgb is None:
+        materialize_masked_rgb = bool(defaults["materialize_masked_rgb"])
+    if sparse_zero_chunks is None:
+        sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+    crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
     compressor = _compressor_for_compression_mode(compression)
 
@@ -1536,8 +1712,16 @@ def process_vsi_with_direct_plating(
         plate_chunk_xy = tile_config.chunk_size
         tile_extra_margin_px = tile_config.extra_margin_px
         tile_pad_multiple = tile_config.pad_multiple
+        if output_profile in {"production", "upload_staging"} and tile_extra_margin_px == 0:
+            tile_extra_margin_px = int(defaults["extra_margin_px"])
+        if crop_shape_policy == "notebook_square":
+            crop_shape_policy = _normalize_crop_shape_policy(tile_config.crop_shape_policy)
     else:
+        tile_extra_margin_px = int(defaults["extra_margin_px"])
         tile_pad_multiple = plate_chunk_xy
+
+    if precomputed_plate_path and crop_shape_policy == "compact_rectangle":
+        raise ValueError("compact_rectangle outputs are variable-shape and cannot be written as a single plate stack.")
 
     with ETSFile(ets_path) as ets:
         source_idx = _resolve_ets_level(
@@ -1585,6 +1769,8 @@ def process_vsi_with_direct_plating(
         pad_multiple=tile_pad_multiple,
         extra_margin_px=tile_extra_margin_px,
         tile_frame_level=tile_frame_level,
+        crop_shape_policy=crop_shape_policy,
+        materialize_masked_rgb=bool(materialize_masked_rgb),
     )
     if not tile_records:
         logger.warning("[%s] no tissue regions found.", vsi_path.name)
@@ -1609,6 +1795,8 @@ def process_vsi_with_direct_plating(
         "ngff_metadata": metadata,
         "metadata_schema": metadata_schema,
         "metadata_backend": metadata_backend,
+        "output_profile": output_profile,
+        "crop_shape_policy": crop_shape_policy,
     }
     source_ngff_metadata = metadata
     source_metadata_schema = metadata_schema
@@ -1652,6 +1840,19 @@ def process_vsi_with_direct_plating(
             name = f"{vsi_path.stem}_tissue_{record.tissue_index:02d}"
             ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
             tissue_started = time.monotonic()
+            if resume and ngff_dir.exists():
+                logger.info("Skipping completed tissue output because resume=True: %s", ngff_dir)
+                _record_written_tissue(
+                    out_paths,
+                    ngff_dir,
+                    record=record,
+                    source_context=source_context,
+                    source_ome_zarr=None,
+                    source_level=source_idx,
+                    segmentation_level=segmentation_idx,
+                    phys_xy_um=(px_um, py_um),
+                )
+                continue
             logger.info(
                 "Writing direct ETS tissue %d/%d: %s shape=%s compression=%s.",
                 z_idx + 1,
@@ -1660,7 +1861,8 @@ def process_vsi_with_direct_plating(
                 tuple(map(int, tile_dask.shape)),
                 compression,
             )
-            if any_big:
+            force_streaming = bool(store_tissue_mask or sparse_zero_chunks or crop_shape_policy != "notebook_square")
+            if any_big or force_streaming:
                 num_mips = compute_num_mips_min_side(
                     int(tile_dask.shape[1]),
                     int(tile_dask.shape[0]),
@@ -1673,9 +1875,32 @@ def process_vsi_with_direct_plating(
                     phys_xy_um=(px_um, py_um),
                 )
                 tlazy = tile_dask.astype(np.uint8) if tile_dask.dtype != np.uint8 else tile_dask
+                work_dir = ngff_dir.with_name(f".{ngff_dir.name}.incomplete")
+                if work_dir.exists() and not resume:
+                    shutil.rmtree(work_dir)
+                if ngff_dir.exists() and not resume:
+                    shutil.rmtree(ngff_dir)
+                work_dir.mkdir(parents=True, exist_ok=True)
+                run_manifest = {
+                    "output_profile": output_profile,
+                    "crop_shape_policy": crop_shape_policy,
+                    "compression": _compression_descriptor(compression),
+                    "sparse_zero_chunks": bool(sparse_zero_chunks),
+                    "store_tissue_mask": bool(store_tissue_mask),
+                    "materialize_masked_rgb": bool(materialize_masked_rgb),
+                    "pyramid_generation_policy": "downsample_streamed_s0",
+                    "status": "running",
+                    "started_at_unix": time.time(),
+                }
+                (work_dir / "run_manifest.json").write_text(
+                    json.dumps(_json_ready(run_manifest), indent=2),
+                    encoding="utf-8",
+                )
+                origin_y = int((record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("y0", 0))
+                origin_x = int((record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("x0", 0))
                 write_ngff_from_tile_streaming_ome(
                     tile_yxc_da=tlazy,
-                    out_dir=ngff_dir,
+                    out_dir=work_dir,
                     phys_xy_um=(px_um, py_um),
                     block_xy=plate_chunk_xy,
                     num_mips=num_mips,
@@ -1685,9 +1910,35 @@ def process_vsi_with_direct_plating(
                     channel_colors=default_channel_colors(int(tile_dask.shape[2])),
                     ngff_metadata=tile_ngff_metadata,
                     metadata_schema=source_metadata_schema,
+                    fill_value=0,
+                    sparse_zero_chunks=bool(sparse_zero_chunks),
+                    coordinate_translation_yx_um=(origin_y * py_um, origin_x * px_um),
+                    run_manifest=run_manifest,
                     progress_mode=progress_mode,
                     progress_interval_s=progress_interval_s,
                 )
+                if store_tissue_mask and record.mask is not None:
+                    mask_stats = write_tissue_mask_label_pyramid(
+                        record.mask,
+                        work_dir,
+                        (px_um, py_um),
+                        block_xy=plate_chunk_xy,
+                        num_mips=num_mips,
+                        compressor=compressor,
+                        sparse_zero_chunks=bool(sparse_zero_chunks),
+                        coordinate_translation_yx_um=(origin_y * py_um, origin_x * px_um),
+                        metadata_schema=source_metadata_schema,
+                    )
+                    run_manifest.update(mask_stats)
+                run_manifest["status"] = "complete"
+                run_manifest["finished_at_unix"] = time.time()
+                (work_dir / "run_manifest.json").write_text(
+                    json.dumps(_json_ready(run_manifest), indent=2),
+                    encoding="utf-8",
+                )
+                if ngff_dir.exists():
+                    shutil.rmtree(ngff_dir)
+                work_dir.rename(ngff_dir)
                 if plate is not None:
                     plate.write_slice(z_idx, tlazy)
             else:
@@ -1768,7 +2019,9 @@ def process_vsi_directory_with_plating(
     per_tissue_dir: str | Path | None = None,
     source_level: int | str = 0,
     segmentation_level: int | str | None = 7,
+    output_profile: str = "validation",
     tile_frame_level: str = "segmentation",
+    crop_shape_policy: str | None = None,
     segmentation_config: SegmentationConfig | None = None,
     tile_config: TileConfig | None = None,
     metadata_backend: str = "auto",
@@ -1779,7 +2032,11 @@ def process_vsi_directory_with_plating(
     parallel: bool = False,
     min_side_for_mips: int | None = None,
     dtype: np.dtype | str | None = "uint8",
-    compression: str = "none",
+    compression: str | None = None,
+    store_tissue_mask: bool | None = None,
+    materialize_masked_rgb: bool | None = None,
+    sparse_zero_chunks: bool | None = None,
+    resume: bool = False,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
 ) -> dict[str, list[Path]]:
@@ -1798,7 +2055,20 @@ def process_vsi_directory_with_plating(
     if materialize_source:
         source_ome_zarr_dir.mkdir(parents=True, exist_ok=True)
     per_tissue_dir.mkdir(parents=True, exist_ok=True)
+    output_profile = _normalize_output_profile(output_profile)
+    defaults = _profile_defaults(output_profile)
+    if crop_shape_policy is None:
+        crop_shape_policy = str(defaults["crop_shape_policy"])
+    if compression is None:
+        compression = str(defaults["compression"])
+    if store_tissue_mask is None:
+        store_tissue_mask = bool(defaults["store_tissue_mask"])
+    if materialize_masked_rgb is None:
+        materialize_masked_rgb = bool(defaults["materialize_masked_rgb"])
+    if sparse_zero_chunks is None:
+        sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+    crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
 
     results: dict[str, list[Path]] = {}
@@ -1825,13 +2095,18 @@ def process_vsi_directory_with_plating(
                 per_tissue_dir,
                 source_level=source_level,
                 segmentation_level=segmentation_level,
+                output_profile=output_profile,
                 tile_frame_level=tile_frame_level,
+                crop_shape_policy=crop_shape_policy,
                 segmentation_config=segmentation_config,
                 tile_config=tile_config,
                 parallel=parallel,
                 min_side_for_mips=min_side_for_mips,
                 dtype=dtype,
                 compression=compression,
+                store_tissue_mask=store_tissue_mask,
+                materialize_masked_rgb=materialize_masked_rgb,
+                sparse_zero_chunks=sparse_zero_chunks,
                 progress_mode=progress_mode,
                 progress_interval_s=progress_interval_s,
                 source_context={
@@ -1851,7 +2126,9 @@ def process_vsi_directory_with_plating(
                 per_tissue_dir,
                 source_level=source_level,
                 segmentation_level=segmentation_level,
+                output_profile=output_profile,
                 tile_frame_level=tile_frame_level,
+                crop_shape_policy=crop_shape_policy,
                 segmentation_config=segmentation_config,
                 tile_config=tile_config,
                 metadata_backend=metadata_backend,
@@ -1860,6 +2137,10 @@ def process_vsi_directory_with_plating(
                 min_side_for_mips=min_side_for_mips,
                 dtype=dtype,
                 compression=compression,
+                store_tissue_mask=store_tissue_mask,
+                materialize_masked_rgb=materialize_masked_rgb,
+                sparse_zero_chunks=sparse_zero_chunks,
+                resume=resume,
                 progress_mode=progress_mode,
                 progress_interval_s=progress_interval_s,
             )

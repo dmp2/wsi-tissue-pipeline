@@ -106,6 +106,57 @@ def _create_group_array(group: Any, name: str, **kwargs: Any):
     return create_group_array(group, name, **kwargs)
 
 
+def _add_translation_to_multiscales(
+    root_attrs: dict[str, Any],
+    *,
+    translation: list[float],
+) -> dict[str, Any]:
+    """Append NGFF translation transforms to every dataset when requested."""
+    if not translation:
+        return root_attrs
+    attrs = dict(root_attrs)
+    multiscales = attrs.get("multiscales")
+    if not isinstance(multiscales, list):
+        return attrs
+    attrs["multiscales"] = [dict(ms) if isinstance(ms, dict) else ms for ms in multiscales]
+    for multiscale in attrs["multiscales"]:
+        if not isinstance(multiscale, dict):
+            continue
+        datasets = multiscale.get("datasets")
+        if not isinstance(datasets, list):
+            continue
+        new_datasets = []
+        for dataset in datasets:
+            if not isinstance(dataset, dict):
+                new_datasets.append(dataset)
+                continue
+            ds = dict(dataset)
+            transforms = list(ds.get("coordinateTransformations") or [])
+            transforms = [
+                t
+                for t in transforms
+                if not (isinstance(t, dict) and t.get("type") == "translation")
+            ]
+            transforms.append({"type": "translation", "translation": [float(v) for v in translation]})
+            ds["coordinateTransformations"] = transforms
+            new_datasets.append(ds)
+        multiscale["datasets"] = new_datasets
+    return attrs
+
+
+def _max_pool_2x(mask: np.ndarray) -> np.ndarray:
+    """Conservative 2x downsampling for binary label masks."""
+    h, w = mask.shape
+    if h == 1 and w == 1:
+        return mask
+    out_h = max(1, h >> 1)
+    out_w = max(1, w >> 1)
+    cropped = mask[: out_h * 2, : out_w * 2]
+    if cropped.size == 0:
+        return mask[::2, ::2]
+    return cropped.reshape(out_h, 2, out_w, 2).max(axis=(1, 3)).astype(mask.dtype)
+
+
 def write_ngff_from_tile_ts(
     tile_yxc: np.ndarray | da.Array,
     out_path: str | Path,
@@ -226,10 +277,14 @@ def write_ngff_from_tile_streaming_ome(
     channel_colors: list[str] | None = None,
     ngff_metadata: dict[str, Any] | None = None,
     metadata_schema: Literal["latest", "v0.4", "0.4"] | None = None,
+    fill_value: int | float | None = 0,
+    sparse_zero_chunks: bool = False,
+    coordinate_translation_yx_um: tuple[float, float] | None = None,
+    run_manifest: dict[str, Any] | None = None,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
-) -> None:
+) -> dict[str, Any]:
     """
     Constant-memory, blockwise OME-Zarr writer (v0.4), no ngff-zarr.
 
@@ -289,6 +344,12 @@ def write_ngff_from_tile_streaming_ome(
         channel_labels=channel_labels,
     )
     root_attrs = prepared["root_attrs"]
+    if coordinate_translation_yx_um is not None:
+        trans_y, trans_x = map(float, coordinate_translation_yx_um)
+        root_attrs = _add_translation_to_multiscales(
+            root_attrs,
+            translation=[0.0, trans_y, trans_x],
+        )
     resolved_name = prepared["resolved_name"]
     resolved_labels = prepared["resolved_channel_labels"]
     omero_version = _omero_version(root_attrs, prepared["schema"])
@@ -306,6 +367,7 @@ def write_ngff_from_tile_streaming_ome(
             chunks=chunks[m],
             dtype=dtype,
             compressor=compressor,
+            fill_value=fill_value,
             overwrite=True,
             zarr_format=2,
         )
@@ -320,6 +382,18 @@ def write_ngff_from_tile_streaming_ome(
     started = time.monotonic()
     last_log = started
     progress_bar = None
+    stats: dict[str, Any] = {
+        "name": name,
+        "shape_yxc": [Y, X, C],
+        "chunks_xy": int(block_xy),
+        "sparse_zero_chunks": bool(sparse_zero_chunks),
+        "rgb_chunks_written": 0,
+        "rgb_chunks_skipped": 0,
+        "fill_value": fill_value,
+        "pyramid_generation_policy": "downsample_streamed_s0",
+    }
+    if run_manifest is not None:
+        run_manifest.update(stats)
 
     if normalized_progress in {"tqdm", "both"}:
         try:
@@ -351,7 +425,11 @@ def write_ngff_from_tile_streaming_ome(
                 blk = tile_yxc_da[y0:y1, x0:x1, :].astype(dtype).compute()
 
                 # Write mip 0
-                arrays[0][:, y0:y1, x0:x1] = np.moveaxis(blk, -1, 0)
+                if sparse_zero_chunks and not np.any(blk):
+                    stats["rgb_chunks_skipped"] += 1
+                else:
+                    arrays[0][:, y0:y1, x0:x1] = np.moveaxis(blk, -1, 0)
+                    stats["rgb_chunks_written"] += 1
 
                 # Downsample and write higher mips by stride slicing
                 src = blk
@@ -364,6 +442,8 @@ def write_ngff_from_tile_streaming_ome(
                     xm0 = x0 >> m
                     ym1 = ym0 + src.shape[0]
                     xm1 = xm0 + src.shape[1]
+                    if sparse_zero_chunks and not np.any(src):
+                        continue
                     arrays[m][:, ym0:ym1, xm0:xm1] = np.moveaxis(src, -1, 0)
 
                 blocks_done += 1
@@ -387,6 +467,11 @@ def write_ngff_from_tile_streaming_ome(
                 }
                 if progress_callback is not None:
                     progress_callback(event)
+                if run_manifest is not None:
+                    run_manifest.update(stats)
+                    run_manifest["blocks_done"] = int(blocks_done)
+                    run_manifest["total_blocks"] = int(total_blocks)
+                    run_manifest["elapsed_s"] = float(elapsed)
                 if progress_bar is not None:
                     progress_bar.update(1)
                 should_log = (
@@ -421,3 +506,122 @@ def write_ngff_from_tile_streaming_ome(
         channel_labels=resolved_labels,
         channel_colors=channel_colors,
     )
+    stats["elapsed_s"] = time.monotonic() - started
+    return stats
+
+
+def write_tissue_mask_label_pyramid(
+    mask_yx_da: da.Array,
+    out_dir: Path | str,
+    phys_xy_um: tuple[float, float],
+    *,
+    block_xy: int,
+    num_mips: int,
+    compressor=None,
+    sparse_zero_chunks: bool = True,
+    coordinate_translation_yx_um: tuple[float, float] | None = None,
+    label_name: str = "tissue_mask",
+    metadata_schema: Literal["latest", "v0.4", "0.4"] | None = "v0.4",
+) -> dict[str, Any]:
+    """Write a spatial Y/X OME-Zarr image-label pyramid under labels/tissue_mask."""
+    out_dir = Path(out_dir)
+    root = open_group_v2(str(out_dir), mode="r+")
+    labels_group = root.create_group("labels", overwrite=True)
+    labels_group.attrs["labels"] = [label_name]
+    label_group = labels_group.create_group(label_name, overwrite=True)
+
+    if mask_yx_da.ndim != 2:
+        raise ValueError(f"mask_yx_da must be (Y,X), got shape {mask_yx_da.shape}")
+    y_size, x_size = map(int, mask_yx_da.shape)
+    py_um = float(phys_xy_um[1])
+    px_um = float(phys_xy_um[0])
+    trans_y = float(coordinate_translation_yx_um[0]) if coordinate_translation_yx_um else 0.0
+    trans_x = float(coordinate_translation_yx_um[1]) if coordinate_translation_yx_um else 0.0
+
+    datasets = []
+    arrays = []
+    for m in range(num_mips):
+        sy = max(1, y_size >> m)
+        sx = max(1, x_size >> m)
+        scale = [py_um * (2**m), px_um * (2**m)]
+        datasets.append(
+            {
+                "path": f"s{m}",
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": scale},
+                    {"type": "translation", "translation": [trans_y, trans_x]},
+                ],
+            }
+        )
+        arr = _create_group_array(
+            label_group,
+            f"s{m}",
+            shape=(sy, sx),
+            chunks=(min(block_xy, sy), min(block_xy, sx)),
+            dtype="uint8",
+            compressor=compressor,
+            fill_value=0,
+            overwrite=True,
+            zarr_format=2,
+        )
+        arr.attrs["_ARRAY_DIMENSIONS"] = ["y", "x"]
+        arrays.append(arr)
+
+    label_group.attrs["multiscales"] = [
+        {
+            "version": "0.4" if metadata_schema in {"v0.4", "0.4", None} else str(metadata_schema),
+            "name": label_name,
+            "axes": [
+                {"name": "y", "type": "space", "unit": "micrometer"},
+                {"name": "x", "type": "space", "unit": "micrometer"},
+            ],
+            "datasets": datasets,
+        }
+    ]
+    label_group.attrs["image-label"] = {
+        "version": "0.4",
+        "colors": [
+            {"label-value": 0, "rgba": [0, 0, 0, 0]},
+            {"label-value": 1, "rgba": [0, 255, 0, 128]},
+        ],
+        "properties": [
+            {"label-value": 0, "class": "background"},
+            {"label-value": 1, "class": "tissue"},
+        ],
+        "source": {"image": "../../"},
+    }
+    label_group.attrs["mask_pyramid_policy"] = "max_pool"
+    label_group.attrs["mask_pyramid_semantics"] = "conservative_visualization"
+
+    total_blocks_y = max(1, math.ceil(y_size / block_xy))
+    total_blocks_x = max(1, math.ceil(x_size / block_xy))
+    stats = {
+        "mask_chunks_written": 0,
+        "mask_chunks_skipped": 0,
+        "total_blocks": total_blocks_y * total_blocks_x,
+        "mask_pyramid_policy": "max_pool",
+        "mask_pyramid_semantics": "conservative_visualization",
+    }
+    for y0 in range(0, y_size, block_xy):
+        y1 = min(y_size, y0 + block_xy)
+        for x0 in range(0, x_size, block_xy):
+            x1 = min(x_size, x0 + block_xy)
+            blk = mask_yx_da[y0:y1, x0:x1].astype("uint8").compute()
+            if sparse_zero_chunks and not np.any(blk):
+                stats["mask_chunks_skipped"] += 1
+            else:
+                arrays[0][y0:y1, x0:x1] = blk
+                stats["mask_chunks_written"] += 1
+            src = blk
+            for m in range(1, num_mips):
+                src = _max_pool_2x(src)
+                if src.size == 0:
+                    break
+                ym0 = y0 >> m
+                xm0 = x0 >> m
+                ym1 = ym0 + src.shape[0]
+                xm1 = xm0 + src.shape[1]
+                if sparse_zero_chunks and not np.any(src):
+                    continue
+                arrays[m][ym0:ym1, xm0:xm1] = src
+    return stats
