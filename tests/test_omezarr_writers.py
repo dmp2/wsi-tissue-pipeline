@@ -6,6 +6,7 @@ import dask.array as da
 import numpy as np
 import pytest
 import zarr
+import wsi_pipeline.omezarr.streaming as streaming_mod
 
 from wsi_pipeline.omezarr import (
     materialize_ngff_root_attrs,
@@ -427,6 +428,60 @@ def test_write_ngff_from_tile_streaming_ome_uses_shared_metadata_path(tmp_path):
         assert attrs[key] == value
     assert zarr.open_group(str(out_dir), mode="r")["s0"].shape == (3, 16, 12)
     assert not any("compressor" in str(w.message).lower() for w in captured)
+
+
+def test_write_ngff_from_tile_streaming_ome_progress_and_uncompressed(tmp_path, monkeypatch):
+    tile = da.from_array(_make_mips(levels=1)[0], chunks=(8, 8, 3))
+    out_dir = tmp_path / "tile-stream-progress.ome.zarr"
+    events: list[dict[str, object]] = []
+    created: dict[str, object] = {}
+
+    class FakeGroup:
+        def __init__(self):
+            self.attrs: dict[str, object] = {}
+
+    class FakeArray:
+        def __init__(self, *, shape, chunks, dtype):
+            self.shape = shape
+            self.chunks = chunks
+            self.dtype = np.dtype(dtype)
+            self.data = np.zeros(shape, dtype=dtype)
+
+        def __setitem__(self, key, value):
+            self.data[key] = value
+
+    fake_group = FakeGroup()
+
+    def fake_open_group(store, *, mode="w"):
+        created["store"] = store
+        created["mode"] = mode
+        return fake_group
+
+    def fake_create_group_array(root, name, **kwargs):
+        created[name] = kwargs
+        return FakeArray(shape=kwargs["shape"], chunks=kwargs["chunks"], dtype=kwargs["dtype"])
+
+    monkeypatch.setattr(streaming_mod, "open_group_v2", fake_open_group)
+    monkeypatch.setattr(streaming_mod, "_create_group_array", fake_create_group_array)
+
+    streaming_mod.write_ngff_from_tile_streaming_ome(
+        tile,
+        out_dir,
+        phys_xy_um=(1.0, 1.0),
+        block_xy=8,
+        num_mips=1,
+        name="progress",
+        compressor=None,
+        progress_mode="log",
+        progress_interval_s=0.0,
+        progress_callback=events.append,
+    )
+
+    assert len(events) == 4
+    assert events[-1]["blocks_done"] == 4
+    assert events[-1]["total_blocks"] == 4
+    assert created["s0"]["compressor"] is None
+    assert fake_group.attrs["omero"]["channels"][0]["color"] == "FF0000"
 
 
 def test_phys_xy_reader_handles_latest_writer_output(tmp_path):

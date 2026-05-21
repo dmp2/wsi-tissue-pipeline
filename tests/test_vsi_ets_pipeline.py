@@ -185,6 +185,69 @@ def test_vsi_to_source_ome_zarr_rejects_stale_cached_source_shape(monkeypatch, t
         vsi_ets.vsi_to_source_ome_zarr(vsi_path, output_path, overwrite=False)
 
 
+def test_estimate_vsi_direct_plating_reports_chunks_and_bytes(monkeypatch, tmp_path):
+    from wsi_pipeline.config import TileConfig
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+
+    class _DummyETS:
+        nlevels = 2
+
+        def __init__(self, path):
+            assert Path(path) == ets_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(128, 128), (64, 64)][level]
+
+        def read_level(self, level):
+            shape = self.level_shape(level)
+            return np.zeros((*shape, 3), dtype=np.uint8)
+
+    def _fake_segment(image, **kwargs):  # noqa: ARG001
+        mask = np.zeros((64, 64), dtype=bool)
+        mask[16:48, 16:48] = True
+        return mask, {"component_source": "fake"}
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: {
+        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}
+    })
+    monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
+    monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
+
+    estimate = vsi_ets.estimate_vsi_direct_plating(
+        vsi_path,
+        source_level=0,
+        segmentation_level=1,
+        tile_frame_level="segmentation",
+        tile_config=TileConfig(chunk_size=64, pad_multiple=64, extra_margin_px=0),
+        min_side_for_mips=64,
+    )
+
+    assert estimate["tissue_count"] == 1
+    tissue = estimate["tissues"][0]
+    assert tissue["source_tile_dim"] == 128
+    assert tissue["segmentation_tile_dim"] == 64
+    assert tissue["s0_shape_yxc"] == [128, 128, 3]
+    assert tissue["s0_chunks"] == 4
+    assert tissue["num_mips"] == 2
+    assert tissue["mip_shapes_yxc"] == [[128, 128, 3], [64, 64, 3]]
+    assert tissue["all_mip_chunks"] == 5
+    assert tissue["uncompressed_bytes_all_mips"] == 61440
+    assert estimate["totals"]["uncompressed_bytes_all_mips"] == 61440
+
+
 def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(monkeypatch, tmp_path):
     from wsi_pipeline.pipeline import vsi_ets
 
@@ -279,6 +342,74 @@ def test_process_vsi_directory_with_plating_uses_direct_ets_by_default(monkeypat
     assert direct_calls[0]["source_level"] == 0
     assert direct_calls[0]["segmentation_level"] == 7
     assert direct_calls[0]["tile_frame_level"] == "segmentation"
+
+
+def test_direct_vsi_plating_forwards_uncompressed_streaming_progress(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "a.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_a_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+
+    class _DummyETS:
+        nlevels = 2
+
+        def __init__(self, path):
+            assert Path(path) == ets_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(16, 16), (8, 8)][level]
+
+        def read_level(self, level):
+            return np.zeros((*self.level_shape(level), 3), dtype=np.uint8)
+
+    record = vsi_ets.TissueTileRecord(
+        tile=da.from_array(np.zeros((16, 16, 3), dtype=np.uint8), chunks=(8, 8, 3)),
+        tissue_index=0,
+        label_id=1,
+        crop_bounds_source_level=(0, 0, 16, 16),
+        crop_bounds_segmentation_level=(0, 0, 8, 8),
+        tile_dim=16,
+    )
+    writer_calls: list[dict[str, object]] = []
+
+    def _fake_writer(**kwargs):
+        writer_calls.append(kwargs)
+        Path(kwargs["out_dir"]).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: {
+        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}
+    })
+    monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
+    monkeypatch.setattr(vsi_ets, "_segment_for_plating", lambda *args, **kwargs: (np.ones((8, 8), dtype=bool), {}))
+    monkeypatch.setattr(vsi_ets, "_direct_ets_tissue_tile_records", lambda **kwargs: ([record], 16))
+    monkeypatch.setattr(vsi_ets, "_is_big_tile", lambda *args, **kwargs: True)
+    monkeypatch.setattr(vsi_ets, "write_ngff_from_tile_streaming_ome", _fake_writer)
+
+    paths = vsi_ets.process_vsi_with_direct_plating(
+        vsi_path,
+        tmp_path / "out",
+        source_level=0,
+        segmentation_level=1,
+        compression="none",
+        progress_mode="both",
+        progress_interval_s=2.0,
+    )
+
+    assert len(paths) == 1
+    assert len(writer_calls) == 1
+    assert writer_calls[0]["compressor"] is None
+    assert writer_calls[0]["progress_mode"] == "both"
+    assert writer_calls[0]["progress_interval_s"] == 2.0
 
 
 def test_direct_ets_tissue_tile_records_read_only_tissue_blocks(monkeypatch, tmp_path):

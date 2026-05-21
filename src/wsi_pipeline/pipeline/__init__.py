@@ -22,6 +22,7 @@ from .plating import (
 )
 from .vsi_ets import (
     diagnose_vsi_replating,
+    estimate_vsi_direct_plating,
     process_vsi_directory_with_plating,
     process_vsi_with_direct_plating,
     vsi_to_source_ome_zarr,
@@ -31,6 +32,7 @@ __all__ = [
     "process_slide_with_plating",
     "process_vsi_directory_with_plating",
     "process_vsi_with_direct_plating",
+    "estimate_vsi_direct_plating",
     "diagnose_vsi_replating",
     "vsi_to_source_ome_zarr",
     # _is_big_tile and _safe_close_existing_client are internal helpers;

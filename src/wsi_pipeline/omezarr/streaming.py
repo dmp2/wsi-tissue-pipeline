@@ -7,7 +7,11 @@ fit in RAM, using block-by-block processing.
 
 from __future__ import annotations
 
+import logging
+import math
 import shutil
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -18,6 +22,35 @@ from ngff_zarr import to_multiscales, to_ngff_image, to_ngff_zarr
 
 from .metadata import _prepare_ngff_writer_metadata, default_channel_colors
 from .zarr_compat import create_group_array, open_group_v2
+
+logger = logging.getLogger(__name__)
+
+
+def _normalize_progress_mode(progress_mode: str | bool | None) -> str:
+    if progress_mode is True:
+        return "both"
+    if progress_mode is False or progress_mode is None:
+        return "none"
+    normalized = str(progress_mode).strip().lower().replace("_", "-")
+    aliases = {
+        "true": "both",
+        "yes": "both",
+        "1": "both",
+        "false": "none",
+        "no": "none",
+        "0": "none",
+        "off": "none",
+        "log": "log",
+        "logs": "log",
+        "logging": "log",
+        "tqdm": "tqdm",
+        "bar": "tqdm",
+        "both": "both",
+        "none": "none",
+    }
+    if normalized not in aliases:
+        raise ValueError("progress_mode must be one of 'none', 'log', 'tqdm', or 'both'.")
+    return aliases[normalized]
 
 
 def _omero_version(root_attrs: dict[str, Any], schema: str) -> str:
@@ -193,6 +226,9 @@ def write_ngff_from_tile_streaming_ome(
     channel_colors: list[str] | None = None,
     ngff_metadata: dict[str, Any] | None = None,
     metadata_schema: Literal["latest", "v0.4", "0.4"] | None = None,
+    progress_mode: str | bool | None = "none",
+    progress_interval_s: float = 30.0,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """
     Constant-memory, blockwise OME-Zarr writer (v0.4), no ngff-zarr.
@@ -225,6 +261,12 @@ def write_ngff_from_tile_streaming_ome(
         Full ``get_vsi_metadata()`` payload or a direct NGFF root-attrs payload.
     metadata_schema : {"latest", "v0.4", "0.4"}, optional
         Schema alias used when ``ngff_metadata`` provides dual projections.
+    progress_mode : {"none", "log", "tqdm", "both"} or bool
+        Progress reporting mode. ``True`` is treated as ``"both"``.
+    progress_interval_s : float
+        Minimum seconds between log progress updates.
+    progress_callback : callable, optional
+        Called after each base block with progress details.
     """
     out_dir = Path(out_dir)
     if out_dir.exists():
@@ -270,28 +312,105 @@ def write_ngff_from_tile_streaming_ome(
         arrays.append(arr)
 
     # Stream blocks from the lazy Dask source and write all mips
-    for y0 in range(0, Y, block_xy):
-        y1 = min(Y, y0 + block_xy)
-        for x0 in range(0, X, block_xy):
-            x1 = min(X, x0 + block_xy)
-            # Read a small block lazily -> NumPy
-            blk = tile_yxc_da[y0:y1, x0:x1, :].astype(dtype).compute()
+    normalized_progress = _normalize_progress_mode(progress_mode)
+    total_blocks_y = max(1, math.ceil(Y / block_xy))
+    total_blocks_x = max(1, math.ceil(X / block_xy))
+    total_blocks = total_blocks_y * total_blocks_x
+    blocks_done = 0
+    started = time.monotonic()
+    last_log = started
+    progress_bar = None
 
-            # Write mip 0
-            arrays[0][:, y0:y1, x0:x1] = np.moveaxis(blk, -1, 0)
+    if normalized_progress in {"tqdm", "both"}:
+        try:
+            from tqdm.auto import tqdm
 
-            # Downsample and write higher mips by stride slicing
-            src = blk
-            for m in range(1, num_mips):
-                # Integer decimation by 2 per level
-                src = src[::2, ::2, :]
-                if src.size == 0:
-                    break
-                ym0 = y0 >> m
-                xm0 = x0 >> m
-                ym1 = ym0 + src.shape[0]
-                xm1 = xm0 + src.shape[1]
-                arrays[m][:, ym0:ym1, xm0:xm1] = np.moveaxis(src, -1, 0)
+            progress_bar = tqdm(total=total_blocks, desc=f"{name} s0 blocks", unit="block")
+        except Exception as exc:
+            logger.warning("tqdm progress requested but unavailable (%s); continuing with logs.", exc)
+            normalized_progress = "log" if normalized_progress == "tqdm" else "both"
+
+    logger.info(
+        "Streaming OME-Zarr %s to %s: shape=(%d, %d, %d), blocks=%d, block_xy=%d, mips=%d.",
+        name,
+        out_dir,
+        Y,
+        X,
+        C,
+        total_blocks,
+        block_xy,
+        num_mips,
+    )
+
+    try:
+        for y0 in range(0, Y, block_xy):
+            y1 = min(Y, y0 + block_xy)
+            for x0 in range(0, X, block_xy):
+                x1 = min(X, x0 + block_xy)
+                # Read a small block lazily -> NumPy
+                blk = tile_yxc_da[y0:y1, x0:x1, :].astype(dtype).compute()
+
+                # Write mip 0
+                arrays[0][:, y0:y1, x0:x1] = np.moveaxis(blk, -1, 0)
+
+                # Downsample and write higher mips by stride slicing
+                src = blk
+                for m in range(1, num_mips):
+                    # Integer decimation by 2 per level
+                    src = src[::2, ::2, :]
+                    if src.size == 0:
+                        break
+                    ym0 = y0 >> m
+                    xm0 = x0 >> m
+                    ym1 = ym0 + src.shape[0]
+                    xm1 = xm0 + src.shape[1]
+                    arrays[m][:, ym0:ym1, xm0:xm1] = np.moveaxis(src, -1, 0)
+
+                blocks_done += 1
+                now = time.monotonic()
+                elapsed = now - started
+                blocks_per_sec = blocks_done / elapsed if elapsed > 0 else 0.0
+                blocks_left = total_blocks - blocks_done
+                eta_s = blocks_left / blocks_per_sec if blocks_per_sec > 0 else None
+                event = {
+                    "name": name,
+                    "out_dir": str(out_dir),
+                    "blocks_done": blocks_done,
+                    "total_blocks": total_blocks,
+                    "elapsed_s": elapsed,
+                    "blocks_per_sec": blocks_per_sec,
+                    "eta_s": eta_s,
+                    "y0": y0,
+                    "y1": y1,
+                    "x0": x0,
+                    "x1": x1,
+                }
+                if progress_callback is not None:
+                    progress_callback(event)
+                if progress_bar is not None:
+                    progress_bar.update(1)
+                should_log = (
+                    normalized_progress in {"log", "both"}
+                    and progress_interval_s >= 0
+                    and (now - last_log >= progress_interval_s or blocks_done == total_blocks)
+                )
+                if should_log:
+                    eta_text = f"{eta_s:.1f}s" if eta_s is not None else "unknown"
+                    logger.info(
+                        "Streaming OME-Zarr progress [%s]: %d/%d blocks, elapsed %.1fs, "
+                        "%.2f blocks/sec, ETA %s, out=%s.",
+                        name,
+                        blocks_done,
+                        total_blocks,
+                        elapsed,
+                        blocks_per_sec,
+                        eta_text,
+                        out_dir,
+                    )
+                    last_log = now
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
     root.attrs.update(root_attrs)
 

@@ -16,6 +16,7 @@ import dask.array as da
 import dask.config
 import numpy as np
 import zarr
+from numcodecs import Blosc
 
 from ..config import SegmentationConfig, TileConfig
 from ..omezarr.metadata import (
@@ -34,6 +35,32 @@ from ..tiles.generator import TissueTileRecord, generate_tissue_tile_records
 from ..wsi_processing import segment_tissue
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_compression_mode(compression: str | None) -> str:
+    normalized = str(compression or "none").strip().lower().replace("_", "-")
+    aliases = {
+        "none": "none",
+        "uncompressed": "none",
+        "raw": "none",
+        "false": "none",
+        "0": "none",
+        "lossless": "lossless",
+        "compressed": "lossless",
+        "zstd": "lossless",
+        "true": "lossless",
+        "1": "lossless",
+    }
+    if normalized not in aliases:
+        raise ValueError("compression must be one of 'none' or 'lossless'.")
+    return aliases[normalized]
+
+
+def _compressor_for_compression_mode(compression: str):
+    compression = _normalize_compression_mode(compression)
+    if compression == "none":
+        return None
+    return Blosc(cname="zstd", clevel=5, shuffle=Blosc.BITSHUFFLE)
 
 
 def _is_big_tile(tile_da, bytes_per_px=1, min_side=8192, max_bytes=1_500_000_000):
@@ -458,6 +485,9 @@ def process_slide_with_plating(
     # dtype policy
     dtype: np.dtype | None = "uint8",  # cast ROI to uint8 before mip (recommended for imagery)
     source_context: Mapping[str, Any] | None = None,
+    compression: str = "none",
+    progress_mode: str | bool | None = "none",
+    progress_interval_s: float = 30.0,
 ) -> list[Path]:
     """
     Pipeline for ONE slide root (OME-Zarr):
@@ -483,6 +513,8 @@ def process_slide_with_plating(
     # Make the output directory if it doesn't already exist
     out_ngff_dir = Path(out_ngff_dir)
     out_ngff_dir.mkdir(parents=True, exist_ok=True)
+    compression = _normalize_compression_mode(compression)
+    compressor = _compressor_for_compression_mode(compression)
     if tile_config is not None:
         plate_chunk_xy = tile_config.chunk_size
         tile_extra_margin_px = tile_config.extra_margin_px
@@ -838,11 +870,13 @@ def process_slide_with_plating(
                         block_xy=plate_chunk_xy,
                         num_mips=num_mips,
                         name=name,
-                        compressor=None,  # or zarr.Blosc(cname="zstd", clevel=5, shuffle=2)
+                        compressor=compressor,
                         channel_labels=_channel_labels_for_count(int(tile_dask.shape[2])),
                         channel_colors=_channel_colors_for_count(int(tile_dask.shape[2])),
                         ngff_metadata=tile_ngff_metadata,
                         metadata_schema=source_metadata_schema,
+                        progress_mode=progress_mode,
+                        progress_interval_s=progress_interval_s,
                     )
 
                     # Append to precomputed plate (optional)

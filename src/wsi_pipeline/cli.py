@@ -548,6 +548,99 @@ def diagnose_vsi_replating_cmd(
         console.print(f"[bold blue]Pixel path debug:[/] {pixel_paths[0]}")
 
 
+@main.command("estimate-vsi-plating")
+@click.option(
+    "--vsi",
+    "vsi_path",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="Input VSI path to estimate.",
+)
+@click.option(
+    "--source-level",
+    default="0",
+    show_default=True,
+    help="ETS source level planned for extraction.",
+)
+@click.option(
+    "--segmentation-level",
+    default="7",
+    show_default=True,
+    help="ETS level used for segmentation.",
+)
+@click.option(
+    "--tile-frame-level",
+    default="segmentation",
+    show_default=True,
+    type=click.Choice(["segmentation", "source"]),
+    help="Coordinate level where crop size, padding, and margin are defined.",
+)
+@click.option(
+    "--metadata-backend",
+    default="auto",
+    show_default=True,
+    type=click.Choice(["auto", "bioformats", "ets_only"]),
+    help="Metadata backend used for the estimate.",
+)
+@click.option(
+    "--metadata-schema",
+    default="v0.4",
+    show_default=True,
+    help="Metadata schema to use for downstream writes.",
+)
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Pipeline YAML config whose segmentation/tile settings should be used.",
+)
+@click.option(
+    "--output-json",
+    type=click.Path(path_type=Path),
+    help="Optional path to write the estimate JSON.",
+)
+def estimate_vsi_plating_cmd(
+    vsi_path: Path,
+    source_level: str,
+    segmentation_level: str,
+    tile_frame_level: str,
+    metadata_backend: str,
+    metadata_schema: str,
+    config_path: Path | None,
+    output_json: Path | None,
+):
+    """Estimate full-resolution direct VSI/ETS tissue OME-Zarr output size."""
+    import json
+
+    from .pipeline import estimate_vsi_direct_plating
+
+    config = load_config(config_path) if config_path else PipelineConfig()
+    result = estimate_vsi_direct_plating(
+        vsi_path,
+        source_level=source_level,
+        segmentation_level=segmentation_level,
+        tile_frame_level=tile_frame_level,
+        segmentation_config=config.segmentation,
+        tile_config=config.tiles,
+        metadata_backend=metadata_backend,
+        metadata_schema=metadata_schema,
+    )
+    totals = result["totals"]
+    console.print(f"[bold green]Estimated tissues:[/] {result['tissue_count']}")
+    console.print(
+        "[bold blue]Total uncompressed pyramid bytes:[/] "
+        f"{totals['uncompressed_size_all_mips']} "
+        f"({totals['all_mip_chunks']} chunks)"
+    )
+    if totals.get("warnings"):
+        console.print(f"[bold yellow]Warnings:[/] {', '.join(totals['warnings'])}")
+    if output_json is not None:
+        output_json.parent.mkdir(parents=True, exist_ok=True)
+        output_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
+        console.print(f"[bold green]Wrote estimate:[/] {output_json}")
+
+
 @main.command()
 def info():
     """Display pipeline information and configuration."""

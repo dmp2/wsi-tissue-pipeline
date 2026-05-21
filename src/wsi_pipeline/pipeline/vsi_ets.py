@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
 import dask.array as da
 import dask.config
 import numpy as np
+from numcodecs import Blosc
 from scipy.ndimage import binary_fill_holes
 from skimage import measure
 
@@ -142,6 +145,73 @@ def _physical_xy_from_metadata(metadata: dict[str, Any]) -> tuple[float, float] 
             y_um = canonical_physical.get("y")
             if x_um is not None and y_um is not None:
                 return float(x_um), float(y_um)
+    return None
+
+
+def _normalize_compression_mode(compression: str | None) -> str:
+    normalized = str(compression or "none").strip().lower().replace("_", "-")
+    aliases = {
+        "none": "none",
+        "uncompressed": "none",
+        "raw": "none",
+        "false": "none",
+        "0": "none",
+        "lossless": "lossless",
+        "compressed": "lossless",
+        "zstd": "lossless",
+        "true": "lossless",
+        "1": "lossless",
+    }
+    if normalized not in aliases:
+        raise ValueError("compression must be one of 'none' or 'lossless'.")
+    return aliases[normalized]
+
+
+def _compressor_for_compression_mode(compression: str):
+    compression = _normalize_compression_mode(compression)
+    if compression == "none":
+        return None
+    return Blosc(cname="zstd", clevel=5, shuffle=Blosc.BITSHUFFLE)
+
+
+def _human_bytes(num_bytes: int) -> str:
+    value = float(num_bytes)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024.0 or unit == "TiB":
+            return f"{value:.2f} {unit}"
+        value /= 1024.0
+    return f"{value:.2f} TiB"
+
+
+def _pyramid_shapes_yxc(
+    *,
+    base_shape_yxc: tuple[int, int, int],
+    num_mips: int,
+) -> list[tuple[int, int, int]]:
+    y, x, c = map(int, base_shape_yxc)
+    return [(max(1, y >> level), max(1, x >> level), c) for level in range(int(num_mips))]
+
+
+def _chunk_count_yx(*, y: int, x: int, chunk_xy: int) -> int:
+    return int(math.ceil(int(y) / int(chunk_xy)) * math.ceil(int(x) / int(chunk_xy)))
+
+
+def _estimate_pyramid_bytes(
+    *,
+    shapes_yxc: list[tuple[int, int, int]],
+    bytes_per_pixel: int,
+) -> int:
+    return int(sum(y * x * c * int(bytes_per_pixel) for y, x, c in shapes_yxc))
+
+
+def _estimate_warning(*, bytes_all_mips: int, s0_chunks: int) -> str | None:
+    gib = bytes_all_mips / float(2**30)
+    if gib >= 250.0:
+        return "very_large_output_over_250_gib"
+    if gib >= 100.0:
+        return "large_output_over_100_gib"
+    if s0_chunks >= 100_000:
+        return "many_s0_chunks_over_100k"
     return None
 
 
@@ -1079,6 +1149,229 @@ def diagnose_vsi_replating(
     return result
 
 
+def estimate_vsi_direct_plating(
+    vsi_path: str | Path,
+    *,
+    segment_fn=None,
+    source_level: int | str = 0,
+    segmentation_level: int | str | None = 7,
+    tile_frame_level: str = "segmentation",
+    segmentation_config: SegmentationConfig | None = None,
+    tile_config: TileConfig | None = None,
+    metadata_backend: str = "auto",
+    metadata_schema: str = "v0.4",
+    struct_elem_px: int = 9,
+    min_size: int = 2000,
+    plate_chunk_xy: int = 512,
+    min_side_for_mips: int | None = None,
+    dtype: np.dtype | str | None = "uint8",
+) -> dict[str, Any]:
+    """
+    Estimate a direct VSI/ETS plating run without writing tissue OME-Zarrs.
+
+    This performs the same metadata read, level resolution, segmentation, and
+    crop-frame construction as :func:`process_vsi_with_direct_plating`, but it
+    avoids building the full-resolution Dask tile graph or writing any arrays.
+    """
+    started = time.monotonic()
+    vsi_path = Path(vsi_path)
+    tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+
+    ets_path = find_ets_file(vsi_path)
+    if ets_path is None:
+        raise FileNotFoundError(f"No ETS file found for VSI {vsi_path}")
+    ets_path = Path(ets_path)
+
+    metadata = get_vsi_metadata(
+        vsi_path,
+        metadata_backend=metadata_backend,
+        target_schema="latest",
+    )
+    if not metadata:
+        raise RuntimeError(f"Unable to extract structural metadata for VSI {vsi_path}")
+
+    if tile_config is not None:
+        plate_chunk_xy = int(tile_config.chunk_size)
+        tile_extra_margin_px = int(tile_config.extra_margin_px)
+        tile_pad_multiple = int(tile_config.pad_multiple)
+    else:
+        tile_extra_margin_px = 0
+        tile_pad_multiple = int(plate_chunk_xy)
+
+    with ETSFile(ets_path) as ets:
+        source_idx = _resolve_ets_level(
+            source_level,
+            default_index=0,
+            nlevels=ets.nlevels,
+            label="source",
+        )
+        segmentation_idx = _resolve_ets_level(
+            segmentation_level,
+            default_index=ets.nlevels - 1,
+            nlevels=ets.nlevels,
+            label="segmentation",
+        )
+        source_shape_yx = tuple(map(int, ets.level_shape(source_idx)))
+        segmentation_yxc = ets.read_level(segmentation_idx)
+
+    seg_cyx = da.from_array(
+        np.moveaxis(segmentation_yxc, -1, 0),
+        chunks=(
+            int(segmentation_yxc.shape[2]),
+            min(plate_chunk_xy, int(segmentation_yxc.shape[0])),
+            min(plate_chunk_xy, int(segmentation_yxc.shape[1])),
+        ),
+    )
+    filled_lr, segmentation_info = _segment_for_plating(
+        seg_cyx,
+        segment_fn=segment_fn,
+        segmentation_config=segmentation_config,
+        min_size=segmentation_config.min_area_px if segmentation_config is not None else min_size,
+        struct_elem_px=segmentation_config.struct_elem_px
+        if segmentation_config is not None
+        else struct_elem_px,
+    )
+    lr_labels = _filled_lr_labels(np.asarray(filled_lr, dtype=bool))
+    if lr_labels.max() == 0:
+        return _json_ready(
+            {
+                "vsi_path": str(vsi_path),
+                "ets_path": str(ets_path),
+                "metadata_backend": metadata_backend,
+                "metadata_schema": metadata_schema,
+                "source_level": int(source_idx),
+                "segmentation_level": int(segmentation_idx),
+                "tile_frame_level": tile_frame_level,
+                "source_shape_yx": list(source_shape_yx),
+                "segmentation_shape_yx": list(map(int, lr_labels.shape)),
+                "tissue_count": 0,
+                "tissues": [],
+                "totals": {
+                    "s0_chunks": 0,
+                    "all_mip_chunks": 0,
+                    "uncompressed_bytes_all_mips": 0,
+                    "uncompressed_size_all_mips": _human_bytes(0),
+                    "warnings": ["no_tissue_regions_found"],
+                },
+                "segmentation_info": segmentation_info,
+                "elapsed_s": time.monotonic() - started,
+            }
+        )
+
+    frame_specs, tile_dim = _build_tissue_frame_specs(
+        lr_labels,
+        source_shape_yx=source_shape_yx,
+        tile_frame_level=tile_frame_level,
+        pad_multiple=tile_pad_multiple,
+        extra_margin_px=tile_extra_margin_px,
+    )
+
+    dtype_obj = np.dtype(dtype if dtype else np.uint8)
+    bytes_per_pixel = int(dtype_obj.itemsize)
+    min_side = int(min_side_for_mips or plate_chunk_xy)
+    tissues: list[dict[str, Any]] = []
+    total_s0_chunks = 0
+    total_all_mip_chunks = 0
+    total_bytes = 0
+    warnings: list[str] = []
+
+    for spec in frame_specs:
+        canvas = spec.logical_canvas_source_yx
+        clipped = spec.clipped_source_yx
+        if clipped.h <= 0 or clipped.w <= 0:
+            continue
+        channels = int(segmentation_yxc.shape[-1]) if segmentation_yxc.ndim == 3 else 1
+        num_mips = compute_num_mips_min_side(canvas.w, canvas.h, min_side)
+        shapes_yxc = _pyramid_shapes_yxc(
+            base_shape_yxc=(canvas.h, canvas.w, channels),
+            num_mips=num_mips,
+        )
+        s0_chunks = _chunk_count_yx(y=canvas.h, x=canvas.w, chunk_xy=plate_chunk_xy)
+        all_mip_chunks = sum(
+            _chunk_count_yx(y=y, x=x, chunk_xy=plate_chunk_xy) for y, x, _c in shapes_yxc
+        )
+        bytes_all_mips = _estimate_pyramid_bytes(
+            shapes_yxc=shapes_yxc,
+            bytes_per_pixel=bytes_per_pixel,
+        )
+        warning = _estimate_warning(bytes_all_mips=bytes_all_mips, s0_chunks=s0_chunks)
+        if warning is not None:
+            warnings.append(f"tissue_{spec.tissue_index:02d}:{warning}")
+
+        total_s0_chunks += s0_chunks
+        total_all_mip_chunks += all_mip_chunks
+        total_bytes += bytes_all_mips
+        tissues.append(
+            {
+                "tissue_index": int(spec.tissue_index),
+                "label_id": int(spec.label_id),
+                "logical_canvas_source_yx": spec.logical_canvas_source_yx.as_dict(),
+                "clipped_source_yx": spec.clipped_source_yx.as_dict(),
+                "padding_source_level": spec.padding_source_level.as_dict(),
+                "logical_frame_segmentation_yx": spec.logical_frame_seg_yx.as_dict(),
+                "clipped_frame_segmentation_yx": spec.clipped_frame_seg_yx.as_dict(),
+                "source_tile_dim": int(spec.source_canvas_dim),
+                "segmentation_tile_dim": int(spec.segmentation_tile_dim),
+                "effective_segmentation_tile_dim": float(
+                    spec.source_canvas_dim / max(spec.scale_y, spec.scale_x)
+                ),
+                "scale_y": float(spec.scale_y),
+                "scale_x": float(spec.scale_x),
+                "s0_shape_yxc": [int(canvas.h), int(canvas.w), channels],
+                "s0_chunks": int(s0_chunks),
+                "num_mips": int(num_mips),
+                "mip_shapes_yxc": [list(map(int, shape)) for shape in shapes_yxc],
+                "all_mip_chunks": int(all_mip_chunks),
+                "uncompressed_bytes_all_mips": int(bytes_all_mips),
+                "uncompressed_size_all_mips": _human_bytes(bytes_all_mips),
+                "warning": warning,
+            }
+        )
+
+    total_warning = _estimate_warning(
+        bytes_all_mips=total_bytes,
+        s0_chunks=total_s0_chunks,
+    )
+    if total_warning is not None:
+        warnings.append(f"total:{total_warning}")
+
+    base_phys_xy_um = _physical_xy_from_metadata(metadata) or (1.0, 1.0)
+    result = {
+        "vsi_path": str(vsi_path),
+        "ets_path": str(ets_path),
+        "metadata_backend": metadata_backend,
+        "metadata_schema": metadata_schema,
+        "source_level": int(source_idx),
+        "segmentation_level": int(segmentation_idx),
+        "tile_frame_level": tile_frame_level,
+        "source_shape_yx": list(source_shape_yx),
+        "segmentation_shape_yx": list(map(int, lr_labels.shape)),
+        "source_physical_pixel_size": {
+            "x": float(base_phys_xy_um[0]) * (2**source_idx),
+            "y": float(base_phys_xy_um[1]) * (2**source_idx),
+            "unit": "micrometer",
+        },
+        "chunk_xy": int(plate_chunk_xy),
+        "pad_multiple": int(tile_pad_multiple),
+        "extra_margin_px": int(tile_extra_margin_px),
+        "dtype": str(dtype_obj),
+        "bytes_per_pixel": bytes_per_pixel,
+        "tissue_count": len(tissues),
+        "tile_dim": int(tile_dim),
+        "tissues": tissues,
+        "totals": {
+            "s0_chunks": int(total_s0_chunks),
+            "all_mip_chunks": int(total_all_mip_chunks),
+            "uncompressed_bytes_all_mips": int(total_bytes),
+            "uncompressed_size_all_mips": _human_bytes(total_bytes),
+            "warnings": warnings,
+        },
+        "segmentation_info": segmentation_info,
+        "elapsed_s": time.monotonic() - started,
+    }
+    return _json_ready(result)
+
+
 def vsi_to_source_ome_zarr(
     vsi_path: str | Path,
     output_path: str | Path,
@@ -1210,6 +1503,9 @@ def process_vsi_with_direct_plating(
     min_side_for_mips: int | None = None,
     tile_extra_margin_px: int = 0,
     dtype: np.dtype | str | None = "uint8",
+    compression: str = "none",
+    progress_mode: str | bool | None = "none",
+    progress_interval_s: float = 30.0,
 ) -> list[Path]:
     """
     Segment a VSI/ETS pyramid and write per-tissue OME-Zarr derivatives without
@@ -1220,6 +1516,8 @@ def process_vsi_with_direct_plating(
     out_ngff_dir = Path(out_ngff_dir)
     out_ngff_dir.mkdir(parents=True, exist_ok=True)
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+    compression = _normalize_compression_mode(compression)
+    compressor = _compressor_for_compression_mode(compression)
 
     ets_path = find_ets_file(vsi_path)
     if ets_path is None:
@@ -1347,11 +1645,21 @@ def process_vsi_with_direct_plating(
     )
 
     _safe_close_existing_client()
+    run_started = time.monotonic()
     with dask.config.set({"scheduler": "threads", "array.slicing.split_large_chunks": True}):
         for z_idx, record in enumerate(tile_records):
             tile_dask = record.tile
             name = f"{vsi_path.stem}_tissue_{record.tissue_index:02d}"
             ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
+            tissue_started = time.monotonic()
+            logger.info(
+                "Writing direct ETS tissue %d/%d: %s shape=%s compression=%s.",
+                z_idx + 1,
+                len(tile_records),
+                name,
+                tuple(map(int, tile_dask.shape)),
+                compression,
+            )
             if any_big:
                 num_mips = compute_num_mips_min_side(
                     int(tile_dask.shape[1]),
@@ -1372,11 +1680,13 @@ def process_vsi_with_direct_plating(
                     block_xy=plate_chunk_xy,
                     num_mips=num_mips,
                     name=name,
-                    compressor=None,
+                    compressor=compressor,
                     channel_labels=default_channel_labels(int(tile_dask.shape[2])),
                     channel_colors=default_channel_colors(int(tile_dask.shape[2])),
                     ngff_metadata=tile_ngff_metadata,
                     metadata_schema=source_metadata_schema,
+                    progress_mode=progress_mode,
+                    progress_interval_s=progress_interval_s,
                 )
                 if plate is not None:
                     plate.write_slice(z_idx, tlazy)
@@ -1432,8 +1742,20 @@ def process_vsi_with_direct_plating(
                 segmentation_level=segmentation_idx,
                 phys_xy_um=(px_um, py_um),
             )
+            logger.info(
+                "Finished direct ETS tissue %d/%d: %s in %.1fs.",
+                z_idx + 1,
+                len(tile_records),
+                name,
+                time.monotonic() - tissue_started,
+            )
 
-    logger.info("Wrote %d direct ETS tissue OME-Zarrs to %s", len(out_paths), out_ngff_dir)
+    logger.info(
+        "Wrote %d direct ETS tissue OME-Zarrs to %s in %.1fs.",
+        len(out_paths),
+        out_ngff_dir,
+        time.monotonic() - run_started,
+    )
     return out_paths
 
 
@@ -1457,6 +1779,9 @@ def process_vsi_directory_with_plating(
     parallel: bool = False,
     min_side_for_mips: int | None = None,
     dtype: np.dtype | str | None = "uint8",
+    compression: str = "none",
+    progress_mode: str | bool | None = "none",
+    progress_interval_s: float = 30.0,
 ) -> dict[str, list[Path]]:
     """
     Process all matching VSI files into per-tissue OME-Zarr derivatives.
@@ -1474,6 +1799,7 @@ def process_vsi_directory_with_plating(
         source_ome_zarr_dir.mkdir(parents=True, exist_ok=True)
     per_tissue_dir.mkdir(parents=True, exist_ok=True)
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+    compression = _normalize_compression_mode(compression)
 
     results: dict[str, list[Path]] = {}
     vsi_paths = sorted(input_dir.glob(pattern))
@@ -1505,6 +1831,9 @@ def process_vsi_directory_with_plating(
                 parallel=parallel,
                 min_side_for_mips=min_side_for_mips,
                 dtype=dtype,
+                compression=compression,
+                progress_mode=progress_mode,
+                progress_interval_s=progress_interval_s,
                 source_context={
                     "source_kind": "vsi",
                     "source_path": str(vsi_path),
@@ -1530,6 +1859,9 @@ def process_vsi_directory_with_plating(
                 parallel=parallel,
                 min_side_for_mips=min_side_for_mips,
                 dtype=dtype,
+                compression=compression,
+                progress_mode=progress_mode,
+                progress_interval_s=progress_interval_s,
             )
         results[str(vsi_path)] = tissue_paths
 
