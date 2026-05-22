@@ -1377,8 +1377,19 @@ def estimate_vsi_direct_plating(
                 "totals": {
                     "s0_chunks": 0,
                     "all_mip_chunks": 0,
+                    "mask_all_mip_chunks": 0,
+                    "combined_logical_chunks": 0,
+                    "rgb_uncompressed_bytes_all_mips": 0,
+                    "mask_uncompressed_bytes_all_mips": 0,
+                    "total_uncompressed_bytes_rgb_plus_mask": 0,
+                    "rgb_uncompressed_size_all_mips": _human_bytes(0),
+                    "mask_uncompressed_size_all_mips": _human_bytes(0),
+                    "total_uncompressed_size_rgb_plus_mask": _human_bytes(0),
                     "uncompressed_bytes_all_mips": 0,
+                    "uncompressed_bytes_estimate": 0,
                     "uncompressed_size_all_mips": _human_bytes(0),
+                    "compressed_bytes_sample_estimate": None,
+                    "compressed_estimate_method": None,
                     "warnings": ["no_tissue_regions_found"],
                 },
                 "segmentation_info": segmentation_info,
@@ -1401,7 +1412,9 @@ def estimate_vsi_direct_plating(
     tissues: list[dict[str, Any]] = []
     total_s0_chunks = 0
     total_all_mip_chunks = 0
+    total_mask_all_mip_chunks = 0
     total_bytes = 0
+    total_mask_bytes = 0
     warnings: list[str] = []
 
     for spec in frame_specs:
@@ -1438,7 +1451,10 @@ def estimate_vsi_direct_plating(
 
         total_s0_chunks += s0_chunks
         total_all_mip_chunks += all_mip_chunks
+        total_mask_all_mip_chunks += mask_mip_chunks
         total_bytes += bytes_all_mips
+        total_mask_bytes += mask_bytes_all_mips
+        total_combined_bytes = bytes_all_mips + mask_bytes_all_mips
         tissues.append(
             {
                 "tissue_index": int(spec.tissue_index),
@@ -1465,9 +1481,17 @@ def estimate_vsi_direct_plating(
                 "mip_shapes_yxc": [list(map(int, shape)) for shape in shapes_yxc],
                 "all_mip_chunks": int(all_mip_chunks),
                 "mask_all_mip_chunks": int(mask_mip_chunks),
-                "uncompressed_bytes_all_mips": int(bytes_all_mips),
-                "uncompressed_bytes_estimate": int(bytes_all_mips + mask_bytes_all_mips),
+                "combined_logical_chunks": int(all_mip_chunks + mask_mip_chunks),
+                "rgb_uncompressed_bytes_all_mips": int(bytes_all_mips),
                 "mask_uncompressed_bytes_all_mips": int(mask_bytes_all_mips),
+                "total_uncompressed_bytes_rgb_plus_mask": int(total_combined_bytes),
+                "rgb_uncompressed_size_all_mips": _human_bytes(bytes_all_mips),
+                "mask_uncompressed_size_all_mips": _human_bytes(mask_bytes_all_mips),
+                "total_uncompressed_size_rgb_plus_mask": _human_bytes(total_combined_bytes),
+                # Legacy compatibility: RGB-only bytes.
+                "uncompressed_bytes_all_mips": int(bytes_all_mips),
+                # Legacy compatibility: combined RGB + mask bytes.
+                "uncompressed_bytes_estimate": int(total_combined_bytes),
                 "uncompressed_size_all_mips": _human_bytes(bytes_all_mips),
                 "compressed_bytes_sample_estimate": None,
                 "compressed_estimate_method": None,
@@ -1514,10 +1538,18 @@ def estimate_vsi_direct_plating(
         "totals": {
             "s0_chunks": int(total_s0_chunks),
             "all_mip_chunks": int(total_all_mip_chunks),
+            "mask_all_mip_chunks": int(total_mask_all_mip_chunks),
+            "combined_logical_chunks": int(total_all_mip_chunks + total_mask_all_mip_chunks),
+            "rgb_uncompressed_bytes_all_mips": int(total_bytes),
+            "mask_uncompressed_bytes_all_mips": int(total_mask_bytes),
+            "total_uncompressed_bytes_rgb_plus_mask": int(total_bytes + total_mask_bytes),
+            "rgb_uncompressed_size_all_mips": _human_bytes(total_bytes),
+            "mask_uncompressed_size_all_mips": _human_bytes(total_mask_bytes),
+            "total_uncompressed_size_rgb_plus_mask": _human_bytes(total_bytes + total_mask_bytes),
+            # Legacy compatibility: RGB-only bytes.
             "uncompressed_bytes_all_mips": int(total_bytes),
-            "uncompressed_bytes_estimate": int(
-                total_bytes + sum(int(t["mask_uncompressed_bytes_all_mips"]) for t in tissues)
-            ),
+            # Legacy compatibility: combined RGB + mask bytes.
+            "uncompressed_bytes_estimate": int(total_bytes + total_mask_bytes),
             "uncompressed_size_all_mips": _human_bytes(total_bytes),
             "compressed_bytes_sample_estimate": None,
             "compressed_estimate_method": None,
@@ -1930,6 +1962,10 @@ def process_vsi_with_direct_plating(
                         metadata_schema=source_metadata_schema,
                     )
                     run_manifest.update(mask_stats)
+                run_manifest["combined_s0_chunks_expected"] = int(
+                    run_manifest.get("rgb_s0_chunks_expected", 0)
+                    + run_manifest.get("mask_s0_chunks_expected", 0)
+                )
                 run_manifest["status"] = "complete"
                 run_manifest["finished_at_unix"] = time.time()
                 (work_dir / "run_manifest.json").write_text(

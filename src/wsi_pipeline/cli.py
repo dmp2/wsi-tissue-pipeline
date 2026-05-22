@@ -659,9 +659,20 @@ def estimate_vsi_plating_cmd(
     totals = result["totals"]
     console.print(f"[bold green]Estimated tissues:[/] {result['tissue_count']}")
     console.print(
-        "[bold blue]Total uncompressed pyramid bytes:[/] "
-        f"{totals['uncompressed_size_all_mips']} "
+        "[bold blue]RGB pyramid bytes:[/] "
+        f"{totals['rgb_uncompressed_size_all_mips']} "
         f"({totals['all_mip_chunks']} chunks)"
+    )
+    if result.get("store_tissue_mask"):
+        console.print(
+            "[bold blue]Mask pyramid bytes:[/] "
+            f"{totals['mask_uncompressed_size_all_mips']} "
+            f"({totals['mask_all_mip_chunks']} chunks)"
+        )
+    console.print(
+        "[bold blue]Total RGB+mask bytes:[/] "
+        f"{totals['total_uncompressed_size_rgb_plus_mask']} "
+        f"({totals['combined_logical_chunks']} logical chunks)"
     )
     if totals.get("warnings"):
         console.print(f"[bold yellow]Warnings:[/] {', '.join(totals['warnings'])}")

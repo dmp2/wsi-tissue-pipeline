@@ -464,7 +464,7 @@ def test_write_ngff_from_tile_streaming_ome_progress_and_uncompressed(tmp_path, 
     monkeypatch.setattr(streaming_mod, "open_group_v2", fake_open_group)
     monkeypatch.setattr(streaming_mod, "_create_group_array", fake_create_group_array)
 
-    streaming_mod.write_ngff_from_tile_streaming_ome(
+    stats = streaming_mod.write_ngff_from_tile_streaming_ome(
         tile,
         out_dir,
         phys_xy_um=(1.0, 1.0),
@@ -482,9 +482,80 @@ def test_write_ngff_from_tile_streaming_ome_progress_and_uncompressed(tmp_path, 
     assert len(events) == 4
     assert events[-1]["blocks_done"] == 4
     assert events[-1]["total_blocks"] == 4
+    assert stats["rgb_chunks_expected"] == 4
+    assert stats["rgb_chunks_written"] + stats["rgb_chunks_skipped"] == stats["rgb_chunks_expected"]
     assert created["s0"]["compressor"] is None
     assert created["s0"]["fill_value"] == 0
     assert fake_group.attrs["omero"]["channels"][0]["color"] == "FF0000"
+
+
+def test_tissue_mask_label_pyramid_reports_expected_chunks_and_binary_values(monkeypatch, tmp_path):
+    mask = np.zeros((16, 16), dtype=np.uint8)
+    mask[:8, :8] = 1
+    mask_da = da.from_array(mask, chunks=(8, 8))
+    out_dir = tmp_path / "mask-label.ome.zarr"
+
+    class FakeGroup:
+        def __init__(self):
+            self.attrs: dict[str, object] = {}
+            self.children: dict[str, FakeGroup] = {}
+
+        def create_group(self, name, overwrite=True):  # noqa: ARG002
+            child = FakeGroup()
+            self.children[name] = child
+            return child
+
+    class FakeArray:
+        def __init__(self, *, shape, chunks, dtype):
+            self.shape = shape
+            self.chunks = chunks
+            self.dtype = np.dtype(dtype)
+            self.data = np.zeros(shape, dtype=dtype)
+            self.attrs: dict[str, object] = {}
+
+        def __setitem__(self, key, value):
+            self.data[key] = value
+
+    fake_root = FakeGroup()
+    arrays: dict[str, FakeArray] = {}
+
+    def fake_open_group(store, *, mode="r+"):  # noqa: ARG001
+        return fake_root
+
+    def fake_create_group_array(root, name, **kwargs):  # noqa: ARG001
+        arr = FakeArray(shape=kwargs["shape"], chunks=kwargs["chunks"], dtype=kwargs["dtype"])
+        arr.fill_value = kwargs.get("fill_value")
+        arrays[name] = arr
+        return arr
+
+    monkeypatch.setattr(streaming_mod, "open_group_v2", fake_open_group)
+    monkeypatch.setattr(streaming_mod, "_create_group_array", fake_create_group_array)
+
+    stats = streaming_mod.write_tissue_mask_label_pyramid(
+        mask_da,
+        out_dir,
+        phys_xy_um=(0.25, 0.5),
+        block_xy=8,
+        num_mips=2,
+        compressor=None,
+        sparse_zero_chunks=True,
+        coordinate_translation_yx_um=(10.0, 20.0),
+    )
+
+    assert stats["mask_chunks_expected"] == 4
+    assert stats["mask_chunks_written"] + stats["mask_chunks_skipped"] == stats["mask_chunks_expected"]
+    assert stats["mask_chunks_written"] == 1
+    assert stats["mask_chunks_skipped"] == 3
+
+    label_group = fake_root.children["labels"].children["tissue_mask"]
+    assert arrays["s0"].shape == (16, 16)
+    assert arrays["s0"].fill_value == 0
+    assert sorted(np.unique(arrays["s0"].data).tolist()) == [0, 1]
+    attrs = dict(label_group.attrs)
+    assert [axis["name"] for axis in attrs["multiscales"][0]["axes"]] == ["y", "x"]
+    transforms = attrs["multiscales"][0]["datasets"][0]["coordinateTransformations"]
+    assert transforms[0]["scale"] == [0.5, 0.25]
+    assert transforms[1]["translation"] == [10.0, 20.0]
 
 
 def test_phys_xy_reader_handles_latest_writer_output(tmp_path):

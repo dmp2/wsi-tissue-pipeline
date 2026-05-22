@@ -387,6 +387,8 @@ def write_ngff_from_tile_streaming_ome(
         "shape_yxc": [Y, X, C],
         "chunks_xy": int(block_xy),
         "sparse_zero_chunks": bool(sparse_zero_chunks),
+        "rgb_chunks_expected": int(total_blocks),
+        "rgb_s0_chunks_expected": int(total_blocks),
         "rgb_chunks_written": 0,
         "rgb_chunks_skipped": 0,
         "fill_value": fill_value,
@@ -598,6 +600,8 @@ def write_tissue_mask_label_pyramid(
     stats = {
         "mask_chunks_written": 0,
         "mask_chunks_skipped": 0,
+        "mask_chunks_expected": total_blocks_y * total_blocks_x,
+        "mask_s0_chunks_expected": total_blocks_y * total_blocks_x,
         "total_blocks": total_blocks_y * total_blocks_x,
         "mask_pyramid_policy": "max_pool",
         "mask_pyramid_semantics": "conservative_visualization",

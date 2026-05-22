@@ -6,6 +6,7 @@ from pathlib import Path
 import dask.array as da
 import numpy as np
 import pytest
+from click.testing import CliRunner
 
 
 def test_vsi_to_source_ome_zarr_uses_direct_writer_by_default(monkeypatch, tmp_path):
@@ -244,7 +245,16 @@ def test_estimate_vsi_direct_plating_reports_chunks_and_bytes(monkeypatch, tmp_p
     assert tissue["num_mips"] == 2
     assert tissue["mip_shapes_yxc"] == [[128, 128, 3], [64, 64, 3]]
     assert tissue["all_mip_chunks"] == 5
+    assert tissue["combined_logical_chunks"] == 5
+    assert tissue["rgb_uncompressed_bytes_all_mips"] == 61440
+    assert tissue["mask_uncompressed_bytes_all_mips"] == 0
+    assert tissue["total_uncompressed_bytes_rgb_plus_mask"] == 61440
     assert tissue["uncompressed_bytes_all_mips"] == 61440
+    assert tissue["uncompressed_bytes_estimate"] == 61440
+    assert estimate["totals"]["rgb_uncompressed_bytes_all_mips"] == 61440
+    assert estimate["totals"]["mask_uncompressed_bytes_all_mips"] == 0
+    assert estimate["totals"]["total_uncompressed_bytes_rgb_plus_mask"] == 61440
+    assert estimate["totals"]["combined_logical_chunks"] == 5
     assert estimate["totals"]["uncompressed_bytes_all_mips"] == 61440
 
 
@@ -306,8 +316,68 @@ def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, t
     assert tissue["tile_shape_yx"][1] % 64 == 0
     assert tissue["s0_shape_yxc"][:2] == tissue["tile_shape_yx"]
     assert tissue["mask_s0_shape_yx"] == tissue["tile_shape_yx"]
+    assert tissue["mask_all_mip_chunks"] > 0
+    assert tissue["combined_logical_chunks"] == tissue["all_mip_chunks"] + tissue["mask_all_mip_chunks"]
+    assert tissue["rgb_uncompressed_bytes_all_mips"] == tissue["uncompressed_bytes_all_mips"]
+    assert tissue["total_uncompressed_bytes_rgb_plus_mask"] == (
+        tissue["rgb_uncompressed_bytes_all_mips"] + tissue["mask_uncompressed_bytes_all_mips"]
+    )
     assert tissue["uncompressed_bytes_estimate"] > tissue["uncompressed_bytes_all_mips"]
+    totals = estimate["totals"]
+    assert totals["mask_all_mip_chunks"] > 0
+    assert totals["combined_logical_chunks"] == totals["all_mip_chunks"] + totals["mask_all_mip_chunks"]
+    assert totals["rgb_uncompressed_bytes_all_mips"] == totals["uncompressed_bytes_all_mips"]
+    assert totals["total_uncompressed_bytes_rgb_plus_mask"] == totals["uncompressed_bytes_estimate"]
+    assert totals["total_uncompressed_bytes_rgb_plus_mask"] == (
+        totals["rgb_uncompressed_bytes_all_mips"] + totals["mask_uncompressed_bytes_all_mips"]
+    )
+    assert totals["compressed_bytes_sample_estimate"] is None
     assert estimate["compression"]["mode"] == "lossless"
+
+
+def test_estimate_vsi_plating_cli_reports_rgb_mask_and_total(monkeypatch, tmp_path):
+    from wsi_pipeline import cli
+    import wsi_pipeline.pipeline as pipeline_mod
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+
+    def _fake_estimate(*args, **kwargs):  # noqa: ARG001
+        return {
+            "tissue_count": 3,
+            "store_tissue_mask": True,
+            "totals": {
+                "all_mip_chunks": 10,
+                "mask_all_mip_chunks": 4,
+                "combined_logical_chunks": 14,
+                "rgb_uncompressed_size_all_mips": "1.00 GiB",
+                "mask_uncompressed_size_all_mips": "256.00 MiB",
+                "total_uncompressed_size_rgb_plus_mask": "1.25 GiB",
+                "warnings": [],
+            },
+        }
+
+    monkeypatch.setattr(pipeline_mod, "estimate_vsi_direct_plating", _fake_estimate)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "estimate-vsi-plating",
+            "--vsi",
+            str(vsi_path),
+            "--output-profile",
+            "production",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Estimated tissues" in result.output
+    assert "RGB pyramid bytes" in result.output
+    assert "1.00 GiB" in result.output
+    assert "Mask pyramid bytes" in result.output
+    assert "256.00 MiB" in result.output
+    assert "Total RGB+mask bytes" in result.output
+    assert "14 logical chunks" in result.output
 
 
 def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(monkeypatch, tmp_path):
