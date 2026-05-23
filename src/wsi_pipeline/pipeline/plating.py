@@ -427,6 +427,27 @@ def _write_tissue_manifest(
             "write_ome_zarr",
         ],
     }
+    if source_context is not None:
+        native_manifest_keys = (
+            "pyramid_generation_policy",
+            "rgb_pyramid_semantics",
+            "reference_policy",
+            "source_tile_aligned_canvas",
+            "canonical_canvas_in_source_level_coordinates",
+            "output_scale_to_source_level",
+            "native_pyramid_levels",
+            "mask_generation_policy",
+            "mask_pyramid_semantics",
+            "rgb_write_amplification",
+            "mask_write_amplification",
+            "rgb_chunk_write_calls",
+            "unique_rgb_chunks_written",
+            "mask_chunk_write_calls",
+            "unique_mask_chunks_written",
+        )
+        for key in native_manifest_keys:
+            if key in source_context:
+                payload[key] = source_context[key]
     if record.frame_debug is not None:
         frame_debug = record.frame_debug
         logical_source = _debug_bounds_xyxy(frame_debug, "logical_canvas_source_yx")

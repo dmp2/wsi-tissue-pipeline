@@ -391,8 +391,11 @@ class _NativePyramidLevelSpec:
     output_index: int
     source_level: int
     source_shape_yx: tuple[int, int]
+    canonical_canvas_source_yx: BoundsYX
     canvas_source_yx: BoundsYX
     clipped_source_yx: BoundsYX
+    source_read_envelope_yx: BoundsYX
+    clipped_source_read_envelope_yx: BoundsYX
     output_shape_yx: tuple[int, int]
     phys_xy_um: tuple[float, float]
     translation_yx_um: tuple[float, float]
@@ -460,6 +463,19 @@ def _align_bounds_outward_to_grid(bounds: BoundsYX, *, tile_size_yx: tuple[int, 
     )
 
 
+def _canonical_canvas_in_source_level_coordinates(
+    record: TissueTileRecord,
+    *,
+    source_tile_aligned_canvas: bool,
+    source_tile_size_yx: tuple[int, int],
+) -> BoundsYX:
+    """Return the single half-open source-level FOV used by all native mips."""
+    canvas = _record_logical_canvas_source_yx(record)
+    if not source_tile_aligned_canvas:
+        return canvas
+    return _align_bounds_outward_to_grid(canvas, tile_size_yx=source_tile_size_yx)
+
+
 def _native_pyramid_level_specs(
     *,
     record: TissueTileRecord,
@@ -473,10 +489,14 @@ def _native_pyramid_level_specs(
     source_tile_size_yx: tuple[int, int],
     requested_mips: int | None = None,
 ) -> list[_NativePyramidLevelSpec]:
-    parent_canvas = _record_logical_canvas_source_yx(record)
+    canonical_canvas = _canonical_canvas_in_source_level_coordinates(
+        record,
+        source_tile_aligned_canvas=source_tile_aligned_canvas,
+        source_tile_size_yx=source_tile_size_yx,
+    )
     min_side_mip_count = compute_num_mips_min_side(
-        parent_canvas.w,
-        parent_canvas.h,
+        canonical_canvas.w,
+        canonical_canvas.h,
         int(min_side_for_mips or block_xy),
     )
     requested_mip_count = (
@@ -492,16 +512,16 @@ def _native_pyramid_level_specs(
         level_shape = tuple(map(int, ets_level_shapes_yx[ets_level]))
         level_h, level_w = level_shape
         level_canvas = _map_parent_bounds_to_level(
-            parent_canvas,
+            canonical_canvas,
             parent_shape_yx=source_shape_yx,
             level_shape_yx=level_shape,
         )
-        if source_tile_aligned_canvas:
-            level_canvas = _align_bounds_outward_to_grid(
-                level_canvas,
-                tile_size_yx=source_tile_size_yx,
-            )
+        source_read_envelope = _align_bounds_outward_to_grid(
+            level_canvas,
+            tile_size_yx=source_tile_size_yx,
+        )
         clipped = level_canvas.clip(level_shape)
+        clipped_read_envelope = source_read_envelope.clip(level_shape)
         scale_y = source_h / max(1, level_h)
         scale_x = source_w / max(1, level_w)
         phys_x = source_px * scale_x
@@ -511,8 +531,11 @@ def _native_pyramid_level_specs(
                 output_index=output_index,
                 source_level=ets_level,
                 source_shape_yx=level_shape,
+                canonical_canvas_source_yx=canonical_canvas,
                 canvas_source_yx=level_canvas,
                 clipped_source_yx=clipped,
+                source_read_envelope_yx=source_read_envelope,
+                clipped_source_read_envelope_yx=clipped_read_envelope,
                 output_shape_yx=(max(1, level_canvas.h), max(1, level_canvas.w)),
                 phys_xy_um=(float(phys_x), float(phys_y)),
                 translation_yx_um=(
@@ -523,6 +546,53 @@ def _native_pyramid_level_specs(
             )
         )
     return specs
+
+
+def _parent_bounds_from_ngff_transform_source_yx(
+    dataset: dict[str, Any],
+    *,
+    shape_yx: tuple[int, int],
+    source_phys_xy_um: tuple[float, float],
+) -> dict[str, float]:
+    """Recover source-level parent bounds from NGFF scale/translation metadata."""
+    transforms = dataset.get("coordinateTransformations")
+    if not isinstance(transforms, list):
+        raise ValueError("NGFF dataset is missing coordinateTransformations")
+    scale_values: list[float] | None = None
+    translation_values: list[float] | None = None
+    for transform in transforms:
+        if not isinstance(transform, dict):
+            continue
+        if transform.get("type") == "scale":
+            scale_values = [float(value) for value in transform.get("scale", [])]
+        elif transform.get("type") == "translation":
+            translation_values = [float(value) for value in transform.get("translation", [])]
+    if not scale_values:
+        raise ValueError("NGFF dataset is missing a scale transform")
+    if translation_values is None:
+        translation_values = [0.0] * len(scale_values)
+    if len(scale_values) == 3:
+        scale_y_um = float(scale_values[1])
+        scale_x_um = float(scale_values[2])
+        translation_y_um = float(translation_values[1])
+        translation_x_um = float(translation_values[2])
+    elif len(scale_values) == 2:
+        scale_y_um = float(scale_values[0])
+        scale_x_um = float(scale_values[1])
+        translation_y_um = float(translation_values[0])
+        translation_x_um = float(translation_values[1])
+    else:
+        raise ValueError("NGFF scale transform must have 2 or 3 entries")
+    source_px_um, source_py_um = map(float, source_phys_xy_um)
+    h, w = map(int, shape_yx)
+    y0 = translation_y_um / source_py_um
+    x0 = translation_x_um / source_px_um
+    return {
+        "y0": float(y0),
+        "x0": float(x0),
+        "y1": float((translation_y_um + h * scale_y_um) / source_py_um),
+        "x1": float((translation_x_um + w * scale_x_um) / source_px_um),
+    }
 
 
 def _read_ets_region_yxc_open(
@@ -901,11 +971,17 @@ def write_native_ets_tissue_pyramid_ome(
                     "output_index": int(spec.output_index),
                     "source_level": int(spec.source_level),
                     "source_shape_yx": list(map(int, spec.source_shape_yx)),
-                    "parent_space_canvas_source_yx": _record_logical_canvas_source_yx(
-                        record
-                    ).as_dict(),
+                    "canonical_canvas_in_source_level_coordinates": (
+                        spec.canonical_canvas_source_yx.as_dict()
+                    ),
+                    "parent_space_canvas_source_yx": spec.canonical_canvas_source_yx.as_dict(),
+                    "output_canvas_source_yx": spec.canvas_source_yx.as_dict(),
                     "native_source_level_canvas_yx": spec.canvas_source_yx.as_dict(),
                     "native_source_level_clipped_yx": spec.clipped_source_yx.as_dict(),
+                    "source_read_envelope_yx": spec.source_read_envelope_yx.as_dict(),
+                    "source_read_envelope_clipped_yx": (
+                        spec.clipped_source_read_envelope_yx.as_dict()
+                    ),
                     "output_shape_yx": list(map(int, spec.output_shape_yx)),
                     "phys_xy_um": {"x": spec.phys_xy_um[0], "y": spec.phys_xy_um[1]},
                     "translation_yx_um": list(map(float, spec.translation_yx_um)),
@@ -933,6 +1009,9 @@ def write_native_ets_tissue_pyramid_ome(
     native_metadata["requested_mips"] = int(requested_mips) if requested_mips is not None else None
     native_metadata["min_side_for_mips"] = (
         int(min_side_for_mips) if min_side_for_mips is not None else None
+    )
+    native_metadata["canonical_canvas_in_source_level_coordinates"] = (
+        specs[0].canonical_canvas_source_yx.as_dict()
     )
     root.attrs["native_source_pyramid"] = native_metadata
     unique_source_tiles = stats.pop("unique_source_tiles_touched", set())
@@ -963,6 +1042,9 @@ def write_native_ets_tissue_pyramid_ome(
     )
     stats["output_scale_to_source_level"] = output_scale_to_source_level
     stats["native_pyramid_levels"] = per_scale
+    stats["canonical_canvas_in_source_level_coordinates"] = (
+        specs[0].canonical_canvas_source_yx.as_dict()
+    )
     if run_manifest is not None:
         run_manifest.update(_json_ready(stats))
     return _json_ready(stats)
@@ -2483,6 +2565,7 @@ def process_vsi_with_direct_plating(
             name = f"{vsi_path.stem}_tissue_{record.tissue_index:02d}"
             ngff_dir = out_ngff_dir / f"{name}.ome.zarr"
             tissue_started = time.monotonic()
+            tissue_source_context = source_context
             if resume and ngff_dir.exists():
                 logger.info("Skipping completed tissue output because resume=True: %s", ngff_dir)
                 _record_written_tissue(
@@ -2556,6 +2639,28 @@ def process_vsi_with_direct_plating(
                     run_manifest=run_manifest,
                 )
                 run_manifest.update(native_stats)
+                tissue_source_context = {
+                    **source_context,
+                    "pyramid_generation_policy": "native_source_pyramid_crop",
+                    "rgb_pyramid_semantics": "native_scanner_pyramid",
+                    "reference_policy": "downsample_streamed_s0",
+                    "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
+                    "canonical_canvas_in_source_level_coordinates": native_stats.get(
+                        "canonical_canvas_in_source_level_coordinates"
+                    ),
+                    "output_scale_to_source_level": native_stats.get(
+                        "output_scale_to_source_level"
+                    ),
+                    "native_pyramid_levels": native_stats.get("native_pyramid_levels"),
+                    "mask_generation_policy": native_stats.get("mask_generation_policy"),
+                    "mask_pyramid_semantics": native_stats.get("mask_pyramid_semantics"),
+                    "rgb_write_amplification": native_stats.get("rgb_write_amplification"),
+                    "mask_write_amplification": native_stats.get("mask_write_amplification"),
+                    "rgb_chunk_write_calls": native_stats.get("rgb_chunk_write_calls"),
+                    "unique_rgb_chunks_written": native_stats.get("unique_rgb_chunks_written"),
+                    "mask_chunk_write_calls": native_stats.get("mask_chunk_write_calls"),
+                    "unique_mask_chunks_written": native_stats.get("unique_mask_chunks_written"),
+                }
                 run_manifest["status"] = "complete"
                 run_manifest["finished_at_unix"] = time.time()
                 (work_dir / "run_manifest.json").write_text(
@@ -2695,7 +2800,7 @@ def process_vsi_with_direct_plating(
                 out_paths,
                 ngff_dir,
                 record=record,
-                source_context=source_context,
+                source_context=tissue_source_context,
                 source_ome_zarr=None,
                 source_level=source_idx,
                 segmentation_level=segmentation_idx,

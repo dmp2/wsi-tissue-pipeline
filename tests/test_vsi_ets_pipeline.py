@@ -577,8 +577,22 @@ def test_native_level_specs_align_canvas_and_preserve_translation():
     assert specs[0].canvas_source_yx.as_yx() == (0, -512, 1536, 1024)
     assert specs[0].translation_yx_um == (0.0, -128.0)
     assert specs[1].source_level == 1
-    assert specs[1].canvas_source_yx.y0 % 512 == 0
-    assert specs[1].canvas_source_yx.x0 % 512 == 0
+    assert specs[1].canonical_canvas_source_yx.as_yx() == (0, -512, 1536, 1024)
+    assert specs[1].canvas_source_yx.as_yx() == (0, -256, 768, 512)
+    assert specs[1].output_shape_yx == (768, 768)
+    assert specs[1].source_read_envelope_yx.as_yx() == (0, -512, 1024, 512)
+    dataset = {
+        "coordinateTransformations": [
+            {"type": "scale", "scale": [1.0, specs[1].phys_xy_um[1], specs[1].phys_xy_um[0]]},
+            {"type": "translation", "translation": [0.0, *specs[1].translation_yx_um]},
+        ]
+    }
+    recovered = vsi_ets._parent_bounds_from_ngff_transform_source_yx(
+        dataset,
+        shape_yx=specs[1].output_shape_yx,
+        source_phys_xy_um=(0.25, 0.5),
+    )
+    assert recovered == {"y0": 0.0, "x0": -512.0, "y1": 1536.0, "x1": 1024.0}
     capped = vsi_ets._native_pyramid_level_specs(
         record=record,
         source_level=0,
@@ -592,6 +606,47 @@ def test_native_level_specs_align_canvas_and_preserve_translation():
         source_tile_size_yx=(512, 512),
     )
     assert len(capped) == 1
+
+
+def test_native_level_specs_do_not_inflate_coarse_scale_fov():
+    from wsi_pipeline.pipeline import vsi_ets
+
+    record = vsi_ets.TissueTileRecord(
+        tile=da.from_array(np.zeros((13824, 10240, 3), dtype=np.uint8), chunks=(512, 512, 3)),
+        tissue_index=0,
+        label_id=1,
+        crop_bounds_source_level=(0, 0, 10240, 13824),
+        crop_bounds_segmentation_level=(0, 0, 640, 864),
+        tile_dim=13824,
+        frame_debug={
+            "logical_canvas_source_yx": {"y0": 0, "x0": 0, "y1": 13824, "x1": 10240},
+            "label_crop_seg_yx": {"y0": 0, "x0": 0, "y1": 864, "x1": 640},
+        },
+    )
+
+    specs = vsi_ets._native_pyramid_level_specs(
+        record=record,
+        source_level=0,
+        source_shape_yx=(27648, 20480),
+        ets_level_shapes_yx=[
+            (27648, 20480),
+            (13824, 10240),
+            (6912, 5120),
+            (3456, 2560),
+            (1728, 1280),
+        ],
+        source_phys_xy_um=(0.25, 0.5),
+        block_xy=512,
+        min_side_for_mips=512,
+        requested_mips=5,
+        source_tile_aligned_canvas=True,
+        source_tile_size_yx=(512, 512),
+    )
+
+    assert specs[0].output_shape_yx == (13824, 10240)
+    assert specs[4].output_shape_yx == (864, 640)
+    assert specs[4].output_shape_yx != (1536, 1536)
+    assert specs[4].source_read_envelope_yx.as_yx() == (0, 0, 1024, 1024)
 
 
 def test_write_native_ets_tissue_pyramid_writes_native_levels_and_metrics(monkeypatch, tmp_path):
@@ -696,7 +751,26 @@ def test_write_native_ets_tissue_pyramid_writes_native_levels_and_metrics(monkey
         "s0": 0,
         "s1": 1,
     }
+    assert root.attrs["native_source_pyramid"][
+        "canonical_canvas_in_source_level_coordinates"
+    ] == {"y0": 0, "x0": 0, "y1": 8, "x1": 8, "h": 8, "w": 8}
     assert root.attrs["native_source_pyramid"]["levels"][1]["source_level"] == 1
+    assert root.attrs["native_source_pyramid"]["levels"][1]["output_canvas_source_yx"] == {
+        "y0": 0,
+        "x0": 0,
+        "y1": 4,
+        "x1": 4,
+        "h": 4,
+        "w": 4,
+    }
+    assert root.attrs["native_source_pyramid"]["levels"][1]["source_read_envelope_yx"] == {
+        "y0": 0,
+        "x0": 0,
+        "y1": 4,
+        "x1": 4,
+        "h": 4,
+        "w": 4,
+    }
     mask_group = root.children["labels"].children["tissue_mask"]
     assert mask_group.arrays["s0"].shape == (8, 8)
     assert set(np.unique(mask_group.arrays["s0"].data).tolist()).issubset({0, 1})
@@ -757,6 +831,43 @@ def test_vsi_direct_plating_native_policy_routes_to_native_writer(monkeypatch, t
             "mask_chunks_written": 1,
             "rgb_write_amplification": 1.0,
             "mask_write_amplification": 1.0,
+            "pyramid_generation_policy": "native_source_pyramid_crop",
+            "source_tile_aligned_canvas": True,
+            "canonical_canvas_in_source_level_coordinates": {
+                "y0": 0,
+                "x0": 0,
+                "y1": 16,
+                "x1": 16,
+                "h": 16,
+                "w": 16,
+            },
+            "output_scale_to_source_level": {"s0": 0},
+            "native_pyramid_levels": [
+                {
+                    "path": "s0",
+                    "source_level": 0,
+                    "output_canvas_source_yx": {
+                        "y0": 0,
+                        "x0": 0,
+                        "y1": 16,
+                        "x1": 16,
+                        "h": 16,
+                        "w": 16,
+                    },
+                    "source_read_envelope_yx": {
+                        "y0": 0,
+                        "x0": 0,
+                        "y1": 16,
+                        "x1": 16,
+                        "h": 16,
+                        "w": 16,
+                    },
+                    "output_shape_yx": [16, 16],
+                    "translation_yx_um": [0.0, 0.0],
+                }
+            ],
+            "mask_generation_policy": "project_segmentation_per_scale",
+            "mask_pyramid_semantics": "label_safe_nearest",
         }
 
     monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
@@ -795,6 +906,12 @@ def test_vsi_direct_plating_native_policy_routes_to_native_writer(monkeypatch, t
     manifest = json.loads((paths[0] / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["pyramid_generation_policy"] == "native_source_pyramid_crop"
     assert manifest["source_tile_aligned_canvas"] is True
+    tissue_manifest = json.loads((paths[0] / "tissue_manifest.json").read_text(encoding="utf-8"))
+    assert tissue_manifest["pyramid_generation_policy"] == "native_source_pyramid_crop"
+    assert tissue_manifest["source_tile_aligned_canvas"] is True
+    assert tissue_manifest["output_scale_to_source_level"] == {"s0": 0}
+    assert tissue_manifest["canonical_canvas_in_source_level_coordinates"]["h"] == 16
+    assert tissue_manifest["native_pyramid_levels"][0]["output_shape_yx"] == [16, 16]
 
 
 def test_direct_ets_tissue_tile_records_read_only_tissue_blocks(monkeypatch, tmp_path):

@@ -1726,6 +1726,8 @@ def _run_single_mode(
         "stage_timers": timers.as_dict(),
         "source_tile_accounting": accounting_dict,
         "native_writer_metrics": native_writer_metrics,
+        "rgb_write_amplification": native_writer_metrics.get("rgb_write_amplification"),
+        "mask_write_amplification": native_writer_metrics.get("mask_write_amplification"),
         **throughput,
     }
     return _json_ready(row)

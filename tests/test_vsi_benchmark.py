@@ -361,6 +361,8 @@ def test_benchmark_native_mode_records_alignment_and_write_metrics(monkeypatch, 
             "unique_rgb_chunks_written": 2,
             "mask_chunk_write_calls": 2,
             "unique_mask_chunks_written": 2,
+            "rgb_write_amplification": 1.0,
+            "mask_write_amplification": 1.0,
             "native_pyramid_levels": [{"output_shape_yx": [64, 64]}],
         }
 
@@ -388,6 +390,8 @@ def test_benchmark_native_mode_records_alignment_and_write_metrics(monkeypatch, 
     assert row["source_tile_aligned_canvas"] is True
     assert row["native_writer_metrics"]["rgb_write_amplification"] == 1.0
     assert row["native_writer_metrics"]["mask_write_amplification"] == 1.0
+    assert row["rgb_write_amplification"] == 1.0
+    assert row["mask_write_amplification"] == 1.0
 
 
 def test_benchmark_decision_rules_flag_decode_and_alignment():
