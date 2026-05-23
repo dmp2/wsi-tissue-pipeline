@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import dask.array as da
@@ -336,8 +337,8 @@ def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, t
 
 
 def test_estimate_vsi_plating_cli_reports_rgb_mask_and_total(monkeypatch, tmp_path):
-    from wsi_pipeline import cli
     import wsi_pipeline.pipeline as pipeline_mod
+    from wsi_pipeline import cli
 
     vsi_path = tmp_path / "sample.vsi"
     vsi_path.touch()
@@ -542,6 +543,258 @@ def test_direct_vsi_plating_forwards_uncompressed_streaming_progress(monkeypatch
     assert writer_calls[0]["compressor"] is None
     assert writer_calls[0]["progress_mode"] == "both"
     assert writer_calls[0]["progress_interval_s"] == 2.0
+
+
+def test_native_level_specs_align_canvas_and_preserve_translation():
+    from wsi_pipeline.pipeline import vsi_ets
+
+    record = vsi_ets.TissueTileRecord(
+        tile=da.from_array(np.zeros((1024, 1024, 3), dtype=np.uint8), chunks=(512, 512, 3)),
+        tissue_index=0,
+        label_id=1,
+        crop_bounds_source_level=(0, 170, 511, 682),
+        crop_bounds_segmentation_level=(0, 0, 16, 16),
+        tile_dim=1024,
+        frame_debug={
+            "logical_canvas_source_yx": {"y0": 170, "x0": -1, "y1": 1194, "x1": 1023},
+            "label_crop_seg_yx": {"y0": 0, "x0": 0, "y1": 16, "x1": 16},
+        },
+    )
+
+    specs = vsi_ets._native_pyramid_level_specs(
+        record=record,
+        source_level=0,
+        source_shape_yx=(2048, 2048),
+        ets_level_shapes_yx=[(2048, 2048), (1024, 1024)],
+        source_phys_xy_um=(0.25, 0.5),
+        block_xy=512,
+        min_side_for_mips=256,
+        source_tile_aligned_canvas=True,
+        source_tile_size_yx=(512, 512),
+    )
+
+    assert len(specs) == 2
+    assert specs[0].canvas_source_yx.as_yx() == (0, -512, 1536, 1024)
+    assert specs[0].translation_yx_um == (0.0, -128.0)
+    assert specs[1].source_level == 1
+    assert specs[1].canvas_source_yx.y0 % 512 == 0
+    assert specs[1].canvas_source_yx.x0 % 512 == 0
+    capped = vsi_ets._native_pyramid_level_specs(
+        record=record,
+        source_level=0,
+        source_shape_yx=(2048, 2048),
+        ets_level_shapes_yx=[(2048, 2048), (1024, 1024)],
+        source_phys_xy_um=(0.25, 0.5),
+        block_xy=512,
+        min_side_for_mips=256,
+        requested_mips=1,
+        source_tile_aligned_canvas=False,
+        source_tile_size_yx=(512, 512),
+    )
+    assert len(capped) == 1
+
+
+def test_write_native_ets_tissue_pyramid_writes_native_levels_and_metrics(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    class FakeETS:
+        nlevels = 2
+        tile_ysize = 4
+        tile_xsize = 4
+
+        def __init__(self, path):
+            self.path = Path(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(8, 8), (4, 4)][int(level)]
+
+        def get_tile_decoded(self, level, col, row):
+            value = int(level) * 100 + int(row) * 10 + int(col)
+            tile = np.zeros((4, 4, 3), dtype=np.uint8)
+            tile[..., 0] = value
+            tile[..., 1] = value + 1
+            tile[..., 2] = value + 2
+            return tile
+
+    class FakeArray:
+        def __init__(self, *, shape, chunks, dtype):
+            self.shape = tuple(shape)
+            self.chunks = tuple(chunks)
+            self.data = np.zeros(shape, dtype=dtype)
+            self.attrs: dict[str, object] = {}
+
+        def __setitem__(self, key, value):
+            self.data[key] = value
+
+    class FakeGroup:
+        def __init__(self):
+            self.attrs: dict[str, object] = {}
+            self.arrays: dict[str, FakeArray] = {}
+            self.children: dict[str, FakeGroup] = {}
+
+        def create_group(self, name, overwrite=True):  # noqa: ARG002
+            child = FakeGroup()
+            self.children[name] = child
+            return child
+
+    root = FakeGroup()
+
+    def fake_create_group_array(group, name, **kwargs):
+        arr = FakeArray(
+            shape=kwargs["shape"],
+            chunks=kwargs["chunks"],
+            dtype=kwargs["dtype"],
+        )
+        group.arrays[name] = arr
+        return arr
+
+    monkeypatch.setattr(vsi_ets, "ETSFile", FakeETS)
+    monkeypatch.setattr(vsi_ets, "open_group_v2", lambda *args, **kwargs: root)
+    monkeypatch.setattr(vsi_ets, "create_group_array", fake_create_group_array)
+
+    record = vsi_ets.TissueTileRecord(
+        tile=da.from_array(np.zeros((8, 8, 3), dtype=np.uint8), chunks=(4, 4, 3)),
+        tissue_index=0,
+        label_id=1,
+        crop_bounds_source_level=(0, 0, 8, 8),
+        crop_bounds_segmentation_level=(0, 0, 4, 4),
+        tile_dim=8,
+        frame_debug={
+            "logical_canvas_source_yx": {"y0": 0, "x0": 0, "y1": 8, "x1": 8},
+            "label_crop_seg_yx": {"y0": 0, "x0": 0, "y1": 4, "x1": 4},
+        },
+    )
+    labels = np.ones((4, 4), dtype=np.int32)
+
+    stats = vsi_ets.write_native_ets_tissue_pyramid_ome(
+        ets_path=tmp_path / "fake.ets",
+        out_dir=tmp_path / "native.ome.zarr",
+        record=record,
+        lr_labels=labels,
+        source_level=0,
+        source_shape_yx=(8, 8),
+        source_phys_xy_um=(0.25, 0.5),
+        block_xy=4,
+        name="native",
+        compressor=None,
+        sparse_zero_chunks=False,
+        store_tissue_mask=True,
+        min_side_for_mips=2,
+    )
+
+    assert root.arrays["s0"].shape == (3, 8, 8)
+    assert root.arrays["s1"].shape == (3, 4, 4)
+    assert root.arrays["s0"].data[:, 0, 0].tolist() == [0, 1, 2]
+    assert root.arrays["s1"].data[:, 0, 0].tolist() == [100, 101, 102]
+    assert root.attrs["native_source_pyramid"]["output_scale_to_source_level"] == {
+        "s0": 0,
+        "s1": 1,
+    }
+    assert root.attrs["native_source_pyramid"]["levels"][1]["source_level"] == 1
+    mask_group = root.children["labels"].children["tissue_mask"]
+    assert mask_group.arrays["s0"].shape == (8, 8)
+    assert set(np.unique(mask_group.arrays["s0"].data).tolist()).issubset({0, 1})
+    assert np.count_nonzero(mask_group.arrays["s0"].data) > 0
+    assert stats["rgb_write_amplification"] == 1.0
+    assert stats["mask_write_amplification"] == 1.0
+    assert stats["rgb_pyramid_semantics"] == "native_scanner_pyramid"
+
+
+def test_vsi_direct_plating_native_policy_routes_to_native_writer(monkeypatch, tmp_path):
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "Image_01.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_Image_01_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+
+    class DummyETS:
+        nlevels = 2
+
+        def __init__(self, path):
+            self.path = Path(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(16, 16), (8, 8)][level]
+
+        def read_level(self, level):
+            return np.zeros((*self.level_shape(level), 3), dtype=np.uint8)
+
+    record = vsi_ets.TissueTileRecord(
+        tile=da.from_array(np.zeros((16, 16, 3), dtype=np.uint8), chunks=(8, 8, 3)),
+        tissue_index=0,
+        label_id=1,
+        crop_bounds_source_level=(0, 0, 16, 16),
+        crop_bounds_segmentation_level=(0, 0, 8, 8),
+        tile_dim=16,
+        frame_debug={
+            "logical_canvas_source_yx": {"y0": 0, "x0": 0, "y1": 16, "x1": 16},
+            "label_crop_seg_yx": {"y0": 0, "x0": 0, "y1": 8, "x1": 8},
+        },
+    )
+    native_calls: list[dict[str, object]] = []
+
+    def fake_native_writer(**kwargs):
+        native_calls.append(kwargs)
+        Path(kwargs["out_dir"]).mkdir(parents=True, exist_ok=True)
+        return {
+            "rgb_s0_chunks_expected": 1,
+            "mask_s0_chunks_expected": 1,
+            "rgb_chunks_written": 1,
+            "mask_chunks_written": 1,
+            "rgb_write_amplification": 1.0,
+            "mask_write_amplification": 1.0,
+        }
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(
+        vsi_ets,
+        "get_vsi_metadata",
+        lambda *args, **kwargs: {"physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}},
+    )
+    monkeypatch.setattr(vsi_ets, "ETSFile", DummyETS)
+    monkeypatch.setattr(
+        vsi_ets,
+        "_segment_for_plating",
+        lambda *args, **kwargs: (np.ones((8, 8), dtype=bool), {}),
+    )
+    monkeypatch.setattr(vsi_ets, "_direct_ets_tissue_tile_records", lambda **kwargs: ([record], 16))
+    monkeypatch.setattr(
+        vsi_ets,
+        "write_ngff_from_tile_streaming_ome",
+        lambda **kwargs: pytest.fail("native policy should not use streamed-s0 writer"),
+    )
+    monkeypatch.setattr(vsi_ets, "write_native_ets_tissue_pyramid_ome", fake_native_writer)
+
+    paths = vsi_ets.process_vsi_with_direct_plating(
+        vsi_path,
+        tmp_path / "out",
+        source_level=0,
+        segmentation_level=1,
+        compression="none",
+        pyramid_generation_policy="native_source_pyramid_crop",
+        source_tile_aligned_canvas=True,
+    )
+
+    assert len(paths) == 1
+    assert native_calls[0]["source_tile_aligned_canvas"] is True
+    assert native_calls[0]["source_level"] == 0
+    manifest = json.loads((paths[0] / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pyramid_generation_policy"] == "native_source_pyramid_crop"
+    assert manifest["source_tile_aligned_canvas"] is True
 
 
 def test_direct_ets_tissue_tile_records_read_only_tissue_blocks(monkeypatch, tmp_path):

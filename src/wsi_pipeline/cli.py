@@ -757,6 +757,20 @@ def estimate_vsi_plating_cmd(
 @click.option("--max-tissues", type=int, default=None, help="Limit benchmark to the first N tissues.")
 @click.option("--max-blocks", type=int, default=None, help="Limit each tissue to the first N output chunks.")
 @click.option(
+    "--block-sampling",
+    default="first",
+    show_default=True,
+    type=click.Choice(["first", "random", "tissue", "mixed", "stratified"]),
+    help="Output chunk sampling strategy used before running benchmark modes.",
+)
+@click.option(
+    "--block-random-seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Seed for deterministic random and stratified block sampling.",
+)
+@click.option(
     "--keep-artifacts",
     is_flag=True,
     help="Keep temporary benchmark Zarr artifacts after measuring their size.",
@@ -804,6 +818,8 @@ def benchmark_vsi_transcode_cmd(
     codecs: tuple[str, ...],
     max_tissues: int | None,
     max_blocks: int | None,
+    block_sampling: str,
+    block_random_seed: int,
     keep_artifacts: bool,
     materialized_read_max_gib: float,
     warm_cache: bool,
@@ -829,12 +845,15 @@ def benchmark_vsi_transcode_cmd(
         codecs=codecs,
         max_tissues=max_tissues,
         max_blocks=max_blocks,
+        block_sampling=block_sampling,
+        block_random_seed=block_random_seed,
         keep_artifacts=keep_artifacts,
         materialized_read_max_gib=materialized_read_max_gib,
         warm_cache=warm_cache,
         profile_cpu=profile_cpu,
         progress_interval_s=progress_interval_s,
         external_baseline_json=external_baseline_json,
+        config_source=str(config_path) if config_path else "default PipelineConfig",
     )
     decision = result["decision_rules"]
     console.print(f"[bold green]Wrote benchmark:[/] {benchmark_dir / 'benchmark.json'}")

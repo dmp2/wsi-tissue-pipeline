@@ -1,6 +1,5 @@
-# E241 VSI/ETS transcode benchmark configuration.
-# Mirrors the measured timing scripts. Kept for compatibility; equivalent to
-# configs/e241_benchmark_actual.yaml and intentionally uses extra_margin_px: 0.
+# E241 VSI/ETS benchmark configuration for the nominal production margin.
+# Use this after reproducing the actual timing fixture when estimating final runtime.
 
 segmentation:
   backend: "local-entropy"
@@ -26,7 +25,7 @@ segmentation:
 tiles:
   chunk_size: 512
   pad_multiple: 512
-  extra_margin_px: 0
+  extra_margin_px: 64
   crop_shape_policy: "compact_rectangle"
 
 output:

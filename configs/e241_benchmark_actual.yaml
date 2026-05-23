@@ -1,6 +1,5 @@
-# E241 VSI/ETS transcode benchmark configuration.
-# Mirrors the measured timing scripts. Kept for compatibility; equivalent to
-# configs/e241_benchmark_actual.yaml and intentionally uses extra_margin_px: 0.
+# E241 VSI/ETS benchmark configuration matching the timing scripts.
+# This fixture intentionally uses extra_margin_px: 0 to reproduce the measured run.
 
 segmentation:
   backend: "local-entropy"

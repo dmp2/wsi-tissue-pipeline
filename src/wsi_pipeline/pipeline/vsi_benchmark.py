@@ -16,7 +16,7 @@ import sys
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from ..omezarr.streaming import _max_pool_2x
 from ..omezarr.zarr_compat import create_group_array, open_group_v2
 from ..tiles.generator import (
     BoundsYX,
+    TissueTileRecord,
     _build_tissue_frame_specs,
     _normalize_crop_shape_policy,
     _normalize_tile_frame_level,
@@ -45,6 +46,7 @@ from .vsi_ets import (
     _physical_xy_from_metadata,
     _profile_defaults,
     _resolve_ets_level,
+    write_native_ets_tissue_pyramid_ome,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,8 @@ REQUIRED_BENCHMARK_MODES = (
     "direct-ets-rgb-no-mask-no-mips",
     "direct-ets-rgb-plus-mask-no-mips",
     "direct-ets-rgb-plus-mask-mips",
+    "native-source-pyramid-rgb-plus-mask-mips",
+    "native-source-pyramid-rgb-plus-mask-mips-aligned",
     "materialized-source-crop-write",
 )
 
@@ -70,6 +74,16 @@ BENCHMARK_CODEC_CHOICES = (
 )
 
 DEFAULT_BENCHMARK_CODEC = "zstd-5-bitshuffle"
+BLOCK_SAMPLING_CHOICES = ("first", "random", "tissue", "mixed", "stratified")
+COARSE_BLOCK_STRATA = ("padding", "background", "mixed", "tissue")
+DETAILED_BLOCK_STRATA = (
+    "padding",
+    "background",
+    "positive_any",
+    "low_positive",
+    "moderate_positive",
+    "high_positive",
+)
 MiB = float(2**20)
 
 
@@ -96,11 +110,19 @@ class StageTimers:
             "mask_projection_s",
             "rgb_write_s",
             "mask_write_s",
+            "s0_rgb_write_compress_s",
+            "s0_mask_write_compress_s",
             "s0_only_s",
             "mip_generation_s",
             "mask_pyramid_s",
+            "rgb_mip_downsample_s",
+            "rgb_mip_write_compress_s",
+            "mask_mip_downsample_s",
+            "mask_mip_write_compress_s",
+            "pyramid_write_path_s",
             "compression_write_s",
             "metadata_finalization_s",
+            "artifact_cleanup_s",
             "materialized_full_level_read_s",
             "materialized_crop_write_s",
             "materialized_total_s",
@@ -188,6 +210,7 @@ class TileAccounting:
 @dataclass(frozen=True)
 class BenchmarkBlock:
     tissue_index: int
+    block_index: int
     y0: int
     y1: int
     x0: int
@@ -204,6 +227,9 @@ class BenchmarkBlock:
     requires_source: bool
     skipped_before_read: bool
     ideal_source_tile_count: int
+    mask_fraction: float = 0.0
+    coarse_stratum: str = "unclassified"
+    detailed_stratum: str = "unclassified"
 
     @property
     def h(self) -> int:
@@ -236,6 +262,8 @@ class BenchmarkTissue:
     crop_bounds_segmentation_level: tuple[int, int, int, int]
     num_mips: int
     blocks: list[BenchmarkBlock]
+    all_block_count: int
+    sampling_summary: dict[str, Any]
     frame_debug: dict[str, Any]
 
 
@@ -253,6 +281,13 @@ class BenchmarkGeometry:
     output_profile: str
     tile_frame_level: str
     crop_shape_policy: str
+    profile_defaults: dict[str, Any]
+    configured_extra_margin_px: int
+    effective_extra_margin_px: int
+    config_source: str
+    block_sampling: str
+    block_random_seed: int
+    sampling_summary: dict[str, Any]
     compression_default: str
     store_tissue_mask: bool
     materialize_masked_rgb: bool
@@ -416,6 +451,178 @@ def _percentiles(values: list[int | float]) -> dict[str, float]:
     }
 
 
+def _normalize_block_sampling(block_sampling: str | None) -> str:
+    normalized = str(block_sampling or "first").strip().lower().replace("_", "-")
+    if normalized not in BLOCK_SAMPLING_CHOICES:
+        raise ValueError(
+            "block_sampling must be one of: " + ", ".join(BLOCK_SAMPLING_CHOICES)
+        )
+    return normalized
+
+
+def _block_strata_for_mask_fraction(
+    *,
+    requires_source: bool,
+    mask_fraction: float,
+) -> tuple[str, str]:
+    if not requires_source:
+        return "padding", "padding"
+    fraction = float(mask_fraction)
+    if fraction <= 0.0:
+        return "background", "background"
+    if fraction < 0.05:
+        return "mixed", "low_positive"
+    if fraction < 0.5:
+        return "mixed", "moderate_positive"
+    return "tissue", "high_positive"
+
+
+def _count_block_strata(blocks: Iterable[BenchmarkBlock]) -> dict[str, dict[str, int]]:
+    coarse = dict.fromkeys(COARSE_BLOCK_STRATA, 0)
+    detailed = dict.fromkeys(DETAILED_BLOCK_STRATA, 0)
+    for block in blocks:
+        coarse[block.coarse_stratum] = coarse.get(block.coarse_stratum, 0) + 1
+        detailed[block.detailed_stratum] = detailed.get(block.detailed_stratum, 0) + 1
+        if block.mask_fraction > 0.0:
+            detailed["positive_any"] = detailed.get("positive_any", 0) + 1
+    return {"coarse": coarse, "detailed": detailed}
+
+
+def _mask_fraction_summary(blocks: Iterable[BenchmarkBlock]) -> dict[str, float]:
+    return _percentiles([float(block.mask_fraction) for block in blocks])
+
+
+def _sampling_warnings(selected_counts: dict[str, dict[str, int]]) -> list[str]:
+    warnings: list[str] = []
+    detailed = selected_counts.get("detailed", {})
+    coarse = selected_counts.get("coarse", {})
+    if int(detailed.get("positive_any", 0)) == 0:
+        warnings.append("no_positive_any_blocks_selected")
+    if int(coarse.get("mixed", 0)) == 0 and int(coarse.get("tissue", 0)) == 0:
+        warnings.append("no_mixed_or_tissue_blocks_selected")
+    if int(detailed.get("high_positive", 0)) == 0:
+        warnings.append("no_high_positive_blocks_selected")
+    return warnings
+
+
+def _random_subset_preserve_order(
+    blocks: list[BenchmarkBlock],
+    *,
+    count: int,
+    rng: np.random.Generator,
+) -> list[BenchmarkBlock]:
+    if count >= len(blocks):
+        return list(blocks)
+    if count <= 0:
+        return []
+    selected = set(rng.choice(len(blocks), size=count, replace=False).tolist())
+    return [block for idx, block in enumerate(blocks) if idx in selected]
+
+
+def _select_blocks_for_sampling(
+    blocks: list[BenchmarkBlock],
+    *,
+    max_blocks: int | None,
+    block_sampling: str,
+    block_random_seed: int,
+) -> tuple[list[BenchmarkBlock], dict[str, Any]]:
+    sampling = _normalize_block_sampling(block_sampling)
+    candidate_counts = _count_block_strata(blocks)
+    limit = len(blocks) if max_blocks is None else max(0, min(int(max_blocks), len(blocks)))
+    requested_counts: dict[str, int] = {}
+    rng = np.random.default_rng(int(block_random_seed))
+
+    if max_blocks is None and sampling in {"first", "random", "stratified"}:
+        selected = list(blocks)
+    elif sampling == "first":
+        selected = list(blocks[:limit])
+    elif sampling == "random":
+        selected = _random_subset_preserve_order(blocks, count=limit, rng=rng)
+    elif sampling == "tissue":
+        positives = [block for block in blocks if block.mask_fraction > 0.0]
+        ranked = sorted(positives, key=lambda block: (-block.mask_fraction, block.block_index))
+        selected_ids = {block.block_index for block in ranked[:limit]}
+        selected = [block for block in blocks if block.block_index in selected_ids]
+    elif sampling == "mixed":
+        mixed = [block for block in blocks if block.coarse_stratum == "mixed"]
+        selected = list(mixed[:limit])
+    else:
+        by_stratum = {
+            stratum: [block for block in blocks if block.coarse_stratum == stratum]
+            for stratum in COARSE_BLOCK_STRATA
+        }
+        base = limit // len(COARSE_BLOCK_STRATA) if COARSE_BLOCK_STRATA else 0
+        remainder = limit % len(COARSE_BLOCK_STRATA) if COARSE_BLOCK_STRATA else 0
+        for idx, stratum in enumerate(COARSE_BLOCK_STRATA):
+            requested_counts[stratum] = base + (1 if idx < remainder else 0)
+        selected_ids: set[int] = set()
+        for stratum in COARSE_BLOCK_STRATA:
+            picked = _random_subset_preserve_order(
+                by_stratum[stratum],
+                count=min(requested_counts[stratum], len(by_stratum[stratum])),
+                rng=rng,
+            )
+            selected_ids.update(block.block_index for block in picked)
+        remaining = limit - len(selected_ids)
+        if remaining > 0:
+            leftovers = [block for block in blocks if block.block_index not in selected_ids]
+            picked = _random_subset_preserve_order(leftovers, count=remaining, rng=rng)
+            selected_ids.update(block.block_index for block in picked)
+        selected = [block for block in blocks if block.block_index in selected_ids]
+
+    selected_counts = _count_block_strata(selected)
+    summary = {
+        "block_sampling": sampling,
+        "block_random_seed": int(block_random_seed),
+        "max_blocks": max_blocks,
+        "total_candidate_blocks": int(len(blocks)),
+        "selected_blocks": int(len(selected)),
+        "requested_coarse_counts": requested_counts,
+        "candidate_counts": candidate_counts,
+        "selected_counts": selected_counts,
+        "candidate_mask_fraction": _mask_fraction_summary(blocks),
+        "selected_mask_fraction": _mask_fraction_summary(selected),
+        "warnings": _sampling_warnings(selected_counts),
+    }
+    return selected, summary
+
+
+def _merge_sampling_summaries(tissues: Iterable[BenchmarkTissue]) -> dict[str, Any]:
+    tissue_list = list(tissues)
+    summaries = [tissue.sampling_summary for tissue in tissue_list]
+    total_candidates = sum(int(item.get("total_candidate_blocks", 0)) for item in summaries)
+    total_selected = sum(int(item.get("selected_blocks", 0)) for item in summaries)
+    candidate_coarse = dict.fromkeys(COARSE_BLOCK_STRATA, 0)
+    selected_coarse = dict.fromkeys(COARSE_BLOCK_STRATA, 0)
+    candidate_detailed = dict.fromkeys(DETAILED_BLOCK_STRATA, 0)
+    selected_detailed = dict.fromkeys(DETAILED_BLOCK_STRATA, 0)
+    warnings: set[str] = set()
+    for summary in summaries:
+        counts = summary.get("candidate_counts", {})
+        for key, value in (counts.get("coarse") or {}).items():
+            candidate_coarse[key] = candidate_coarse.get(key, 0) + int(value)
+        for key, value in (counts.get("detailed") or {}).items():
+            candidate_detailed[key] = candidate_detailed.get(key, 0) + int(value)
+        counts = summary.get("selected_counts", {})
+        for key, value in (counts.get("coarse") or {}).items():
+            selected_coarse[key] = selected_coarse.get(key, 0) + int(value)
+        for key, value in (counts.get("detailed") or {}).items():
+            selected_detailed[key] = selected_detailed.get(key, 0) + int(value)
+        warnings.update(str(item) for item in summary.get("warnings", []))
+    selected_counts = {"coarse": selected_coarse, "detailed": selected_detailed}
+    warnings.update(_sampling_warnings(selected_counts))
+    return {
+        "total_candidate_blocks": int(total_candidates),
+        "selected_blocks": int(total_selected),
+        "candidate_counts": {"coarse": candidate_coarse, "detailed": candidate_detailed},
+        "selected_counts": selected_counts,
+        "selected_mask_fraction": _mask_fraction_summary(
+            block for tissue in tissue_list for block in tissue.blocks
+        ),
+        "warnings": sorted(warnings),
+    }
+
+
 def _iter_source_tiles_for_region(
     *,
     level: int,
@@ -448,12 +655,12 @@ def _build_blocks_for_tissue(
     source_level: int,
     chunk_xy: int,
     tile_size_yx: tuple[int, int],
-    max_blocks: int | None,
 ) -> list[BenchmarkBlock]:
     tile_h, tile_w = map(int, tile_size_yx)
     source_h, source_w = map(int, source_shape_yx)
     tile_h_out, tile_w_out = map(int, tile_shape_yx)
     blocks: list[BenchmarkBlock] = []
+    block_index = 0
     for y0 in range(0, tile_h_out, chunk_xy):
         y1 = min(tile_h_out, y0 + chunk_xy)
         for x0 in range(0, tile_w_out, chunk_xy):
@@ -480,6 +687,7 @@ def _build_blocks_for_tissue(
             blocks.append(
                 BenchmarkBlock(
                     tissue_index=int(tissue_index),
+                    block_index=int(block_index),
                     y0=y0,
                     y1=y1,
                     x0=x0,
@@ -498,9 +706,65 @@ def _build_blocks_for_tissue(
                     ideal_source_tile_count=ideal,
                 )
             )
-            if max_blocks is not None and len(blocks) >= int(max_blocks):
-                return blocks
+            block_index += 1
     return blocks
+
+
+def _mask_fraction_for_block(
+    *,
+    lr_labels: np.ndarray,
+    source_shape_yx: tuple[int, int],
+    label_id: int,
+    label_crop_seg_yx: BoundsYX,
+    block: BenchmarkBlock,
+) -> float:
+    if not block.requires_source:
+        return 0.0
+    source_h, source_w = map(int, source_shape_yx)
+    scale_y = source_h / lr_labels.shape[0]
+    scale_x = source_w / lr_labels.shape[1]
+    projected = project_label_mask_to_source_region(
+        lr_labels,
+        label_id=int(label_id),
+        source_region_yx=_valid_region_for_block(block),
+        label_crop_seg_yx=label_crop_seg_yx.clip(lr_labels.shape),
+        scale_y=scale_y,
+        scale_x=scale_x,
+    )
+    denominator = max(1, int(block.h * block.w))
+    return float(np.count_nonzero(projected) / denominator)
+
+
+def _classify_blocks_for_tissue(
+    blocks: list[BenchmarkBlock],
+    *,
+    lr_labels: np.ndarray,
+    source_shape_yx: tuple[int, int],
+    label_id: int,
+    label_crop_seg_yx: BoundsYX,
+) -> list[BenchmarkBlock]:
+    classified: list[BenchmarkBlock] = []
+    for block in blocks:
+        mask_fraction = _mask_fraction_for_block(
+            lr_labels=lr_labels,
+            source_shape_yx=source_shape_yx,
+            label_id=label_id,
+            label_crop_seg_yx=label_crop_seg_yx,
+            block=block,
+        )
+        coarse, detailed = _block_strata_for_mask_fraction(
+            requires_source=block.requires_source,
+            mask_fraction=mask_fraction,
+        )
+        classified.append(
+            replace(
+                block,
+                mask_fraction=mask_fraction,
+                coarse_stratum=coarse,
+                detailed_stratum=detailed,
+            )
+        )
+    return classified
 
 
 def _alignment_diagnostics(tissue: BenchmarkTissue, *, tile_size_yx: tuple[int, int]) -> dict[str, Any]:
@@ -545,6 +809,9 @@ def _resolve_benchmark_geometry(
     metadata_schema: str,
     max_tissues: int | None,
     max_blocks: int | None,
+    block_sampling: str,
+    block_random_seed: int,
+    config_source: str,
     min_side_for_mips: int | None,
 ) -> BenchmarkGeometry:
     del metadata_schema
@@ -556,9 +823,9 @@ def _resolve_benchmark_geometry(
     resolved_tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     chunk_xy = int(tile_config.chunk_size)
     pad_multiple = int(tile_config.pad_multiple)
-    extra_margin_px = int(tile_config.extra_margin_px)
-    if output_profile in {"production", "upload_staging"} and extra_margin_px == 0:
-        extra_margin_px = int(defaults["extra_margin_px"])
+    configured_extra_margin_px = int(tile_config.extra_margin_px)
+    extra_margin_px = configured_extra_margin_px
+    resolved_block_sampling = _normalize_block_sampling(block_sampling)
 
     ets_path = find_ets_file(vsi_path)
     if ets_path is None:
@@ -614,7 +881,7 @@ def _resolve_benchmark_geometry(
             tile_shape[0],
             int(min_side_for_mips or chunk_xy),
         )
-        blocks = _build_blocks_for_tissue(
+        candidate_blocks = _build_blocks_for_tissue(
             tissue_index=int(spec.tissue_index),
             canvas=spec.logical_canvas_source_yx,
             tile_shape_yx=tile_shape,
@@ -622,7 +889,19 @@ def _resolve_benchmark_geometry(
             source_level=source_idx,
             chunk_xy=chunk_xy,
             tile_size_yx=tile_size_yx,
+        )
+        classified_blocks = _classify_blocks_for_tissue(
+            candidate_blocks,
+            lr_labels=lr_labels,
+            source_shape_yx=source_shape_yx,
+            label_id=int(spec.label_id),
+            label_crop_seg_yx=spec.label_crop_seg_yx,
+        )
+        selected_blocks, sampling_summary = _select_blocks_for_sampling(
+            classified_blocks,
             max_blocks=max_blocks,
+            block_sampling=resolved_block_sampling,
+            block_random_seed=int(block_random_seed) + int(spec.tissue_index),
         )
         tissues.append(
             BenchmarkTissue(
@@ -635,7 +914,9 @@ def _resolve_benchmark_geometry(
                 crop_bounds_source_level=spec.clipped_source_yx.as_xyxy(),
                 crop_bounds_segmentation_level=spec.clipped_frame_seg_yx.as_xyxy(),
                 num_mips=int(num_mips),
-                blocks=blocks,
+                blocks=selected_blocks,
+                all_block_count=len(candidate_blocks),
+                sampling_summary=sampling_summary,
                 frame_debug={
                     **spec.debug_dict(),
                     "segmentation_info": segmentation_info,
@@ -659,6 +940,13 @@ def _resolve_benchmark_geometry(
         output_profile=output_profile,
         tile_frame_level=resolved_tile_frame_level,
         crop_shape_policy=resolved_crop_shape_policy,
+        profile_defaults=dict(defaults),
+        configured_extra_margin_px=int(configured_extra_margin_px),
+        effective_extra_margin_px=int(extra_margin_px),
+        config_source=str(config_source),
+        block_sampling=resolved_block_sampling,
+        block_random_seed=int(block_random_seed),
+        sampling_summary=_merge_sampling_summaries(tissues),
         compression_default=str(defaults["compression"]),
         store_tissue_mask=bool(defaults["store_tissue_mask"]),
         materialize_masked_rgb=bool(defaults["materialize_masked_rgb"]),
@@ -682,6 +970,13 @@ def _geometry_to_json(geometry: BenchmarkGeometry) -> dict[str, Any]:
         "output_profile": geometry.output_profile,
         "tile_frame_level": geometry.tile_frame_level,
         "crop_shape_policy": geometry.crop_shape_policy,
+        "profile_defaults": geometry.profile_defaults,
+        "configured_extra_margin_px": int(geometry.configured_extra_margin_px),
+        "effective_extra_margin_px": int(geometry.effective_extra_margin_px),
+        "config_source": geometry.config_source,
+        "block_sampling": geometry.block_sampling,
+        "block_random_seed": int(geometry.block_random_seed),
+        "sampling_summary": geometry.sampling_summary,
         "store_tissue_mask": bool(geometry.store_tissue_mask),
         "materialize_masked_rgb": bool(geometry.materialize_masked_rgb),
         "sparse_zero_chunks": bool(geometry.sparse_zero_chunks),
@@ -700,7 +995,9 @@ def _geometry_to_json(geometry: BenchmarkGeometry) -> dict[str, Any]:
                     map(int, tissue.crop_bounds_segmentation_level)
                 ),
                 "num_mips": int(tissue.num_mips),
+                "candidate_blocks": int(tissue.all_block_count),
                 "sampled_blocks": len(tissue.blocks),
+                "sampling_summary": tissue.sampling_summary,
                 "logical_canvas_source_yx": tissue.logical_canvas_source_yx.as_dict(),
                 "clipped_source_yx": tissue.clipped_source_yx.as_dict(),
                 "source_tile_alignment": _alignment_diagnostics(
@@ -913,6 +1210,7 @@ def _write_rgb_block(arr: Any, block: BenchmarkBlock, rgb: np.ndarray, timers: S
     started = time.perf_counter()
     arr[:, block.y0 : block.y1, block.x0 : block.x1] = np.moveaxis(rgb, -1, 0)
     elapsed = time.perf_counter() - started
+    timers.add("s0_rgb_write_compress_s", elapsed)
     timers.add("rgb_write_s", elapsed)
     timers.add("compression_write_s", elapsed)
     return True
@@ -924,6 +1222,7 @@ def _write_mask_block(arr: Any, block: BenchmarkBlock, mask: np.ndarray, timers:
     started = time.perf_counter()
     arr[block.y0 : block.y1, block.x0 : block.x1] = mask
     elapsed = time.perf_counter() - started
+    timers.add("s0_mask_write_compress_s", elapsed)
     timers.add("mask_write_s", elapsed)
     timers.add("compression_write_s", elapsed)
     return True
@@ -940,7 +1239,10 @@ def _write_rgb_mips(
     for m in range(1, len(arrays)):
         started = time.perf_counter()
         src = src[::2, ::2, :]
-        timers.add("mip_generation_s", time.perf_counter() - started)
+        elapsed = time.perf_counter() - started
+        timers.add("rgb_mip_downsample_s", elapsed)
+        timers.add("mip_generation_s", elapsed)
+        timers.add("pyramid_write_path_s", elapsed)
         if src.size == 0 or not np.any(src):
             continue
         ym0 = block.y0 >> m
@@ -950,8 +1252,10 @@ def _write_rgb_mips(
         write_started = time.perf_counter()
         arrays[m][:, ym0:ym1, xm0:xm1] = np.moveaxis(src, -1, 0)
         elapsed = time.perf_counter() - write_started
+        timers.add("rgb_mip_write_compress_s", elapsed)
         timers.add("rgb_write_s", elapsed)
         timers.add("compression_write_s", elapsed)
+        timers.add("pyramid_write_path_s", elapsed)
         writes += 1
     return writes
 
@@ -967,7 +1271,10 @@ def _write_mask_mips(
     for m in range(1, len(arrays)):
         started = time.perf_counter()
         src = _max_pool_2x(src)
-        timers.add("mask_pyramid_s", time.perf_counter() - started)
+        elapsed = time.perf_counter() - started
+        timers.add("mask_mip_downsample_s", elapsed)
+        timers.add("mask_pyramid_s", elapsed)
+        timers.add("pyramid_write_path_s", elapsed)
         if src.size == 0 or not np.any(src):
             continue
         ym0 = block.y0 >> m
@@ -977,8 +1284,10 @@ def _write_mask_mips(
         write_started = time.perf_counter()
         arrays[m][ym0:ym1, xm0:xm1] = src
         elapsed = time.perf_counter() - write_started
+        timers.add("mask_mip_write_compress_s", elapsed)
         timers.add("mask_write_s", elapsed)
         timers.add("compression_write_s", elapsed)
+        timers.add("pyramid_write_path_s", elapsed)
         writes += 1
     return writes
 
@@ -994,6 +1303,8 @@ def _mode_uses_source(mode: str) -> bool:
         "direct-ets-rgb-no-mask-no-mips",
         "direct-ets-rgb-plus-mask-no-mips",
         "direct-ets-rgb-plus-mask-mips",
+        "native-source-pyramid-rgb-plus-mask-mips",
+        "native-source-pyramid-rgb-plus-mask-mips-aligned",
     }
 
 
@@ -1001,6 +1312,8 @@ def _mode_includes_mask(mode: str) -> bool:
     return mode in {
         "direct-ets-rgb-plus-mask-no-mips",
         "direct-ets-rgb-plus-mask-mips",
+        "native-source-pyramid-rgb-plus-mask-mips",
+        "native-source-pyramid-rgb-plus-mask-mips-aligned",
         "materialized-source-crop-write",
     }
 
@@ -1008,8 +1321,39 @@ def _mode_includes_mask(mode: str) -> bool:
 def _mode_includes_mips(mode: str) -> bool:
     return mode in {
         "direct-ets-rgb-plus-mask-mips",
+        "native-source-pyramid-rgb-plus-mask-mips",
+        "native-source-pyramid-rgb-plus-mask-mips-aligned",
         "materialized-source-crop-write",
     }
+
+
+def _mode_is_native_source_pyramid(mode: str) -> bool:
+    return mode in {
+        "native-source-pyramid-rgb-plus-mask-mips",
+        "native-source-pyramid-rgb-plus-mask-mips-aligned",
+    }
+
+
+def _native_mode_uses_aligned_canvas(mode: str) -> bool:
+    return mode == "native-source-pyramid-rgb-plus-mask-mips-aligned"
+
+
+def _record_for_benchmark_tissue(tissue: BenchmarkTissue) -> TissueTileRecord:
+    return TissueTileRecord(
+        tile=np.zeros((*tissue.tile_shape_yx, 3), dtype=np.uint8),
+        tissue_index=int(tissue.tissue_index),
+        label_id=int(tissue.label_id),
+        crop_bounds_source_level=tuple(map(int, tissue.crop_bounds_source_level)),
+        crop_bounds_segmentation_level=tuple(map(int, tissue.crop_bounds_segmentation_level)),
+        tile_dim=int(max(tissue.tile_shape_yx)),
+        tile_shape_yx=tuple(map(int, tissue.tile_shape_yx)),
+        mask=None,
+        tile_frame_level="source",
+        crop_shape_policy="compact_rectangle",
+        source_tile_dim=int(max(tissue.tile_shape_yx)),
+        segmentation_tile_dim=None,
+        frame_debug=tissue.frame_debug,
+    )
 
 
 def _sample_replay_blocks(
@@ -1079,6 +1423,8 @@ def _run_single_mode(
     raw_input_bytes = 0
     raw_output_bytes = 0
     materialized_source: np.ndarray | None = None
+    native_accounting_override: dict[str, Any] | None = None
+    native_writer_metrics: dict[str, Any] = {}
 
     if mode == "materialized-source-crop-write":
         source_h, source_w = map(int, geometry.source_shape_yx)
@@ -1099,7 +1445,96 @@ def _run_single_mode(
         replay_blocks = _sample_replay_blocks(geometry, timers=timers, accounting=accounting)
 
     sizes = {"apparent_bytes": 0, "physical_bytes": 0, "file_count": 0}
-    if skipped_reason is None:
+    if skipped_reason is None and _mode_is_native_source_pyramid(mode):
+        native_unique_tiles = 0
+        native_decode_calls = 0
+        native_expected_chunks = 0
+        for tissue in geometry.tissues:
+            tissue_dir = artifact_dir / f"tissue_{tissue.tissue_index:02d}.ome.zarr"
+            record = _record_for_benchmark_tissue(tissue)
+            native_chunk_limit = (
+                len(tissue.blocks) if len(tissue.blocks) < int(tissue.all_block_count) else None
+            )
+            stats = write_native_ets_tissue_pyramid_ome(
+                ets_path=geometry.ets_path,
+                out_dir=tissue_dir,
+                record=record,
+                lr_labels=geometry.lr_labels,
+                source_level=geometry.source_level,
+                source_shape_yx=geometry.source_shape_yx,
+                source_phys_xy_um=geometry.phys_xy_um,
+                block_xy=geometry.chunk_xy,
+                name=f"benchmark_tissue_{tissue.tissue_index:02d}",
+                compressor=codec.compressor,
+                sparse_zero_chunks=True,
+                store_tissue_mask=True,
+                metadata_schema="v0.4",
+                requested_mips=tissue.num_mips,
+                max_chunks_per_level=native_chunk_limit,
+                source_tile_aligned_canvas=_native_mode_uses_aligned_canvas(mode),
+                channel_labels=default_channel_labels(3),
+                channel_colors=default_channel_colors(3),
+            )
+            chunks_written += int(stats.get("rgb_chunks_written", 0))
+            chunks_skipped += int(stats.get("rgb_chunks_skipped", 0))
+            mask_chunks_written += int(stats.get("mask_chunks_written", 0))
+            mask_chunks_skipped += int(stats.get("mask_chunks_skipped", 0))
+            native_expected_chunks += int(stats.get("rgb_chunks_expected", 0))
+            native_decode_calls += int(stats.get("source_tile_decode_calls", 0))
+            native_unique_tiles += int(stats.get("unique_source_tiles_touched", 0))
+            for key in (
+                "rgb_chunk_write_calls",
+                "unique_rgb_chunks_written",
+                "mask_chunk_write_calls",
+                "unique_mask_chunks_written",
+            ):
+                native_writer_metrics[key] = int(native_writer_metrics.get(key, 0)) + int(
+                    stats.get(key, 0)
+                )
+            for level_info in stats.get("native_pyramid_levels", []):
+                shape = level_info.get("output_shape_yx") or [0, 0]
+                h, w = map(int, shape)
+                raw_output_bytes += int(h * w * 4)
+                raw_input_bytes += int(h * w * 3)
+        accounting.output_chunks_processed = int(native_expected_chunks)
+        accounting.output_chunks_requiring_source_pixels = int(native_expected_chunks)
+        accounting.tile_decode_calls = int(native_decode_calls)
+        native_accounting_override = {
+            "unique_ets_source_tiles_touched": int(native_unique_tiles),
+            "total_ets_tile_decode_calls": int(native_decode_calls),
+            "estimated_repeated_decode_factor": (
+                float(native_decode_calls / native_unique_tiles) if native_unique_tiles else 0.0
+            ),
+            "output_chunks_processed": int(native_expected_chunks),
+            "output_chunks_skipped_before_read": 0,
+            "output_chunks_requiring_source_pixels": int(native_expected_chunks),
+            "source_tiles_per_output_chunk_mean": 0.0,
+            "source_tiles_per_output_chunk_p50": 0.0,
+            "source_tiles_per_output_chunk_p95": 0.0,
+            "source_tiles_per_output_chunk_max": 0,
+            "ideal_source_tiles_per_output_chunk": 1,
+            "potential_alignment_win": 0.0,
+            "exact_chunks_accounted": int(native_expected_chunks),
+            "lightweight_chunks_accounted": 0,
+        }
+        sizes = _directory_sizes(artifact_dir)
+        native_writer_metrics["rgb_write_amplification"] = (
+            float(
+                native_writer_metrics.get("rgb_chunk_write_calls", 0)
+                / native_writer_metrics.get("unique_rgb_chunks_written", 0)
+            )
+            if native_writer_metrics.get("unique_rgb_chunks_written", 0)
+            else 0.0
+        )
+        native_writer_metrics["mask_write_amplification"] = (
+            float(
+                native_writer_metrics.get("mask_chunk_write_calls", 0)
+                / native_writer_metrics.get("unique_mask_chunks_written", 0)
+            )
+            if native_writer_metrics.get("unique_mask_chunks_written", 0)
+            else 0.0
+        )
+    elif skipped_reason is None:
         with ETSFile(geometry.ets_path) as ets:
             for tissue in geometry.tissues:
                 tissue_dir = artifact_dir / f"tissue_{tissue.tissue_index:02d}.ome.zarr"
@@ -1196,12 +1631,12 @@ def _run_single_mode(
                                 mask_chunks_written += 1
                             else:
                                 mask_chunks_skipped += 1
-                        if include_mips:
-                            mask_mip_chunks_written += _write_mask_mips(mask_arrays, block, mask, timers)
                     else:
                         mask = None
                     timers.add("s0_only_s", time.perf_counter() - s0_started)
                     if include_mips:
+                        if include_mask and mask is not None:
+                            mask_mip_chunks_written += _write_mask_mips(mask_arrays, block, mask, timers)
                         mip_chunks_written += _write_rgb_mips(arrays, block, rgb, timers)
                     del mask
 
@@ -1228,12 +1663,12 @@ def _run_single_mode(
     if not keep_artifacts and artifact_dir.exists():
         cleanup_started = time.perf_counter()
         shutil.rmtree(artifact_dir)
-        timers.add("metadata_finalization_s", time.perf_counter() - cleanup_started)
+        timers.add("artifact_cleanup_s", time.perf_counter() - cleanup_started)
         artifact_deleted_after_run = True
     else:
         artifact_deleted_after_run = False
 
-    accounting_dict = accounting.as_dict(
+    accounting_dict = native_accounting_override or accounting.as_dict(
         tile_size_yx=geometry.tile_size_yx,
         chunk_xy=geometry.chunk_xy,
     )
@@ -1251,6 +1686,21 @@ def _run_single_mode(
         "cache_state": cache_state,
         "source_level": int(geometry.source_level),
         "segmentation_level": int(geometry.segmentation_level),
+        "output_profile": geometry.output_profile,
+        "crop_shape_policy": geometry.crop_shape_policy,
+        "configured_extra_margin_px": int(geometry.configured_extra_margin_px),
+        "effective_extra_margin_px": int(geometry.effective_extra_margin_px),
+        "profile_default_extra_margin_px": int(
+            geometry.profile_defaults.get("extra_margin_px", 0)
+        ),
+        "config_source": geometry.config_source,
+        "block_sampling": geometry.block_sampling,
+        "block_random_seed": int(geometry.block_random_seed),
+        "sampling_summary": geometry.sampling_summary,
+        "sample_bias_warnings": geometry.sampling_summary.get("warnings", []),
+        "source_tile_aligned_canvas": (
+            bool(_native_mode_uses_aligned_canvas(mode)) if _mode_is_native_source_pyramid(mode) else False
+        ),
         "number_of_tissues": len(geometry.tissues),
         "number_of_blocks_processed": int(accounting.output_chunks_processed),
         "artifact_deleted_before_run": bool(deleted_before_run),
@@ -1275,6 +1725,7 @@ def _run_single_mode(
         "skip_reason": skipped_reason,
         "stage_timers": timers.as_dict(),
         "source_tile_accounting": accounting_dict,
+        "native_writer_metrics": native_writer_metrics,
         **throughput,
     }
     return _json_ready(row)
@@ -1345,12 +1796,14 @@ def _derive_bottleneck(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "materialized_much_faster_than_direct": False,
         "synthetic_replay_writes_slow": False,
         "no_mips_much_faster_than_mips": False,
+        "pyramid_write_path_dominates_downsample": False,
         "zstd5_much_slower_than_lz4": False,
         "ets_read_fast_direct_slow": False,
         "repeated_decode_factor_high": False,
         "potential_alignment_win_high": False,
     }
     labels: list[str] = []
+    observed: dict[str, Any] = {}
     direct_elapsed = float(direct_mips.get("elapsed_s", 0.0)) if direct_mips else None
     materialized_elapsed = (
         float(materialized.get("elapsed_s", 0.0)) if materialized and not materialized.get("skipped") else None
@@ -1370,9 +1823,23 @@ def _derive_bottleneck(rows: list[dict[str, Any]]) -> dict[str, Any]:
             float(direct_mips.get("elapsed_s", 0.0)),
             float(direct_no_mips.get("elapsed_s", 0.0)),
         )
+        observed["mips_vs_no_mips_elapsed_ratio"] = ratio
         if ratio is not None and ratio >= 1.25:
             rules["no_mips_much_faster_than_mips"] = True
-            labels.append("mip generation")
+            timers = direct_mips.get("stage_timers") or {}
+            downsample_s = float(timers.get("rgb_mip_downsample_s") or 0.0) + float(
+                timers.get("mask_mip_downsample_s") or 0.0
+            )
+            write_s = float(timers.get("rgb_mip_write_compress_s") or 0.0) + float(
+                timers.get("mask_mip_write_compress_s") or 0.0
+            )
+            observed["pyramid_downsample_s"] = downsample_s
+            observed["pyramid_write_compress_s"] = write_s
+            if write_s >= downsample_s:
+                rules["pyramid_write_path_dominates_downsample"] = True
+                labels.append("pyramid write path")
+            else:
+                labels.append("pyramid downsampling")
     if zstd5 and lz4:
         z_elapsed = min(float(row.get("elapsed_s", 0.0)) for row in zstd5)
         l_elapsed = min(float(row.get("elapsed_s", 0.0)) for row in lz4)
@@ -1387,6 +1854,7 @@ def _derive_bottleneck(rows: list[dict[str, Any]]) -> dict[str, Any]:
             labels.append("block assembly/scheduling/writer interaction")
     max_redecode = 0.0
     max_alignment_win = 0.0
+    sample_bias_warnings: set[str] = set()
     for row in usable:
         accounting = row.get("source_tile_accounting") or {}
         max_redecode = max(
@@ -1397,6 +1865,7 @@ def _derive_bottleneck(rows: list[dict[str, Any]]) -> dict[str, Any]:
             max_alignment_win,
             float(accounting.get("potential_alignment_win") or 0.0),
         )
+        sample_bias_warnings.update(str(item) for item in row.get("sample_bias_warnings", []))
     if max_redecode >= 2.0:
         rules["repeated_decode_factor_high"] = True
         labels.append("missing ETS tile cache candidate")
@@ -1418,6 +1887,8 @@ def _derive_bottleneck(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "observed": {
             "max_repeated_decode_factor": max_redecode,
             "max_potential_alignment_win": max_alignment_win,
+            "sample_bias_warnings": sorted(sample_bias_warnings),
+            **observed,
         },
     }
 
@@ -1480,6 +1951,8 @@ def run_vsi_transcode_benchmark(
     codecs: Iterable[str] | None = None,
     max_tissues: int | None = None,
     max_blocks: int | None = None,
+    block_sampling: str = "first",
+    block_random_seed: int = 0,
     keep_artifacts: bool = False,
     materialized_read_max_gib: float = 8.0,
     warm_cache: bool = False,
@@ -1487,6 +1960,7 @@ def run_vsi_transcode_benchmark(
     progress_interval_s: float = 30.0,
     external_baseline_json: str | Path | None = None,
     min_side_for_mips: int | None = None,
+    config_source: str | None = None,
 ) -> dict[str, Any]:
     del progress_interval_s
     vsi_path = Path(vsi_path)
@@ -1509,6 +1983,9 @@ def run_vsi_transcode_benchmark(
         metadata_schema=metadata_schema,
         max_tissues=max_tissues,
         max_blocks=max_blocks,
+        block_sampling=block_sampling,
+        block_random_seed=block_random_seed,
+        config_source=config_source or "programmatic/default",
         min_side_for_mips=min_side_for_mips,
     )
     geometry_elapsed = time.perf_counter() - geometry_started
@@ -1534,11 +2011,17 @@ def run_vsi_transcode_benchmark(
             "codecs": selected_codecs,
             "max_tissues": max_tissues,
             "max_blocks": max_blocks,
+            "block_sampling": geometry.block_sampling,
+            "block_random_seed": int(geometry.block_random_seed),
             "keep_artifacts": keep_artifacts,
             "materialized_read_max_gib": materialized_read_max_gib,
             "warm_cache": warm_cache,
             "profile_cpu": profile_cpu,
             "min_side_for_mips": min_side_for_mips,
+            "config_source": geometry.config_source,
+            "profile_defaults": geometry.profile_defaults,
+            "configured_extra_margin_px": int(geometry.configured_extra_margin_px),
+            "effective_extra_margin_px": int(geometry.effective_extra_margin_px),
         },
     }
 
@@ -1609,17 +2092,25 @@ def run_vsi_transcode_benchmark(
     rows.extend(_read_external_baselines(Path(external_baseline_json) if external_baseline_json else None))
     decision = _derive_bottleneck(rows)
     result = {
-        "schema_version": "v0.1",
+        "schema_version": "v0.2",
         "summary": {
             "vsi_path": str(vsi_path),
             "ets_path": str(geometry.ets_path),
             "source_level": int(geometry.source_level),
             "segmentation_level": int(geometry.segmentation_level),
             "output_profile": geometry.output_profile,
+            "crop_shape_policy": geometry.crop_shape_policy,
+            "profile_defaults": geometry.profile_defaults,
+            "configured_extra_margin_px": int(geometry.configured_extra_margin_px),
+            "effective_extra_margin_px": int(geometry.effective_extra_margin_px),
+            "config_source": geometry.config_source,
             "modes": selected_modes,
             "codecs": selected_codecs,
             "max_tissues": max_tissues,
             "max_blocks": max_blocks,
+            "block_sampling": geometry.block_sampling,
+            "block_random_seed": int(geometry.block_random_seed),
+            "sampling_summary": geometry.sampling_summary,
             "warm_cache": bool(warm_cache),
             "warm_cache_info": warm_cache_info,
             "keep_artifacts": bool(keep_artifacts),
