@@ -1,0 +1,43 @@
+# E241 VSI/ETS transcode benchmark configuration.
+# Mirrors the segmentation and tile settings used for the production timing runs.
+
+segmentation:
+  backend: "local-entropy"
+  target_long_side: 1800
+  min_area_px: 3000
+  struct_elem_px: 5
+  split_touching: true
+  r_split: 5
+  stain_gate: true
+  stain_gate_mode: "adaptive-he"
+  stain_min_od: 0.10
+  stain_min_he_signal: 0.0
+  stain_od_bg_percentile: 0.80
+  stain_od_mad_multiplier: 4.0
+  stain_min_saturation: 0.08
+  stain_pre_open_px: 0
+  keep_top_k: null
+  appendage_refinement_enabled: true
+  appendage_refinement_mode: "trim"
+  appendage_refinement_profile: "he_sections"
+  diagnostics: true
+
+tiles:
+  chunk_size: 512
+  pad_multiple: 512
+  extra_margin_px: 0
+  crop_shape_policy: "compact_rectangle"
+
+output:
+  output_profile: "production"
+  format: "ome-zarr"
+  compression: "zstd"
+  sparse_zero_chunks: true
+  store_tissue_mask: true
+  materialize_masked_rgb: false
+  compression_level: 5
+  convert_to_uint8: true
+  generate_qc: false
+
+mlflow:
+  enabled: false

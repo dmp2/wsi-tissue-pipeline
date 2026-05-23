@@ -682,6 +682,169 @@ def estimate_vsi_plating_cmd(
         console.print(f"[bold green]Wrote estimate:[/] {output_json}")
 
 
+@main.command("benchmark-vsi-transcode")
+@click.option(
+    "--vsi",
+    "vsi_path",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="Input VSI path to benchmark.",
+)
+@click.option(
+    "--benchmark-dir",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Directory for benchmark JSON/CSV/environment outputs.",
+)
+@click.option(
+    "--source-level",
+    default="2",
+    show_default=True,
+    help="ETS source level used for extraction benchmark.",
+)
+@click.option(
+    "--segmentation-level",
+    default="7",
+    show_default=True,
+    help="ETS level used for segmentation geometry.",
+)
+@click.option(
+    "--output-profile",
+    default="production",
+    show_default=True,
+    type=click.Choice(["validation", "production", "upload_staging"]),
+    help="Output profile whose crop/write defaults should be benchmarked.",
+)
+@click.option(
+    "--tile-frame-level",
+    default="segmentation",
+    show_default=True,
+    type=click.Choice(["segmentation", "source"]),
+    help="Coordinate level where crop size, padding, and margin are defined.",
+)
+@click.option(
+    "--metadata-backend",
+    default="bioformats",
+    show_default=True,
+    type=click.Choice(["auto", "bioformats", "ets_only"]),
+    help="Metadata backend used for benchmark setup.",
+)
+@click.option(
+    "--metadata-schema",
+    default="v0.4",
+    show_default=True,
+    help="Metadata schema to record for downstream compatibility.",
+)
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Pipeline YAML config whose segmentation/tile settings should be used.",
+)
+@click.option(
+    "--mode",
+    "modes",
+    multiple=True,
+    help="Benchmark mode to run. Repeat to run a selected subset.",
+)
+@click.option(
+    "--codec",
+    "codecs",
+    multiple=True,
+    help="Benchmark codec variant to run. Repeat for a codec sweep.",
+)
+@click.option("--max-tissues", type=int, default=None, help="Limit benchmark to the first N tissues.")
+@click.option("--max-blocks", type=int, default=None, help="Limit each tissue to the first N output chunks.")
+@click.option(
+    "--keep-artifacts",
+    is_flag=True,
+    help="Keep temporary benchmark Zarr artifacts after measuring their size.",
+)
+@click.option(
+    "--materialized-read-max-gib",
+    type=float,
+    default=8.0,
+    show_default=True,
+    help="Skip materialized-source mode when source level estimate exceeds this GiB cap.",
+)
+@click.option(
+    "--warm-cache",
+    is_flag=True,
+    help="Run a short ETS pre-read before timing modes to mark the run as warm-cache.",
+)
+@click.option(
+    "--profile-cpu",
+    is_flag=True,
+    help="Write cProfile .prof files for selected benchmark modes.",
+)
+@click.option(
+    "--progress-interval-s",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Reserved progress interval recorded in benchmark options.",
+)
+@click.option(
+    "--external-baseline-json",
+    type=click.Path(exists=True, path_type=Path),
+    help="Optional JSON row(s) for manual QuPath/Bio-Formats baseline comparison.",
+)
+def benchmark_vsi_transcode_cmd(
+    vsi_path: Path,
+    benchmark_dir: Path,
+    source_level: str,
+    segmentation_level: str,
+    output_profile: str,
+    tile_frame_level: str,
+    metadata_backend: str,
+    metadata_schema: str,
+    config_path: Path | None,
+    modes: tuple[str, ...],
+    codecs: tuple[str, ...],
+    max_tissues: int | None,
+    max_blocks: int | None,
+    keep_artifacts: bool,
+    materialized_read_max_gib: float,
+    warm_cache: bool,
+    profile_cpu: bool,
+    progress_interval_s: float,
+    external_baseline_json: Path | None,
+):
+    """Run a sampleable VSI/ETS transcode bottleneck benchmark."""
+    from .pipeline import run_vsi_transcode_benchmark
+
+    config = load_config(config_path) if config_path else PipelineConfig()
+    result = run_vsi_transcode_benchmark(
+        vsi_path,
+        benchmark_dir,
+        source_level=source_level,
+        segmentation_level=segmentation_level,
+        output_profile=output_profile,
+        tile_frame_level=tile_frame_level,
+        pipeline_config=config,
+        metadata_backend=metadata_backend,
+        metadata_schema=metadata_schema,
+        modes=modes,
+        codecs=codecs,
+        max_tissues=max_tissues,
+        max_blocks=max_blocks,
+        keep_artifacts=keep_artifacts,
+        materialized_read_max_gib=materialized_read_max_gib,
+        warm_cache=warm_cache,
+        profile_cpu=profile_cpu,
+        progress_interval_s=progress_interval_s,
+        external_baseline_json=external_baseline_json,
+    )
+    decision = result["decision_rules"]
+    console.print(f"[bold green]Wrote benchmark:[/] {benchmark_dir / 'benchmark.json'}")
+    console.print(f"[bold blue]CSV:[/] {benchmark_dir / 'benchmark.csv'}")
+    console.print(
+        "[bold blue]Top bottleneck:[/] "
+        f"{decision.get('top_bottleneck_category', 'inconclusive')}"
+    )
+
+
 @main.command()
 def info():
     """Display pipeline information and configuration."""

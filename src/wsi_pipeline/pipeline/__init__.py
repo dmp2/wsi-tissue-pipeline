@@ -20,6 +20,7 @@ from .plating import (
     _safe_close_existing_client,
     process_slide_with_plating,
 )
+from .vsi_benchmark import run_vsi_transcode_benchmark
 from .vsi_ets import (
     diagnose_vsi_replating,
     estimate_vsi_direct_plating,
@@ -35,6 +36,7 @@ __all__ = [
     "estimate_vsi_direct_plating",
     "diagnose_vsi_replating",
     "vsi_to_source_ome_zarr",
+    "run_vsi_transcode_benchmark",
     # _is_big_tile and _safe_close_existing_client are internal helpers;
     # imported above for use within the package but not part of the public API.
 ]
