@@ -689,6 +689,7 @@ def generate_tissue_tile_records(
     tile_frame_level: TileFrameLevel,
     crop_shape_policy: CropShapePolicy | str = "notebook_square",
     materialize_masked_rgb: bool = True,
+    masked_rgb_fill_value: int = 0,
     chunk: int = 512,
     pad_multiple: int | None = None,
     extra_margin_px: int = 0,
@@ -791,7 +792,7 @@ def generate_tissue_tile_records(
 
         rgb = roi_yxc
         mask = hr_roi_mask.astype(np.uint8)
-        masked = da.where(hr_roi_mask[..., None], roi_yxc, 0)
+        masked = da.where(hr_roi_mask[..., None], roi_yxc, int(masked_rgb_fill_value))
         padding = spec.padding_source_level
         pad_top = padding.top
         pad_left = padding.left

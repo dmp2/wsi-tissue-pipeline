@@ -45,6 +45,7 @@ from .vsi_ets import (
     _normalize_output_profile,
     _physical_xy_from_metadata,
     _profile_defaults,
+    _resolve_primary_rgb_options,
     _resolve_ets_level,
     write_native_ets_tissue_pyramid_ome,
 )
@@ -290,6 +291,9 @@ class BenchmarkGeometry:
     sampling_summary: dict[str, Any]
     compression_default: str
     store_tissue_mask: bool
+    primary_rgb_mode: str
+    masked_rgb_fill_value: int
+    store_unmasked_rgb: bool
     materialize_masked_rgb: bool
     sparse_zero_chunks: bool
     phys_xy_um: tuple[float, float]
@@ -927,6 +931,13 @@ def _resolve_benchmark_geometry(
 
     phys_xy = _physical_xy_from_metadata(metadata) or (1.0, 1.0)
     phys_xy_level = (float(phys_xy[0]) * (2**source_idx), float(phys_xy[1]) * (2**source_idx))
+    rgb_options = _resolve_primary_rgb_options(
+        primary_rgb_mode=None,
+        materialize_masked_rgb=None,
+        masked_rgb_fill_value=None,
+        store_unmasked_rgb=None,
+        defaults=defaults,
+    )
     return BenchmarkGeometry(
         vsi_path=vsi_path,
         ets_path=ets_path,
@@ -949,6 +960,9 @@ def _resolve_benchmark_geometry(
         sampling_summary=_merge_sampling_summaries(tissues),
         compression_default=str(defaults["compression"]),
         store_tissue_mask=bool(defaults["store_tissue_mask"]),
+        primary_rgb_mode=str(rgb_options["primary_rgb_mode"]),
+        masked_rgb_fill_value=int(rgb_options["masked_rgb_fill_value"]),
+        store_unmasked_rgb=bool(rgb_options["store_unmasked_rgb"]),
         materialize_masked_rgb=bool(defaults["materialize_masked_rgb"]),
         sparse_zero_chunks=bool(defaults["sparse_zero_chunks"]),
         phys_xy_um=phys_xy_level,
@@ -978,6 +992,10 @@ def _geometry_to_json(geometry: BenchmarkGeometry) -> dict[str, Any]:
         "block_random_seed": int(geometry.block_random_seed),
         "sampling_summary": geometry.sampling_summary,
         "store_tissue_mask": bool(geometry.store_tissue_mask),
+        "primary_rgb_mode": geometry.primary_rgb_mode,
+        "masked_rgb_fill_value": int(geometry.masked_rgb_fill_value),
+        "mask_applied_to_primary_rgb": geometry.primary_rgb_mode == "masked_rgb",
+        "store_unmasked_rgb": bool(geometry.store_unmasked_rgb),
         "materialize_masked_rgb": bool(geometry.materialize_masked_rgb),
         "sparse_zero_chunks": bool(geometry.sparse_zero_chunks),
         "source_physical_pixel_size_um": {
@@ -1472,6 +1490,9 @@ def _run_single_mode(
                 requested_mips=tissue.num_mips,
                 max_chunks_per_level=native_chunk_limit,
                 source_tile_aligned_canvas=_native_mode_uses_aligned_canvas(mode),
+                primary_rgb_mode=geometry.primary_rgb_mode,
+                masked_rgb_fill_value=geometry.masked_rgb_fill_value,
+                store_unmasked_rgb=geometry.store_unmasked_rgb,
                 channel_labels=default_channel_labels(3),
                 channel_colors=default_channel_colors(3),
             )
@@ -1487,6 +1508,9 @@ def _run_single_mode(
                 "unique_rgb_chunks_written",
                 "mask_chunk_write_calls",
                 "unique_mask_chunks_written",
+                "mask_empty_chunks",
+                "mask_positive_chunks",
+                "rgb_chunks_skipped_before_decode",
             ):
                 native_writer_metrics[key] = int(native_writer_metrics.get(key, 0)) + int(
                     stats.get(key, 0)
@@ -1496,8 +1520,14 @@ def _run_single_mode(
                 h, w = map(int, shape)
                 raw_output_bytes += int(h * w * 4)
                 raw_input_bytes += int(h * w * 3)
+        native_pre_decode_skips = int(
+            native_writer_metrics.get("rgb_chunks_skipped_before_decode", 0)
+        )
         accounting.output_chunks_processed = int(native_expected_chunks)
-        accounting.output_chunks_requiring_source_pixels = int(native_expected_chunks)
+        accounting.output_chunks_skipped_before_read = int(native_pre_decode_skips)
+        accounting.output_chunks_requiring_source_pixels = max(
+            0, int(native_expected_chunks) - int(native_pre_decode_skips)
+        )
         accounting.tile_decode_calls = int(native_decode_calls)
         native_accounting_override = {
             "unique_ets_source_tiles_touched": int(native_unique_tiles),
@@ -1506,8 +1536,10 @@ def _run_single_mode(
                 float(native_decode_calls / native_unique_tiles) if native_unique_tiles else 0.0
             ),
             "output_chunks_processed": int(native_expected_chunks),
-            "output_chunks_skipped_before_read": 0,
-            "output_chunks_requiring_source_pixels": int(native_expected_chunks),
+            "output_chunks_skipped_before_read": int(native_pre_decode_skips),
+            "output_chunks_requiring_source_pixels": max(
+                0, int(native_expected_chunks) - int(native_pre_decode_skips)
+            ),
             "source_tiles_per_output_chunk_mean": 0.0,
             "source_tiles_per_output_chunk_p50": 0.0,
             "source_tiles_per_output_chunk_p95": 0.0,
@@ -1698,6 +1730,18 @@ def _run_single_mode(
         "block_random_seed": int(geometry.block_random_seed),
         "sampling_summary": geometry.sampling_summary,
         "sample_bias_warnings": geometry.sampling_summary.get("warnings", []),
+        "primary_rgb_mode": geometry.primary_rgb_mode,
+        "masked_rgb_fill_value": int(geometry.masked_rgb_fill_value),
+        "mask_applied_to_primary_rgb": geometry.primary_rgb_mode == "masked_rgb",
+        "store_tissue_mask": bool(geometry.store_tissue_mask),
+        "store_unmasked_rgb": bool(geometry.store_unmasked_rgb),
+        "masked_rgb_pyramid_semantics": (
+            "mask_projected_per_scale"
+            if _mode_is_native_source_pyramid(mode) and geometry.primary_rgb_mode == "masked_rgb"
+            else "masked_s0_then_downsampled"
+            if geometry.primary_rgb_mode == "masked_rgb"
+            else "not_applicable"
+        ),
         "source_tile_aligned_canvas": (
             bool(_native_mode_uses_aligned_canvas(mode)) if _mode_is_native_source_pyramid(mode) else False
         ),
@@ -1713,6 +1757,11 @@ def _run_single_mode(
         "chunks_skipped": int(chunks_skipped),
         "mask_chunks_written": int(mask_chunks_written),
         "mask_chunks_skipped": int(mask_chunks_skipped),
+        "mask_empty_chunks": int(native_writer_metrics.get("mask_empty_chunks", 0)),
+        "mask_positive_chunks": int(native_writer_metrics.get("mask_positive_chunks", 0)),
+        "rgb_chunks_skipped_before_decode": int(
+            native_writer_metrics.get("rgb_chunks_skipped_before_decode", 0)
+        ),
         "mip_chunks_written": int(mip_chunks_written),
         "mask_mip_chunks_written": int(mask_mip_chunks_written),
         "apparent_bytes": int(sizes["apparent_bytes"]),

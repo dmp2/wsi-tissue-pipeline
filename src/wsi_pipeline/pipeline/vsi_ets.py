@@ -195,6 +195,71 @@ def _normalize_pyramid_generation_policy(policy: str | None) -> str:
     return aliases[normalized]
 
 
+def _normalize_primary_rgb_mode(primary_rgb_mode: str | None) -> str:
+    normalized = str(primary_rgb_mode or "masked_rgb").strip().lower().replace("-", "_")
+    aliases = {
+        "masked_rgb": "masked_rgb",
+        "masked": "masked_rgb",
+        "mask": "masked_rgb",
+        "unmasked_rgb": "unmasked_rgb",
+        "unmasked": "unmasked_rgb",
+        "raw_rgb": "unmasked_rgb",
+        "raw": "unmasked_rgb",
+    }
+    if normalized not in aliases:
+        raise ValueError("primary_rgb_mode must be one of 'masked_rgb' or 'unmasked_rgb'.")
+    return aliases[normalized]
+
+
+def _resolve_primary_rgb_options(
+    *,
+    primary_rgb_mode: str | None,
+    materialize_masked_rgb: bool | None,
+    masked_rgb_fill_value: int | None,
+    store_unmasked_rgb: bool | None,
+    defaults: dict[str, Any],
+) -> dict[str, Any]:
+    if bool(store_unmasked_rgb):
+        raise NotImplementedError(
+            "store_unmasked_rgb=True is not implemented in this pass; "
+            "use primary_rgb_mode='unmasked_rgb' for debug/unmasked artifacts."
+        )
+
+    resolution_source = "primary_rgb_mode"
+    legacy_used = False
+    if primary_rgb_mode is None:
+        if materialize_masked_rgb is not None:
+            primary_rgb_mode = "masked_rgb" if bool(materialize_masked_rgb) else "unmasked_rgb"
+            resolution_source = "materialize_masked_rgb"
+            legacy_used = True
+        elif defaults.get("primary_rgb_mode") is not None:
+            primary_rgb_mode = str(defaults["primary_rgb_mode"])
+            resolution_source = "profile_default"
+        else:
+            primary_rgb_mode = (
+                "masked_rgb"
+                if bool(defaults.get("materialize_masked_rgb", True))
+                else "unmasked_rgb"
+            )
+            resolution_source = "profile_default_materialize_masked_rgb"
+    resolved_mode = _normalize_primary_rgb_mode(primary_rgb_mode)
+    fill_value = (
+        int(masked_rgb_fill_value)
+        if masked_rgb_fill_value is not None
+        else int(defaults.get("masked_rgb_fill_value", 0))
+    )
+    if not 0 <= fill_value <= 255:
+        raise ValueError("masked_rgb_fill_value must be between 0 and 255 for uint8 RGB output.")
+    return {
+        "primary_rgb_mode": resolved_mode,
+        "materialize_masked_rgb": resolved_mode == "masked_rgb",
+        "masked_rgb_fill_value": fill_value,
+        "store_unmasked_rgb": False,
+        "primary_rgb_mode_resolution_source": resolution_source,
+        "materialize_masked_rgb_deprecated_alias_used": bool(legacy_used),
+    }
+
+
 def _normalize_output_profile(output_profile: str | None) -> str:
     normalized = str(output_profile or "validation").strip().lower().replace("-", "_")
     aliases = {
@@ -221,8 +286,13 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "extra_margin_px": 64,
             "compression": "lossless",
             "store_tissue_mask": True,
-            "materialize_masked_rgb": False,
+            "primary_rgb_mode": "masked_rgb",
+            "masked_rgb_fill_value": 0,
+            "store_unmasked_rgb": False,
+            "materialize_masked_rgb": True,
             "sparse_zero_chunks": True,
+            "pyramid_generation_policy": "native_source_pyramid_crop",
+            "source_tile_aligned_canvas": True,
         }
     if profile == "upload_staging":
         return {
@@ -231,8 +301,13 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "extra_margin_px": 64,
             "compression": "none",
             "store_tissue_mask": True,
+            "primary_rgb_mode": "masked_rgb",
+            "masked_rgb_fill_value": 0,
+            "store_unmasked_rgb": False,
             "materialize_masked_rgb": True,
             "sparse_zero_chunks": False,
+            "pyramid_generation_policy": "native_source_pyramid_crop",
+            "source_tile_aligned_canvas": True,
         }
     return {
         "crop_shape_policy": "notebook_square",
@@ -240,8 +315,13 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
         "extra_margin_px": 0,
         "compression": "none",
         "store_tissue_mask": False,
+        "primary_rgb_mode": "masked_rgb",
+        "masked_rgb_fill_value": 0,
+        "store_unmasked_rgb": False,
         "materialize_masked_rgb": True,
         "sparse_zero_chunks": False,
+        "pyramid_generation_policy": "downsample_streamed_s0",
+        "source_tile_aligned_canvas": False,
     }
 
 
@@ -278,6 +358,43 @@ def _pyramid_shapes_yxc(
 
 def _chunk_count_yx(*, y: int, x: int, chunk_xy: int) -> int:
     return int(math.ceil(int(y) / int(chunk_xy)) * math.ceil(int(x) / int(chunk_xy)))
+
+
+def _estimate_mask_s0_chunk_activity(
+    *,
+    lr_labels: np.ndarray,
+    label_id: int,
+    label_crop_seg_yx: BoundsYX,
+    source_shape_yx: tuple[int, int],
+    canvas: BoundsYX,
+    chunk_xy: int,
+) -> dict[str, int]:
+    empty = 0
+    positive = 0
+    for y0 in range(0, canvas.h, int(chunk_xy)):
+        y1 = min(canvas.h, y0 + int(chunk_xy))
+        for x0 in range(0, canvas.w, int(chunk_xy)):
+            x1 = min(canvas.w, x0 + int(chunk_xy))
+            mask = _project_native_mask_block(
+                lr_labels=lr_labels,
+                label_id=int(label_id),
+                label_crop_seg_yx=label_crop_seg_yx,
+                level_shape_yx=source_shape_yx,
+                canvas=canvas,
+                y0=y0,
+                y1=y1,
+                x0=x0,
+                x1=x1,
+            )
+            if np.any(mask):
+                positive += 1
+            else:
+                empty += 1
+    return {
+        "mask_empty_chunks": int(empty),
+        "mask_positive_chunks": int(positive),
+        "rgb_chunks_skippable_before_decode": int(empty),
+    }
 
 
 def _estimate_pyramid_bytes(
@@ -708,6 +825,9 @@ def _write_native_group_metadata(
     metadata_schema: str,
     output_scale_to_source_level: dict[str, int],
     source_tile_aligned_canvas: bool,
+    primary_rgb_mode: str,
+    masked_rgb_fill_value: int,
+    masked_rgb_pyramid_semantics: str,
 ) -> None:
     version = "0.4" if metadata_schema in {"v0.4", "0.4", None} else str(metadata_schema)
     datasets = []
@@ -750,7 +870,16 @@ def _write_native_group_metadata(
         "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
         "output_scale_to_source_level": output_scale_to_source_level,
         "channel_count": int(channel_count),
+        "primary_rgb_mode": primary_rgb_mode,
+        "masked_rgb_fill_value": int(masked_rgb_fill_value),
+        "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
+        "masked_rgb_pyramid_semantics": masked_rgb_pyramid_semantics,
+        "store_unmasked_rgb": False,
     }
+    root.attrs["primary_rgb_mode"] = primary_rgb_mode
+    root.attrs["masked_rgb_fill_value"] = int(masked_rgb_fill_value)
+    root.attrs["mask_applied_to_primary_rgb"] = primary_rgb_mode == "masked_rgb"
+    root.attrs["store_unmasked_rgb"] = False
     if label_group is not None:
         label_datasets = []
         for spec in specs:
@@ -815,11 +944,27 @@ def write_native_ets_tissue_pyramid_ome(
     requested_mips: int | None = None,
     max_chunks_per_level: int | None = None,
     source_tile_aligned_canvas: bool = False,
+    primary_rgb_mode: str = "unmasked_rgb",
+    masked_rgb_fill_value: int = 0,
+    store_unmasked_rgb: bool = False,
     channel_labels: list[str] | None = None,
     channel_colors: list[str] | None = None,
     run_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write one tissue OME-Zarr by cropping each output scale from native ETS levels."""
+    primary_rgb_mode = _normalize_primary_rgb_mode(primary_rgb_mode)
+    if store_unmasked_rgb:
+        raise NotImplementedError(
+            "store_unmasked_rgb=True is not implemented in this pass; "
+            "use primary_rgb_mode='unmasked_rgb' for debug/unmasked artifacts."
+        )
+    masked_rgb_fill_value = int(masked_rgb_fill_value)
+    if not 0 <= masked_rgb_fill_value <= 255:
+        raise ValueError("masked_rgb_fill_value must be between 0 and 255.")
+    mask_applied_to_primary_rgb = primary_rgb_mode == "masked_rgb"
+    masked_rgb_pyramid_semantics = (
+        "mask_projected_per_scale" if mask_applied_to_primary_rgb else "not_applicable"
+    )
     out_dir = Path(out_dir)
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -833,14 +978,23 @@ def write_native_ets_tissue_pyramid_ome(
         "rgb_pyramid_semantics": "native_scanner_pyramid",
         "reference_policy": "downsample_streamed_s0",
         "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
+        "primary_rgb_mode": primary_rgb_mode,
+        "masked_rgb_fill_value": int(masked_rgb_fill_value),
+        "mask_applied_to_primary_rgb": bool(mask_applied_to_primary_rgb),
+        "store_tissue_mask": bool(store_tissue_mask),
+        "store_unmasked_rgb": False,
+        "masked_rgb_pyramid_semantics": masked_rgb_pyramid_semantics,
         "mask_generation_policy": "project_segmentation_per_scale",
         "mask_pyramid_semantics": "label_safe_nearest",
         "rgb_chunk_write_calls": 0,
         "rgb_chunks_written": 0,
         "rgb_chunks_skipped": 0,
+        "rgb_chunks_skipped_before_decode": 0,
         "mask_chunk_write_calls": 0,
         "mask_chunks_written": 0,
         "mask_chunks_skipped": 0,
+        "mask_empty_chunks": 0,
+        "mask_positive_chunks": 0,
         "source_tile_decode_calls": 0,
         "max_chunks_per_level": chunk_limit,
     }
@@ -876,7 +1030,7 @@ def write_native_ets_tissue_pyramid_ome(
                 chunks=(channel_count, min(block_xy, out_h), min(block_xy, out_w)),
                 dtype="uint8",
                 compressor=compressor,
-                fill_value=0,
+                fill_value=masked_rgb_fill_value if mask_applied_to_primary_rgb else 0,
                 overwrite=True,
                 zarr_format=2,
             )
@@ -895,7 +1049,7 @@ def write_native_ets_tissue_pyramid_ome(
                     chunks=(min(block_xy, out_h), min(block_xy, out_w)),
                     dtype="uint8",
                     compressor=compressor,
-                    fill_value=0,
+                    fill_value=masked_rgb_fill_value if primary_rgb_mode == "masked_rgb" else 0,
                     overwrite=True,
                     zarr_format=2,
                 )
@@ -929,24 +1083,9 @@ def write_native_ets_tissue_pyramid_ome(
                     level_processed += 1
                     x1 = min(out_w, x0 + block_xy)
                     chunk_x = x0 // block_xy
-                    rgb = _read_ets_region_yxc_open(
-                        ets,
-                        level=spec.source_level,
-                        canvas=spec.canvas_source_yx,
-                        y0=y0,
-                        y1=y1,
-                        x0=x0,
-                        x1=x1,
-                        stats=stats,
-                    )
-                    if sparse_zero_chunks and not np.any(rgb):
-                        stats["rgb_chunks_skipped"] += 1
-                    else:
-                        rgb_arr[:, y0:y1, x0:x1] = np.moveaxis(rgb, -1, 0)
-                        stats["rgb_chunk_write_calls"] += 1
-                        stats["rgb_chunks_written"] += 1
-                        unique_rgb_chunks.add((spec.output_index, chunk_y, chunk_x))
-                    if store_tissue_mask:
+                    mask = None
+                    mask_has_pixels = False
+                    if mask_applied_to_primary_rgb or store_tissue_mask:
                         mask = _project_native_mask_block(
                             lr_labels=lr_labels,
                             label_id=int(record.label_id),
@@ -958,6 +1097,41 @@ def write_native_ets_tissue_pyramid_ome(
                             x0=x0,
                             x1=x1,
                         )
+                        mask_has_pixels = bool(np.any(mask))
+                        if mask_has_pixels:
+                            stats["mask_positive_chunks"] += 1
+                        else:
+                            stats["mask_empty_chunks"] += 1
+
+                    if (
+                        mask_applied_to_primary_rgb
+                        and masked_rgb_fill_value == 0
+                        and mask is not None
+                        and not mask_has_pixels
+                    ):
+                        stats["rgb_chunks_skipped_before_decode"] += 1
+                        stats["rgb_chunks_skipped"] += 1
+                    else:
+                        rgb = _read_ets_region_yxc_open(
+                            ets,
+                            level=spec.source_level,
+                            canvas=spec.canvas_source_yx,
+                            y0=y0,
+                            y1=y1,
+                            x0=x0,
+                            x1=x1,
+                            stats=stats,
+                        )
+                        if mask_applied_to_primary_rgb and mask is not None:
+                            rgb = np.where(mask[..., None].astype(bool), rgb, masked_rgb_fill_value)
+                        if sparse_zero_chunks and not np.any(rgb):
+                            stats["rgb_chunks_skipped"] += 1
+                        else:
+                            rgb_arr[:, y0:y1, x0:x1] = np.moveaxis(rgb, -1, 0)
+                            stats["rgb_chunk_write_calls"] += 1
+                            stats["rgb_chunks_written"] += 1
+                            unique_rgb_chunks.add((spec.output_index, chunk_y, chunk_x))
+                    if store_tissue_mask and mask is not None:
                         if sparse_zero_chunks and not np.any(mask):
                             stats["mask_chunks_skipped"] += 1
                         else:
@@ -1003,6 +1177,9 @@ def write_native_ets_tissue_pyramid_ome(
         metadata_schema=metadata_schema,
         output_scale_to_source_level=output_scale_to_source_level,
         source_tile_aligned_canvas=source_tile_aligned_canvas,
+        primary_rgb_mode=primary_rgb_mode,
+        masked_rgb_fill_value=masked_rgb_fill_value,
+        masked_rgb_pyramid_semantics=masked_rgb_pyramid_semantics,
     )
     native_metadata = dict(root.attrs.get("native_source_pyramid", {}))
     native_metadata["levels"] = per_scale
@@ -1147,6 +1324,7 @@ def _direct_ets_tissue_tile_records(
     tile_frame_level: str,
     crop_shape_policy: str = "notebook_square",
     materialize_masked_rgb: bool = True,
+    masked_rgb_fill_value: int = 0,
 ) -> tuple[list[TissueTileRecord], int]:
     """Build lazy per-tissue tile records that read directly from ETS source blocks."""
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
@@ -1204,7 +1382,11 @@ def _direct_ets_tissue_tile_records(
             label_id=int(spec.label_id),
             output_kind="mask",
         )
-        tile = da.where(mask[..., None].astype(bool), rgb, 0) if materialize_masked_rgb else rgb
+        tile = (
+            da.where(mask[..., None].astype(bool), rgb, int(masked_rgb_fill_value))
+            if materialize_masked_rgb
+            else rgb
+        )
         record_tile_dim = int(tile_h) if int(tile_h) == int(tile_w) else int(max(tile_h, tile_w))
         records.append(
             TissueTileRecord(
@@ -1956,6 +2138,10 @@ def estimate_vsi_direct_plating(
     dtype: np.dtype | str | None = "uint8",
     compression: str | None = None,
     store_tissue_mask: bool | None = None,
+    primary_rgb_mode: str | None = None,
+    masked_rgb_fill_value: int | None = None,
+    store_unmasked_rgb: bool | None = None,
+    materialize_masked_rgb: bool | None = None,
     sparse_zero_chunks: bool | None = None,
 ) -> dict[str, Any]:
     """
@@ -1975,6 +2161,17 @@ def estimate_vsi_direct_plating(
         compression = str(defaults["compression"])
     if store_tissue_mask is None:
         store_tissue_mask = bool(defaults["store_tissue_mask"])
+    rgb_options = _resolve_primary_rgb_options(
+        primary_rgb_mode=primary_rgb_mode,
+        materialize_masked_rgb=materialize_masked_rgb,
+        masked_rgb_fill_value=masked_rgb_fill_value,
+        store_unmasked_rgb=store_unmasked_rgb,
+        defaults=defaults,
+    )
+    primary_rgb_mode = str(rgb_options["primary_rgb_mode"])
+    materialize_masked_rgb = bool(rgb_options["materialize_masked_rgb"])
+    masked_rgb_fill_value = int(rgb_options["masked_rgb_fill_value"])
+    store_unmasked_rgb = bool(rgb_options["store_unmasked_rgb"])
     if sparse_zero_chunks is None:
         sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
     if tile_frame_level == "segmentation" and output_profile in {"production", "upload_staging"}:
@@ -2054,12 +2251,25 @@ def estimate_vsi_direct_plating(
                 "tile_frame_level": tile_frame_level,
                 "crop_shape_policy": crop_shape_policy,
                 "output_profile": output_profile,
+                "primary_rgb_mode": primary_rgb_mode,
+                "masked_rgb_fill_value": int(masked_rgb_fill_value),
+                "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
+                "store_tissue_mask": bool(store_tissue_mask),
+                "store_unmasked_rgb": bool(store_unmasked_rgb),
                 "source_shape_yx": list(source_shape_yx),
                 "segmentation_shape_yx": list(map(int, lr_labels.shape)),
                 "tissue_count": 0,
                 "tissues": [],
                 "totals": {
                     "s0_chunks": 0,
+                    "mask_empty_chunks": 0,
+                    "mask_positive_chunks": 0,
+                    "rgb_chunks_skippable_before_decode": 0,
+                    "expected_sparse_zero_behavior": (
+                        "empty_mask_chunks_skip_rgb_decode_and_write"
+                        if primary_rgb_mode == "masked_rgb" and masked_rgb_fill_value == 0
+                        else "post_decode_sparse_zero_only"
+                    ),
                     "all_mip_chunks": 0,
                     "mask_all_mip_chunks": 0,
                     "combined_logical_chunks": 0,
@@ -2099,6 +2309,9 @@ def estimate_vsi_direct_plating(
     total_mask_all_mip_chunks = 0
     total_bytes = 0
     total_mask_bytes = 0
+    total_mask_empty_chunks = 0
+    total_mask_positive_chunks = 0
+    total_rgb_chunks_skippable_before_decode = 0
     warnings: list[str] = []
 
     for spec in frame_specs:
@@ -2129,6 +2342,24 @@ def estimate_vsi_direct_plating(
         mask_bytes_all_mips = (
             int(sum(y * x for y, x in mask_shapes_yx)) if store_tissue_mask else 0
         )
+        mask_activity = (
+            _estimate_mask_s0_chunk_activity(
+                lr_labels=lr_labels,
+                label_id=int(spec.label_id),
+                label_crop_seg_yx=spec.label_crop_seg_yx,
+                source_shape_yx=source_shape_yx,
+                canvas=canvas,
+                chunk_xy=plate_chunk_xy,
+            )
+            if primary_rgb_mode == "masked_rgb" or store_tissue_mask
+            else {
+                "mask_empty_chunks": 0,
+                "mask_positive_chunks": 0,
+                "rgb_chunks_skippable_before_decode": 0,
+            }
+        )
+        if not (primary_rgb_mode == "masked_rgb" and masked_rgb_fill_value == 0):
+            mask_activity["rgb_chunks_skippable_before_decode"] = 0
         warning = _estimate_warning(bytes_all_mips=bytes_all_mips, s0_chunks=s0_chunks)
         if warning is not None:
             warnings.append(f"tissue_{spec.tissue_index:02d}:{warning}")
@@ -2138,6 +2369,11 @@ def estimate_vsi_direct_plating(
         total_mask_all_mip_chunks += mask_mip_chunks
         total_bytes += bytes_all_mips
         total_mask_bytes += mask_bytes_all_mips
+        total_mask_empty_chunks += int(mask_activity["mask_empty_chunks"])
+        total_mask_positive_chunks += int(mask_activity["mask_positive_chunks"])
+        total_rgb_chunks_skippable_before_decode += int(
+            mask_activity["rgb_chunks_skippable_before_decode"]
+        )
         total_combined_bytes = bytes_all_mips + mask_bytes_all_mips
         tissues.append(
             {
@@ -2161,6 +2397,16 @@ def estimate_vsi_direct_plating(
                 "s0_shape_yxc": [int(canvas.h), int(canvas.w), channels],
                 "mask_s0_shape_yx": [int(canvas.h), int(canvas.w)] if store_tissue_mask else None,
                 "s0_chunks": int(s0_chunks),
+                "mask_empty_chunks": int(mask_activity["mask_empty_chunks"]),
+                "mask_positive_chunks": int(mask_activity["mask_positive_chunks"]),
+                "rgb_chunks_skippable_before_decode": int(
+                    mask_activity["rgb_chunks_skippable_before_decode"]
+                ),
+                "expected_sparse_zero_behavior": (
+                    "empty_mask_chunks_skip_rgb_decode_and_write"
+                    if primary_rgb_mode == "masked_rgb" and masked_rgb_fill_value == 0
+                    else "post_decode_sparse_zero_only"
+                ),
                 "num_mips": int(num_mips),
                 "mip_shapes_yxc": [list(map(int, shape)) for shape in shapes_yxc],
                 "all_mip_chunks": int(all_mip_chunks),
@@ -2203,6 +2449,23 @@ def estimate_vsi_direct_plating(
         "crop_shape_policy": crop_shape_policy,
         "compression": _compression_descriptor(compression),
         "store_tissue_mask": bool(store_tissue_mask),
+        "primary_rgb_mode": primary_rgb_mode,
+        "masked_rgb_fill_value": int(masked_rgb_fill_value),
+        "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
+        "store_unmasked_rgb": bool(store_unmasked_rgb),
+        "materialize_masked_rgb": bool(materialize_masked_rgb),
+        "primary_rgb_mode_resolution_source": rgb_options["primary_rgb_mode_resolution_source"],
+        "materialize_masked_rgb_deprecated_alias_used": bool(
+            rgb_options["materialize_masked_rgb_deprecated_alias_used"]
+        ),
+        "masked_rgb_pyramid_semantics": (
+            "mask_projected_per_scale"
+            if defaults.get("pyramid_generation_policy") == "native_source_pyramid_crop"
+            and primary_rgb_mode == "masked_rgb"
+            else "masked_s0_then_downsampled"
+            if primary_rgb_mode == "masked_rgb"
+            else "not_applicable"
+        ),
         "sparse_zero_chunks": bool(sparse_zero_chunks),
         "source_shape_yx": list(source_shape_yx),
         "segmentation_shape_yx": list(map(int, lr_labels.shape)),
@@ -2221,6 +2484,14 @@ def estimate_vsi_direct_plating(
         "tissues": tissues,
         "totals": {
             "s0_chunks": int(total_s0_chunks),
+            "mask_empty_chunks": int(total_mask_empty_chunks),
+            "mask_positive_chunks": int(total_mask_positive_chunks),
+            "rgb_chunks_skippable_before_decode": int(total_rgb_chunks_skippable_before_decode),
+            "expected_sparse_zero_behavior": (
+                "empty_mask_chunks_skip_rgb_decode_and_write"
+                if primary_rgb_mode == "masked_rgb" and masked_rgb_fill_value == 0
+                else "post_decode_sparse_zero_only"
+            ),
             "all_mip_chunks": int(total_all_mip_chunks),
             "mask_all_mip_chunks": int(total_mask_all_mip_chunks),
             "combined_logical_chunks": int(total_all_mip_chunks + total_mask_all_mip_chunks),
@@ -2381,10 +2652,13 @@ def process_vsi_with_direct_plating(
     dtype: np.dtype | str | None = "uint8",
     compression: str | None = None,
     store_tissue_mask: bool | None = None,
+    primary_rgb_mode: str | None = None,
+    masked_rgb_fill_value: int | None = None,
+    store_unmasked_rgb: bool | None = None,
     materialize_masked_rgb: bool | None = None,
     sparse_zero_chunks: bool | None = None,
     pyramid_generation_policy: str | None = None,
-    source_tile_aligned_canvas: bool = False,
+    source_tile_aligned_canvas: bool | None = None,
     resume: bool = False,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
@@ -2405,10 +2679,23 @@ def process_vsi_with_direct_plating(
         compression = str(defaults["compression"])
     if store_tissue_mask is None:
         store_tissue_mask = bool(defaults["store_tissue_mask"])
-    if materialize_masked_rgb is None:
-        materialize_masked_rgb = bool(defaults["materialize_masked_rgb"])
+    rgb_options = _resolve_primary_rgb_options(
+        primary_rgb_mode=primary_rgb_mode,
+        materialize_masked_rgb=materialize_masked_rgb,
+        masked_rgb_fill_value=masked_rgb_fill_value,
+        store_unmasked_rgb=store_unmasked_rgb,
+        defaults=defaults,
+    )
+    primary_rgb_mode = str(rgb_options["primary_rgb_mode"])
+    materialize_masked_rgb = bool(rgb_options["materialize_masked_rgb"])
+    masked_rgb_fill_value = int(rgb_options["masked_rgb_fill_value"])
+    store_unmasked_rgb = bool(rgb_options["store_unmasked_rgb"])
     if sparse_zero_chunks is None:
         sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
+    if pyramid_generation_policy is None:
+        pyramid_generation_policy = str(defaults.get("pyramid_generation_policy", "downsample_streamed_s0"))
+    if source_tile_aligned_canvas is None:
+        source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
@@ -2493,6 +2780,7 @@ def process_vsi_with_direct_plating(
         tile_frame_level=tile_frame_level,
         crop_shape_policy=crop_shape_policy,
         materialize_masked_rgb=bool(materialize_masked_rgb),
+        masked_rgb_fill_value=int(masked_rgb_fill_value),
     )
     if not tile_records:
         logger.warning("[%s] no tissue regions found.", vsi_path.name)
@@ -2521,6 +2809,23 @@ def process_vsi_with_direct_plating(
         "crop_shape_policy": crop_shape_policy,
         "pyramid_generation_policy": pyramid_generation_policy,
         "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
+        "primary_rgb_mode": primary_rgb_mode,
+        "masked_rgb_fill_value": int(masked_rgb_fill_value),
+        "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
+        "store_tissue_mask": bool(store_tissue_mask),
+        "store_unmasked_rgb": bool(store_unmasked_rgb),
+        "primary_rgb_mode_resolution_source": rgb_options["primary_rgb_mode_resolution_source"],
+        "materialize_masked_rgb_deprecated_alias_used": bool(
+            rgb_options["materialize_masked_rgb_deprecated_alias_used"]
+        ),
+        "masked_rgb_pyramid_semantics": (
+            "mask_projected_per_scale"
+            if pyramid_generation_policy == "native_source_pyramid_crop"
+            and primary_rgb_mode == "masked_rgb"
+            else "masked_s0_then_downsampled"
+            if primary_rgb_mode == "masked_rgb"
+            else "not_applicable"
+        ),
         "requested_mips": int(requested_mips) if requested_mips is not None else None,
     }
     source_ngff_metadata = metadata
@@ -2604,9 +2909,24 @@ def process_vsi_with_direct_plating(
                     "sparse_zero_chunks": bool(sparse_zero_chunks),
                     "store_tissue_mask": bool(store_tissue_mask),
                     "materialize_masked_rgb": bool(materialize_masked_rgb),
+                    "primary_rgb_mode": primary_rgb_mode,
+                    "masked_rgb_fill_value": int(masked_rgb_fill_value),
+                    "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
+                    "store_unmasked_rgb": bool(store_unmasked_rgb),
+                    "primary_rgb_mode_resolution_source": rgb_options[
+                        "primary_rgb_mode_resolution_source"
+                    ],
+                    "materialize_masked_rgb_deprecated_alias_used": bool(
+                        rgb_options["materialize_masked_rgb_deprecated_alias_used"]
+                    ),
                     "pyramid_generation_policy": "native_source_pyramid_crop",
                     "rgb_pyramid_semantics": "native_scanner_pyramid",
                     "reference_policy": "downsample_streamed_s0",
+                    "masked_rgb_pyramid_semantics": (
+                        "mask_projected_per_scale"
+                        if primary_rgb_mode == "masked_rgb"
+                        else "not_applicable"
+                    ),
                     "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
                     "requested_mips": int(requested_mips) if requested_mips is not None else None,
                     "status": "running",
@@ -2634,6 +2954,9 @@ def process_vsi_with_direct_plating(
                     min_side_for_mips=min_side_for_mips,
                     requested_mips=requested_mips,
                     source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
+                    primary_rgb_mode=primary_rgb_mode,
+                    masked_rgb_fill_value=int(masked_rgb_fill_value),
+                    store_unmasked_rgb=bool(store_unmasked_rgb),
                     channel_labels=default_channel_labels(int(tile_dask.shape[2])),
                     channel_colors=default_channel_colors(int(tile_dask.shape[2])),
                     run_manifest=run_manifest,
@@ -2654,6 +2977,27 @@ def process_vsi_with_direct_plating(
                     "native_pyramid_levels": native_stats.get("native_pyramid_levels"),
                     "mask_generation_policy": native_stats.get("mask_generation_policy"),
                     "mask_pyramid_semantics": native_stats.get("mask_pyramid_semantics"),
+                    "primary_rgb_mode": native_stats.get("primary_rgb_mode"),
+                    "masked_rgb_fill_value": native_stats.get("masked_rgb_fill_value"),
+                    "mask_applied_to_primary_rgb": native_stats.get(
+                        "mask_applied_to_primary_rgb"
+                    ),
+                    "masked_rgb_pyramid_semantics": native_stats.get(
+                        "masked_rgb_pyramid_semantics"
+                    ),
+                    "store_tissue_mask": native_stats.get("store_tissue_mask"),
+                    "store_unmasked_rgb": native_stats.get("store_unmasked_rgb"),
+                    "primary_rgb_mode_resolution_source": rgb_options[
+                        "primary_rgb_mode_resolution_source"
+                    ],
+                    "materialize_masked_rgb_deprecated_alias_used": bool(
+                        rgb_options["materialize_masked_rgb_deprecated_alias_used"]
+                    ),
+                    "mask_empty_chunks": native_stats.get("mask_empty_chunks"),
+                    "mask_positive_chunks": native_stats.get("mask_positive_chunks"),
+                    "rgb_chunks_skipped_before_decode": native_stats.get(
+                        "rgb_chunks_skipped_before_decode"
+                    ),
                     "rgb_write_amplification": native_stats.get("rgb_write_amplification"),
                     "mask_write_amplification": native_stats.get("mask_write_amplification"),
                     "rgb_chunk_write_calls": native_stats.get("rgb_chunk_write_calls"),
@@ -2696,7 +3040,22 @@ def process_vsi_with_direct_plating(
                     "sparse_zero_chunks": bool(sparse_zero_chunks),
                     "store_tissue_mask": bool(store_tissue_mask),
                     "materialize_masked_rgb": bool(materialize_masked_rgb),
+                    "primary_rgb_mode": primary_rgb_mode,
+                    "masked_rgb_fill_value": int(masked_rgb_fill_value),
+                    "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
+                    "store_unmasked_rgb": bool(store_unmasked_rgb),
+                    "primary_rgb_mode_resolution_source": rgb_options[
+                        "primary_rgb_mode_resolution_source"
+                    ],
+                    "materialize_masked_rgb_deprecated_alias_used": bool(
+                        rgb_options["materialize_masked_rgb_deprecated_alias_used"]
+                    ),
                     "pyramid_generation_policy": "downsample_streamed_s0",
+                    "masked_rgb_pyramid_semantics": (
+                        "masked_s0_then_downsampled"
+                        if primary_rgb_mode == "masked_rgb"
+                        else "not_applicable"
+                    ),
                     "source_tile_aligned_canvas": False,
                     "status": "running",
                     "started_at_unix": time.time(),
@@ -2848,10 +3207,13 @@ def process_vsi_directory_with_plating(
     dtype: np.dtype | str | None = "uint8",
     compression: str | None = None,
     store_tissue_mask: bool | None = None,
+    primary_rgb_mode: str | None = None,
+    masked_rgb_fill_value: int | None = None,
+    store_unmasked_rgb: bool | None = None,
     materialize_masked_rgb: bool | None = None,
     sparse_zero_chunks: bool | None = None,
     pyramid_generation_policy: str | None = None,
-    source_tile_aligned_canvas: bool = False,
+    source_tile_aligned_canvas: bool | None = None,
     resume: bool = False,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
@@ -2879,10 +3241,23 @@ def process_vsi_directory_with_plating(
         compression = str(defaults["compression"])
     if store_tissue_mask is None:
         store_tissue_mask = bool(defaults["store_tissue_mask"])
-    if materialize_masked_rgb is None:
-        materialize_masked_rgb = bool(defaults["materialize_masked_rgb"])
+    rgb_options = _resolve_primary_rgb_options(
+        primary_rgb_mode=primary_rgb_mode,
+        materialize_masked_rgb=materialize_masked_rgb,
+        masked_rgb_fill_value=masked_rgb_fill_value,
+        store_unmasked_rgb=store_unmasked_rgb,
+        defaults=defaults,
+    )
+    primary_rgb_mode = str(rgb_options["primary_rgb_mode"])
+    materialize_masked_rgb = bool(rgb_options["materialize_masked_rgb"])
+    masked_rgb_fill_value = int(rgb_options["masked_rgb_fill_value"])
+    store_unmasked_rgb = bool(rgb_options["store_unmasked_rgb"])
     if sparse_zero_chunks is None:
         sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
+    if pyramid_generation_policy is None:
+        pyramid_generation_policy = str(defaults.get("pyramid_generation_policy", "downsample_streamed_s0"))
+    if source_tile_aligned_canvas is None:
+        source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
@@ -2923,6 +3298,9 @@ def process_vsi_directory_with_plating(
                 dtype=dtype,
                 compression=compression,
                 store_tissue_mask=store_tissue_mask,
+                primary_rgb_mode=primary_rgb_mode,
+                masked_rgb_fill_value=masked_rgb_fill_value,
+                store_unmasked_rgb=store_unmasked_rgb,
                 materialize_masked_rgb=materialize_masked_rgb,
                 sparse_zero_chunks=sparse_zero_chunks,
                 progress_mode=progress_mode,
@@ -2953,9 +3331,13 @@ def process_vsi_directory_with_plating(
                 metadata_schema=metadata_schema,
                 parallel=parallel,
                 min_side_for_mips=min_side_for_mips,
+                requested_mips=requested_mips,
                 dtype=dtype,
                 compression=compression,
                 store_tissue_mask=store_tissue_mask,
+                primary_rgb_mode=primary_rgb_mode,
+                masked_rgb_fill_value=masked_rgb_fill_value,
+                store_unmasked_rgb=store_unmasked_rgb,
                 materialize_masked_rgb=materialize_masked_rgb,
                 sparse_zero_chunks=sparse_zero_chunks,
                 pyramid_generation_policy=pyramid_generation_policy,

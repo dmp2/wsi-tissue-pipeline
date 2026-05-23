@@ -248,6 +248,7 @@ def load_thumbnail(
     path: Path,
     size: int = 256,
     mode: str = "RGB",
+    qc_display_mode: str = "auto",
 ) -> Image.Image:
     """
     Load and resize image to thumbnail.
@@ -267,7 +268,7 @@ def load_thumbnail(
         Thumbnail image.
     """
     if _is_ome_zarr_path(path):
-        return _load_ngff_thumbnail(path, size=size, mode=mode)
+        return _load_ngff_thumbnail(path, size=size, mode=mode, qc_display_mode=qc_display_mode)
 
     with Image.open(path) as img:
         if img.mode != mode:
@@ -363,6 +364,99 @@ def _to_display_uint8(arr: np.ndarray, axes: tuple[str, ...] | None = None) -> n
     return np.nan_to_num(arr_f, nan=0.0).clip(0, 255).astype(np.uint8)
 
 
+def _normalize_qc_display_mode(qc_display_mode: str | None) -> str:
+    normalized = str(qc_display_mode or "auto").strip().lower().replace("-", "_")
+    aliases = {
+        "auto": "auto",
+        "raw": "raw_rgb",
+        "raw_rgb": "raw_rgb",
+        "rgb": "raw_rgb",
+        "mask": "mask",
+        "tissue_mask": "mask",
+        "masked": "masked_rgb",
+        "masked_rgb": "masked_rgb",
+        "triptych": "triptych",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "qc_display_mode must be one of 'auto', 'raw_rgb', 'mask', 'masked_rgb', or 'triptych'."
+        )
+    return aliases[normalized]
+
+
+def _ngff_primary_rgb_mode(path: Path) -> str | None:
+    try:
+        root = zarr.open_group(str(path), mode="r")
+        mode = root.attrs.get("primary_rgb_mode")
+        if mode is not None:
+            return str(mode)
+    except Exception:
+        pass
+    manifest_path = path / "tissue_manifest.json"
+    if manifest_path.exists():
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            mode = payload.get("primary_rgb_mode")
+            if mode is not None:
+                return str(mode)
+        except Exception:
+            return None
+    return None
+
+
+def _load_ngff_mask_for_dataset(path: Path, dataset_path: str) -> np.ndarray | None:
+    mask_path = path / "labels" / "tissue_mask" / dataset_path
+    if not mask_path.exists():
+        return None
+    mask_group_path = path / "labels" / "tissue_mask"
+    try:
+        axes = _ngff_axes(mask_group_path)
+    except Exception:
+        axes = ("y", "x")
+    arr = zarr.open_array(str(mask_path), mode="r")
+    mask = _to_yxc_array(np.asarray(arr[...]), axes)
+    if mask.ndim == 3:
+        mask = mask[..., 0]
+    return mask.astype(bool)
+
+
+def _mask_rgb_for_display(rgb: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    if mask is None:
+        return rgb
+    if rgb.ndim == 2:
+        return np.where(mask, rgb, 0).astype(rgb.dtype)
+    return np.where(mask[..., None], rgb, 0).astype(rgb.dtype)
+
+
+def _thumbnail_array(arr: np.ndarray, *, size: int, mode: str) -> Image.Image:
+    img = Image.fromarray(_to_display_uint8(arr))
+    if img.mode != mode:
+        img = img.convert(mode)
+    img.thumbnail((size, size), Image.BICUBIC)
+    return img.copy()
+
+
+def _triptych_thumbnail(
+    *,
+    raw: np.ndarray,
+    mask: np.ndarray | None,
+    size: int,
+    mode: str,
+) -> Image.Image:
+    if mask is None:
+        raise ValueError("triptych QC requires labels/tissue_mask.")
+    raw_img = _thumbnail_array(raw, size=size, mode=mode)
+    mask_img = _thumbnail_array((mask.astype(np.uint8) * 255), size=size, mode=mode)
+    masked_img = _thumbnail_array(_mask_rgb_for_display(raw, mask), size=size, mode=mode)
+    w = max(raw_img.width, mask_img.width, masked_img.width)
+    h = max(raw_img.height, mask_img.height, masked_img.height)
+    panels = [ImageOps.pad(img, (w, h), color=(255, 255, 255)) for img in (raw_img, mask_img, masked_img)]
+    out = Image.new(mode, (w * 3 + 2, h), (255, 255, 255))
+    for idx, panel in enumerate(panels):
+        out.paste(panel, (idx * (w + 1), 0))
+    return out
+
+
 def _choose_ngff_dataset_path(
     path: Path,
     *,
@@ -417,19 +511,54 @@ def _load_ngff_level_array(path: Path, *, preferred_size: int = 512) -> np.ndarr
     return _load_ngff_level(path, preferred_size=preferred_size).array_yxc
 
 
-def _load_ngff_thumbnail(path: Path, *, size: int, mode: str) -> Image.Image:
+def _load_ngff_thumbnail(
+    path: Path,
+    *,
+    size: int,
+    mode: str,
+    qc_display_mode: str = "auto",
+) -> Image.Image:
     selection = _load_ngff_level(
         path,
         preferred_size=size,
         prefer_full_resolution=True,
         max_full_res_pixels=NGFF_THUMBNAIL_FULL_RES_MAX_PIXELS,
     )
-    arr = _to_display_uint8(selection.array_yxc)
-    img = Image.fromarray(arr)
-    if img.mode != mode:
-        img = img.convert(mode)
-    img.thumbnail((size, size), Image.BICUBIC)
-    return img.copy()
+    display_mode = _normalize_qc_display_mode(qc_display_mode)
+    primary_rgb_mode = (_ngff_primary_rgb_mode(path) or "unmasked_rgb").strip().lower()
+    mask = _load_ngff_mask_for_dataset(path, selection.dataset_path)
+    raw = _to_display_uint8(selection.array_yxc)
+
+    if display_mode == "auto":
+        if primary_rgb_mode == "masked_rgb":
+            display_mode = "masked_rgb"
+        elif mask is not None:
+            display_mode = "masked_rgb"
+        else:
+            display_mode = "raw_rgb"
+
+    if display_mode == "raw_rgb":
+        if primary_rgb_mode == "masked_rgb":
+            raise ValueError(
+                "Raw RGB is not stored in this masked-only production artifact. "
+                "Use a debug/unmasked profile or regenerate from the source VSI/ETS."
+            )
+        return _thumbnail_array(raw, size=size, mode=mode)
+    if display_mode == "mask":
+        if mask is None:
+            raise ValueError("QC mask display requested, but labels/tissue_mask is not present.")
+        return _thumbnail_array(mask.astype(np.uint8) * 255, size=size, mode=mode)
+    if display_mode == "triptych":
+        if primary_rgb_mode == "masked_rgb":
+            raise ValueError(
+                "Triptych QC requires raw RGB, but this artifact stores masked RGB as primary. "
+                "Use a debug/unmasked profile or regenerate from the source VSI/ETS."
+            )
+        return _triptych_thumbnail(raw=raw, mask=mask, size=size, mode=mode)
+
+    if primary_rgb_mode == "masked_rgb":
+        return _thumbnail_array(raw, size=size, mode=mode)
+    return _thumbnail_array(_mask_rgb_for_display(raw, mask), size=size, mode=mode)
 
 
 def _channel_stats(arr: np.ndarray) -> dict[str, float | bool]:
@@ -1066,6 +1195,7 @@ def render_qc_grids(
     padding: int = 1,
     columns: int | str = "auto",
     label_mode: str = "slice",
+    qc_display_mode: str = "auto",
     backend: str = "pil",
     write_master: bool = True,
     write_per_slide: bool = True,
@@ -1082,7 +1212,11 @@ def render_qc_grids(
         for group_ordinal, _source_image, group_records in grouped:
             thumbs = []
             for record in group_records:
-                thumb = load_thumbnail(record.path(input_dir), thumb_size)
+                thumb = load_thumbnail(
+                    record.path(input_dir),
+                    thumb_size,
+                    qc_display_mode=qc_display_mode,
+                )
                 label = _build_label(record, label_mode)
                 if label:
                     thumb = annotate_image(thumb, label)
@@ -1105,7 +1239,11 @@ def render_qc_grids(
         all_thumbs = []
         for group_ordinal, _source_image, group_records in grouped:
             for record in group_records:
-                thumb = load_thumbnail(record.path(input_dir), thumb_size)
+                thumb = load_thumbnail(
+                    record.path(input_dir),
+                    thumb_size,
+                    qc_display_mode=qc_display_mode,
+                )
                 label = _build_label(record, label_mode, group_ordinal=group_ordinal, master=True)
                 if label:
                     thumb = annotate_image(thumb, label)
@@ -1138,6 +1276,7 @@ def run_qc_workflow(
     padding: int = 1,
     columns: int | str = "auto",
     label_mode: str = "both",
+    qc_display_mode: str = "auto",
     backend: str = "pil",
     write_master: bool = True,
     write_per_slide: bool = True,
@@ -1169,6 +1308,7 @@ def run_qc_workflow(
         padding=padding,
         columns=columns,
         label_mode=label_mode,
+        qc_display_mode=qc_display_mode,
         backend=backend,
         write_master=write_master,
         write_per_slide=write_per_slide,
@@ -1199,6 +1339,7 @@ def build_qc_grids(
     padding: int = 1,
     columns: int | str = "auto",
     label_mode: str = "slice",
+    qc_display_mode: str = "auto",
     backend: str = "pil",
     create_master: bool = True,
 ) -> list[Path]:
@@ -1236,6 +1377,7 @@ def build_qc_grids(
         padding=padding,
         columns=columns,
         label_mode=label_mode,
+        qc_display_mode=qc_display_mode,
         backend=backend,
         write_master=create_master,
         write_per_slide=True,
@@ -1268,12 +1410,14 @@ class QCGridBuilder:
         padding: int = 1,
         columns: int | str = "auto",
         label_mode: str = "slice",
+        qc_display_mode: str = "auto",
         backend: str = "pil",
     ):
         self.thumb_size = thumb_size
         self.padding = padding
         self.columns = columns
         self.label_mode = label_mode
+        self.qc_display_mode = qc_display_mode
         self.backend = backend
 
     def build(
@@ -1290,6 +1434,7 @@ class QCGridBuilder:
             padding=self.padding,
             columns=self.columns,
             label_mode=self.label_mode,
+            qc_display_mode=self.qc_display_mode,
             backend=self.backend,
             create_master=create_master,
         )

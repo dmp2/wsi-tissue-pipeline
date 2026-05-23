@@ -82,6 +82,21 @@ def _normalize_output_profile(output_profile: str | None) -> str:
     raise ValueError("output_profile must be one of 'validation', 'production', or 'upload_staging'.")
 
 
+def _normalize_primary_rgb_mode(primary_rgb_mode: str | None) -> str:
+    normalized = str(primary_rgb_mode or "masked_rgb").strip().lower().replace("-", "_")
+    aliases = {
+        "masked_rgb": "masked_rgb",
+        "masked": "masked_rgb",
+        "raw_rgb": "unmasked_rgb",
+        "raw": "unmasked_rgb",
+        "unmasked_rgb": "unmasked_rgb",
+        "unmasked": "unmasked_rgb",
+    }
+    if normalized not in aliases:
+        raise ValueError("primary_rgb_mode must be one of 'masked_rgb' or 'unmasked_rgb'.")
+    return aliases[normalized]
+
+
 def _profile_defaults(output_profile: str) -> dict[str, Any]:
     output_profile = _normalize_output_profile(output_profile)
     if output_profile == "production":
@@ -90,7 +105,10 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "extra_margin_px": 64,
             "compression": "lossless",
             "store_tissue_mask": True,
-            "materialize_masked_rgb": False,
+            "primary_rgb_mode": "masked_rgb",
+            "masked_rgb_fill_value": 0,
+            "store_unmasked_rgb": False,
+            "materialize_masked_rgb": True,
             "sparse_zero_chunks": True,
         }
     if output_profile == "upload_staging":
@@ -99,6 +117,9 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "extra_margin_px": 64,
             "compression": "none",
             "store_tissue_mask": True,
+            "primary_rgb_mode": "masked_rgb",
+            "masked_rgb_fill_value": 0,
+            "store_unmasked_rgb": False,
             "materialize_masked_rgb": True,
             "sparse_zero_chunks": False,
         }
@@ -107,6 +128,9 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
         "extra_margin_px": 0,
         "compression": "none",
         "store_tissue_mask": False,
+        "primary_rgb_mode": "masked_rgb",
+        "masked_rgb_fill_value": 0,
+        "store_unmasked_rgb": False,
         "materialize_masked_rgb": True,
         "sparse_zero_chunks": False,
     }
@@ -438,6 +462,17 @@ def _write_tissue_manifest(
             "native_pyramid_levels",
             "mask_generation_policy",
             "mask_pyramid_semantics",
+            "primary_rgb_mode",
+            "masked_rgb_fill_value",
+            "mask_applied_to_primary_rgb",
+            "masked_rgb_pyramid_semantics",
+            "store_tissue_mask",
+            "store_unmasked_rgb",
+            "primary_rgb_mode_resolution_source",
+            "materialize_masked_rgb_deprecated_alias_used",
+            "mask_empty_chunks",
+            "mask_positive_chunks",
+            "rgb_chunks_skipped_before_decode",
             "rgb_write_amplification",
             "mask_write_amplification",
             "rgb_chunk_write_calls",
@@ -581,6 +616,9 @@ def process_slide_with_plating(
     source_context: Mapping[str, Any] | None = None,
     compression: str | None = None,
     store_tissue_mask: bool | None = None,
+    primary_rgb_mode: str | None = None,
+    masked_rgb_fill_value: int | None = None,
+    store_unmasked_rgb: bool | None = None,
     materialize_masked_rgb: bool | None = None,
     sparse_zero_chunks: bool | None = None,
     progress_mode: str | bool | None = "none",
@@ -618,8 +656,29 @@ def process_slide_with_plating(
         compression = str(defaults["compression"])
     if store_tissue_mask is None:
         store_tissue_mask = bool(defaults["store_tissue_mask"])
-    if materialize_masked_rgb is None:
-        materialize_masked_rgb = bool(defaults["materialize_masked_rgb"])
+    if store_unmasked_rgb:
+        raise NotImplementedError(
+            "store_unmasked_rgb=True is not implemented in this pass; "
+            "use primary_rgb_mode='unmasked_rgb' for debug/unmasked artifacts."
+        )
+    legacy_primary_rgb_alias_used = primary_rgb_mode is None and materialize_masked_rgb is not None
+    if primary_rgb_mode is None:
+        primary_rgb_mode = (
+            "masked_rgb"
+            if bool(
+                defaults["materialize_masked_rgb"]
+                if materialize_masked_rgb is None
+                else materialize_masked_rgb
+            )
+            else "unmasked_rgb"
+        )
+    primary_rgb_mode = _normalize_primary_rgb_mode(primary_rgb_mode)
+    materialize_masked_rgb = primary_rgb_mode == "masked_rgb"
+    masked_rgb_fill_value = (
+        int(masked_rgb_fill_value)
+        if masked_rgb_fill_value is not None
+        else int(defaults.get("masked_rgb_fill_value", 0))
+    )
     if sparse_zero_chunks is None:
         sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
@@ -702,6 +761,18 @@ def process_slide_with_plating(
             "Resolved source metadata context for plating writes (schema=%s).",
             source_metadata_schema,
         )
+    source_context = {
+        **(dict(source_context) if source_context is not None else {}),
+        "primary_rgb_mode": primary_rgb_mode,
+        "masked_rgb_fill_value": int(masked_rgb_fill_value),
+        "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
+        "store_tissue_mask": bool(store_tissue_mask),
+        "store_unmasked_rgb": False,
+        "materialize_masked_rgb_deprecated_alias_used": bool(legacy_primary_rgb_alias_used),
+        "masked_rgb_pyramid_semantics": (
+            "masked_s0_then_downsampled" if primary_rgb_mode == "masked_rgb" else "not_applicable"
+        ),
+    }
 
     # Step 2: Segment at the coarsest level using the segment_fn to get a tissue region mask
     logger.info("Generating tissue masks at the coarsest resolution.")
@@ -729,6 +800,7 @@ def process_slide_with_plating(
         tile_frame_level=tile_frame_level,
         crop_shape_policy=crop_shape_policy,
         materialize_masked_rgb=bool(materialize_masked_rgb),
+        masked_rgb_fill_value=int(masked_rgb_fill_value),
     )
     # Break out early if there are no tissue sections
     if not tile_records:
@@ -1001,7 +1073,7 @@ def process_slide_with_plating(
                         channel_colors=_channel_colors_for_count(int(tile_dask.shape[2])),
                         ngff_metadata=tile_ngff_metadata,
                         metadata_schema=source_metadata_schema,
-                        fill_value=0,
+                        fill_value=masked_rgb_fill_value if primary_rgb_mode == "masked_rgb" else 0,
                         sparse_zero_chunks=bool(sparse_zero_chunks),
                         progress_mode=progress_mode,
                         progress_interval_s=progress_interval_s,

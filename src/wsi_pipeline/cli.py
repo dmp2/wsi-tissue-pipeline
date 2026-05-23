@@ -241,12 +241,20 @@ def batch(
     is_flag=True,
     help="Don't create master contact sheet",
 )
+@click.option(
+    "--qc-display-mode",
+    default="auto",
+    show_default=True,
+    type=click.Choice(["auto", "raw_rgb", "mask", "masked_rgb", "triptych"]),
+    help="OME-Zarr QC display mode.",
+)
 def qc(
     input_dir: Path,
     output_dir: Path,
     thumb_size: int,
     columns: str,
     no_master: bool,
+    qc_display_mode: str,
 ):
     """Generate QC contact sheets for tissue images."""
     from .qc_grid import run_qc_workflow
@@ -263,6 +271,7 @@ def qc(
         padding=1,
         columns=cols,
         label_mode="slice",
+        qc_display_mode=qc_display_mode,
         backend="pil",
         write_master=not no_master,
         write_per_slide=True,

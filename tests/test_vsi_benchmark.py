@@ -363,6 +363,9 @@ def test_benchmark_native_mode_records_alignment_and_write_metrics(monkeypatch, 
             "unique_mask_chunks_written": 2,
             "rgb_write_amplification": 1.0,
             "mask_write_amplification": 1.0,
+            "mask_empty_chunks": 1,
+            "mask_positive_chunks": 1,
+            "rgb_chunks_skipped_before_decode": 1,
             "native_pyramid_levels": [{"output_shape_yx": [64, 64]}],
         }
 
@@ -392,6 +395,11 @@ def test_benchmark_native_mode_records_alignment_and_write_metrics(monkeypatch, 
     assert row["native_writer_metrics"]["mask_write_amplification"] == 1.0
     assert row["rgb_write_amplification"] == 1.0
     assert row["mask_write_amplification"] == 1.0
+    assert row["primary_rgb_mode"] == "masked_rgb"
+    assert row["mask_empty_chunks"] == 1
+    assert row["mask_positive_chunks"] == 1
+    assert row["rgb_chunks_skipped_before_decode"] == 1
+    assert row["source_tile_accounting"]["output_chunks_skipped_before_read"] == 1
 
 
 def test_benchmark_decision_rules_flag_decode_and_alignment():

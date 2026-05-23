@@ -254,9 +254,32 @@ class OutputConfig(BaseModel):
         description="Write labels/tissue_mask as an OME-Zarr label image.",
     )
 
+    primary_rgb_mode: Literal["masked_rgb", "unmasked_rgb"] = Field(
+        default="masked_rgb",
+        description="Primary RGB payload semantics for tissue OME-Zarr outputs.",
+    )
+
+    masked_rgb_fill_value: int = Field(
+        default=0,
+        ge=0,
+        le=255,
+        description="Fill value written outside the tissue mask when primary_rgb_mode='masked_rgb'.",
+    )
+
+    store_unmasked_rgb: bool = Field(
+        default=False,
+        description=(
+            "Future archival/debug option for a secondary unmasked RGB group. "
+            "Production currently supports one primary RGB image only."
+        ),
+    )
+
     materialize_masked_rgb: bool = Field(
         default=True,
-        description="Write masked RGB as the primary RGB payload instead of unmasked source RGB.",
+        description=(
+            "Deprecated compatibility alias for primary_rgb_mode. True resolves to "
+            "'masked_rgb'; False resolves to 'unmasked_rgb' when primary_rgb_mode is not set."
+        ),
     )
 
     compression_level: int = Field(default=5, ge=1, le=9, description="Compression level")

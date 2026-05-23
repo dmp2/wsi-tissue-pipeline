@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from PIL import Image
 
 
@@ -561,3 +562,62 @@ def test_build_qc_grids_uses_pil_default_even_when_torch_available(
         "slide_01_grid.png",
         "master_contact_sheet.png",
     ]
+
+
+def test_ome_zarr_qc_masked_rgb_composes_from_unmasked_primary(temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    tissue_dir = temp_dir / "tissue_00.ome.zarr"
+    tissue_dir.mkdir()
+    raw = np.full((4, 4, 3), 120, dtype=np.uint8)
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[:, :2] = True
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        qc_grid,
+        "_load_ngff_level",
+        lambda *args, **kwargs: qc_grid.NGFFLevelSelection(
+            dataset_path="s0",
+            axes=("c", "y", "x"),
+            raw_shape=(3, 4, 4),
+            array_yxc=raw,
+        ),
+    )
+    monkeypatch.setattr(qc_grid, "_ngff_primary_rgb_mode", lambda path: "unmasked_rgb")
+    monkeypatch.setattr(qc_grid, "_load_ngff_mask_for_dataset", lambda path, dataset_path: mask)
+
+    try:
+        img = qc_grid.load_thumbnail(tissue_dir, size=8, qc_display_mode="masked_rgb")
+        arr = np.asarray(img)
+    finally:
+        monkeypatch.undo()
+
+    assert arr[:, :2].max() == 120
+    assert arr[:, 2:].max() == 0
+
+
+def test_ome_zarr_qc_raw_rgb_fails_for_masked_primary(temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    tissue_dir = temp_dir / "masked.ome.zarr"
+    tissue_dir.mkdir()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        qc_grid,
+        "_load_ngff_level",
+        lambda *args, **kwargs: qc_grid.NGFFLevelSelection(
+            dataset_path="s0",
+            axes=("c", "y", "x"),
+            raw_shape=(3, 2, 2),
+            array_yxc=np.zeros((2, 2, 3), dtype=np.uint8),
+        ),
+    )
+    monkeypatch.setattr(qc_grid, "_ngff_primary_rgb_mode", lambda path: "masked_rgb")
+    monkeypatch.setattr(qc_grid, "_load_ngff_mask_for_dataset", lambda path, dataset_path: None)
+
+    try:
+        with pytest.raises(ValueError, match="Raw RGB is not stored"):
+            qc_grid.load_thumbnail(tissue_dir, size=8, qc_display_mode="raw_rgb")
+    finally:
+        monkeypatch.undo()
