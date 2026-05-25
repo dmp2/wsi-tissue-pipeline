@@ -282,6 +282,29 @@ class OutputConfig(BaseModel):
         ),
     )
 
+    pyramid_generation_policy: Literal["downsample_streamed_s0", "native_source_pyramid_crop"] = (
+        Field(
+            default="downsample_streamed_s0",
+            description="Strategy used to generate OME-Zarr pyramid levels.",
+        )
+    )
+
+    source_tile_aligned_canvas: bool = Field(
+        default=False,
+        description=(
+            "Expand the canonical source-level tissue canvas once to the ETS tile grid. "
+            "This is distinct from extra context margin."
+        ),
+    )
+
+    native_mip_stop_level: int | Literal["segmentation_level"] | None = Field(
+        default="segmentation_level",
+        description=(
+            "Highest ETS source level to use for native_source_pyramid_crop mips. "
+            "'segmentation_level' stops native mips at the segmentation level."
+        ),
+    )
+
     compression_level: int = Field(default=5, ge=1, le=9, description="Compression level")
 
     convert_to_uint8: bool = Field(default=True, description="Convert output to uint8")

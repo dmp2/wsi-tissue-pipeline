@@ -45,8 +45,8 @@ from .vsi_ets import (
     _normalize_output_profile,
     _physical_xy_from_metadata,
     _profile_defaults,
-    _resolve_primary_rgb_options,
     _resolve_ets_level,
+    _resolve_primary_rgb_options,
     write_native_ets_tissue_pyramid_ome,
 )
 
@@ -1488,6 +1488,8 @@ def _run_single_mode(
                 store_tissue_mask=True,
                 metadata_schema="v0.4",
                 requested_mips=tissue.num_mips,
+                native_mip_stop_level=geometry.segmentation_level,
+                native_mip_stop_source="segmentation_level",
                 max_chunks_per_level=native_chunk_limit,
                 source_tile_aligned_canvas=_native_mode_uses_aligned_canvas(mode),
                 primary_rgb_mode=geometry.primary_rgb_mode,

@@ -222,9 +222,11 @@ def test_estimate_vsi_direct_plating_reports_chunks_and_bytes(monkeypatch, tmp_p
         return mask, {"component_source": "fake"}
 
     monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
-    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: {
-        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}
-    })
+    monkeypatch.setattr(
+        vsi_ets,
+        "get_vsi_metadata",
+        lambda *args, **kwargs: {"physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}},
+    )
     monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
     monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
 
@@ -293,9 +295,11 @@ def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, t
         return mask, {}
 
     monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
-    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: {
-        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}
-    })
+    monkeypatch.setattr(
+        vsi_ets,
+        "get_vsi_metadata",
+        lambda *args, **kwargs: {"physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}},
+    )
     monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
     monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
 
@@ -316,6 +320,10 @@ def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, t
     assert estimate["masked_rgb_fill_value"] == 0
     assert estimate["mask_applied_to_primary_rgb"] is True
     assert estimate["sparse_zero_chunks"] is True
+    assert estimate["pyramid_generation_policy"] == "native_source_pyramid_crop"
+    assert estimate["source_tile_aligned_canvas"] is True
+    assert estimate["native_mip_stop_level_source"] == "segmentation_level"
+    assert estimate["context_margin_px"] == 0
     assert tissue["tile_shape_yx"][0] % 64 == 0
     assert tissue["tile_shape_yx"][1] % 64 == 0
     assert tissue["s0_shape_yxc"][:2] == tissue["tile_shape_yx"]
@@ -325,7 +333,10 @@ def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, t
     assert tissue["rgb_chunks_skippable_before_decode"] >= 0
     assert tissue["expected_sparse_zero_behavior"] == "empty_mask_chunks_skip_rgb_decode_and_write"
     assert tissue["mask_all_mip_chunks"] > 0
-    assert tissue["combined_logical_chunks"] == tissue["all_mip_chunks"] + tissue["mask_all_mip_chunks"]
+    assert (
+        tissue["combined_logical_chunks"]
+        == tissue["all_mip_chunks"] + tissue["mask_all_mip_chunks"]
+    )
     assert tissue["rgb_uncompressed_bytes_all_mips"] == tissue["uncompressed_bytes_all_mips"]
     assert tissue["total_uncompressed_bytes_rgb_plus_mask"] == (
         tissue["rgb_uncompressed_bytes_all_mips"] + tissue["mask_uncompressed_bytes_all_mips"]
@@ -336,7 +347,10 @@ def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, t
     assert totals["mask_empty_chunks"] >= 0
     assert totals["mask_positive_chunks"] > 0
     assert totals["rgb_chunks_skippable_before_decode"] >= 0
-    assert totals["combined_logical_chunks"] == totals["all_mip_chunks"] + totals["mask_all_mip_chunks"]
+    assert (
+        totals["combined_logical_chunks"]
+        == totals["all_mip_chunks"] + totals["mask_all_mip_chunks"]
+    )
     assert totals["rgb_uncompressed_bytes_all_mips"] == totals["uncompressed_bytes_all_mips"]
     assert totals["total_uncompressed_bytes_rgb_plus_mask"] == totals["uncompressed_bytes_estimate"]
     assert totals["total_uncompressed_bytes_rgb_plus_mask"] == (
@@ -344,6 +358,78 @@ def test_estimate_vsi_direct_plating_production_compact_rectangle(monkeypatch, t
     )
     assert totals["compressed_bytes_sample_estimate"] is None
     assert estimate["compression"]["mode"] == "lossless"
+
+
+def test_estimate_vsi_direct_plating_native_stops_at_segmentation_level(monkeypatch, tmp_path):
+    from wsi_pipeline.config import TileConfig
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+
+    class _DummyETS:
+        nlevels = 5
+        tile_xsize = 64
+        tile_ysize = 64
+
+        def __init__(self, path):
+            assert Path(path) == ets_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return [(1024, 1024), (512, 512), (256, 256), (128, 128), (64, 64)][level]
+
+        def read_level(self, level):
+            return np.zeros((*self.level_shape(level), 3), dtype=np.uint8)
+
+    def _fake_segment(image, **kwargs):  # noqa: ARG001
+        mask = np.zeros((128, 128), dtype=bool)
+        mask[32:96, 32:96] = True
+        return mask, {}
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(
+        vsi_ets,
+        "get_vsi_metadata",
+        lambda *args, **kwargs: {"physical_pixel_size_um": {"x": 0.25, "y": 0.5}},
+    )
+    monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
+    monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
+
+    estimate = vsi_ets.estimate_vsi_direct_plating(
+        vsi_path,
+        source_level=0,
+        segmentation_level=3,
+        output_profile="production",
+        tile_config=TileConfig(chunk_size=64, pad_multiple=64, extra_margin_px=0),
+        min_side_for_mips=1,
+    )
+
+    tissue = estimate["tissues"][0]
+    assert tissue["output_scale_to_source_level"] == {"s0": 0, "s1": 1, "s2": 2, "s3": 3}
+    assert tissue["mip_stop_reason"] == "segmentation_level"
+    assert tissue["per_scale_shapes_yx"] == [[512, 512], [256, 256], [128, 128], [64, 64]]
+    assert tissue["source_tile_alignment_expansion_yx"] == {
+        "top": 0,
+        "bottom": 0,
+        "left": 0,
+        "right": 0,
+    }
+    assert estimate["projection"]["baseline"]["elapsed_s"] == 228.3
+    assert estimate["projection"]["projected_elapsed_s"] is not None
+    assert estimate["totals"]["projection_baseline_logical_chunks"] > 0
+    assert any(
+        warning.startswith("baseline_config_mismatch:segmentation_level")
+        for warning in estimate["totals"]["warnings"]
+    )
 
 
 def test_primary_rgb_resolution_rejects_secondary_unmasked_rgb():
@@ -357,6 +443,48 @@ def test_primary_rgb_resolution_rejects_secondary_unmasked_rgb():
             store_unmasked_rgb=True,
             defaults=vsi_ets._profile_defaults("production"),
         )
+
+
+def test_e241_production_config_uses_masked_native_zero_margin():
+    from wsi_pipeline.config import load_config
+    from wsi_pipeline.pipeline import vsi_ets
+
+    config = load_config(Path("configs/e241_production_default.yaml"))
+    defaults = vsi_ets._profile_defaults("production")
+
+    assert defaults["extra_margin_px"] == 0
+    assert defaults["primary_rgb_mode"] == "masked_rgb"
+    assert defaults["pyramid_generation_policy"] == "native_source_pyramid_crop"
+    assert defaults["source_tile_aligned_canvas"] is True
+    assert defaults["native_mip_stop_level"] == "segmentation_level"
+    assert config.tiles.extra_margin_px == 0
+    assert config.output.primary_rgb_mode == "masked_rgb"
+    assert config.output.masked_rgb_fill_value == 0
+    assert config.output.store_tissue_mask is True
+    assert config.output.pyramid_generation_policy == "native_source_pyramid_crop"
+    assert config.output.source_tile_aligned_canvas is True
+    assert config.output.native_mip_stop_level == "segmentation_level"
+
+
+def test_e241_debug_context_config_preserves_margin_64():
+    from wsi_pipeline.config import load_config
+
+    config = load_config(Path("configs/e241_debug_context.yaml"))
+
+    assert config.tiles.extra_margin_px == 64
+    assert config.output.primary_rgb_mode == "unmasked_rgb"
+    assert config.output.pyramid_generation_policy == "native_source_pyramid_crop"
+
+
+def test_source_level_0_runbook_is_manual_and_uses_glob_outputs():
+    runbook = Path("docs/source_level_0_production_runbook.md").read_text(encoding="utf-8")
+
+    assert "--source-level 0" in runbook
+    assert "manual" in runbook.lower()
+    assert "resume=True" in runbook
+    assert 'find "$BASE/per_tissue_ngff" -maxdepth 1 -name "*.ome.zarr"' in runbook
+    assert "process_vsi_directory_with_plating" in runbook
+    assert "source_level=0" in runbook
 
 
 def test_estimate_vsi_plating_cli_reports_rgb_mask_and_total(monkeypatch, tmp_path):
@@ -404,7 +532,9 @@ def test_estimate_vsi_plating_cli_reports_rgb_mask_and_total(monkeypatch, tmp_pa
     assert "14 logical chunks" in result.output
 
 
-def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(monkeypatch, tmp_path):
+def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(
+    monkeypatch, tmp_path
+):
     from wsi_pipeline.pipeline import vsi_ets
 
     input_dir = tmp_path / "inputs"
@@ -420,9 +550,11 @@ def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(mo
     def _fake_vsi_to_source_ome_zarr(vsi_path, output_path, **kwargs):
         source_calls.append(Path(vsi_path))
         Path(output_path).mkdir(parents=True, exist_ok=True)
-        return Path(output_path), Path(f"/ets/{Path(vsi_path).stem}.ets"), {
-            "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}
-        }
+        return (
+            Path(output_path),
+            Path(f"/ets/{Path(vsi_path).stem}.ets"),
+            {"physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}},
+        )
 
     def _fake_process_slide_with_plating(source_ome_zarr, per_tissue_dir, **kwargs):
         plating_calls.append(
@@ -446,9 +578,10 @@ def test_process_vsi_directory_with_plating_reuses_source_and_returns_mapping(mo
         materialize_source=True,
     )
 
-    assert "expected_tissues" not in inspect.signature(
-        vsi_ets.process_vsi_directory_with_plating
-    ).parameters
+    assert (
+        "expected_tissues"
+        not in inspect.signature(vsi_ets.process_vsi_directory_with_plating).parameters
+    )
     assert source_calls == [vsi_a, vsi_b]
     assert set(results) == {str(vsi_a), str(vsi_b)}
     assert all(len(paths) == 2 for paths in results.values())
@@ -483,7 +616,9 @@ def test_process_vsi_directory_with_plating_uses_direct_ets_by_default(monkeypat
     monkeypatch.setattr(
         vsi_ets,
         "vsi_to_source_ome_zarr",
-        lambda *args, **kwargs: pytest.fail("default directory path should not materialize source OME-Zarr"),
+        lambda *args, **kwargs: pytest.fail(
+            "default directory path should not materialize source OME-Zarr"
+        ),
     )
 
     results = vsi_ets.process_vsi_directory_with_plating(
@@ -493,7 +628,9 @@ def test_process_vsi_directory_with_plating_uses_direct_ets_by_default(monkeypat
         segmentation_level=7,
     )
 
-    assert results == {str(vsi_path): [tmp_path / "out" / "per_tissue_ngff" / "a_tissue_00.ome.zarr"]}
+    assert results == {
+        str(vsi_path): [tmp_path / "out" / "per_tissue_ngff" / "a_tissue_00.ome.zarr"]
+    }
     assert direct_calls[0]["vsi_path"] == vsi_path
     assert direct_calls[0]["source_level"] == 0
     assert direct_calls[0]["segmentation_level"] == 7
@@ -542,11 +679,15 @@ def test_direct_vsi_plating_forwards_uncompressed_streaming_progress(monkeypatch
         Path(kwargs["out_dir"]).mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
-    monkeypatch.setattr(vsi_ets, "get_vsi_metadata", lambda *args, **kwargs: {
-        "physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}
-    })
+    monkeypatch.setattr(
+        vsi_ets,
+        "get_vsi_metadata",
+        lambda *args, **kwargs: {"physical_pixel_size_um": {"x": 0.25, "y": 0.5, "z": None}},
+    )
     monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
-    monkeypatch.setattr(vsi_ets, "_segment_for_plating", lambda *args, **kwargs: (np.ones((8, 8), dtype=bool), {}))
+    monkeypatch.setattr(
+        vsi_ets, "_segment_for_plating", lambda *args, **kwargs: (np.ones((8, 8), dtype=bool), {})
+    )
     monkeypatch.setattr(vsi_ets, "_direct_ets_tissue_tile_records", lambda **kwargs: ([record], 16))
     monkeypatch.setattr(vsi_ets, "_is_big_tile", lambda *args, **kwargs: True)
     monkeypatch.setattr(vsi_ets, "write_ngff_from_tile_streaming_ome", _fake_writer)
@@ -774,9 +915,14 @@ def test_write_native_ets_tissue_pyramid_writes_native_levels_and_metrics(monkey
         "s0": 0,
         "s1": 1,
     }
-    assert root.attrs["native_source_pyramid"][
-        "canonical_canvas_in_source_level_coordinates"
-    ] == {"y0": 0, "x0": 0, "y1": 8, "x1": 8, "h": 8, "w": 8}
+    assert root.attrs["native_source_pyramid"]["canonical_canvas_in_source_level_coordinates"] == {
+        "y0": 0,
+        "x0": 0,
+        "y1": 8,
+        "x1": 8,
+        "h": 8,
+        "w": 8,
+    }
     assert root.attrs["native_source_pyramid"]["levels"][1]["source_level"] == 1
     assert root.attrs["native_source_pyramid"]["levels"][1]["output_canvas_source_yx"] == {
         "y0": 0,

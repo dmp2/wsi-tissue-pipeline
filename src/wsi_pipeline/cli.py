@@ -653,6 +653,17 @@ def estimate_vsi_plating_cmd(
     from .pipeline import estimate_vsi_direct_plating
 
     config = load_config(config_path) if config_path else PipelineConfig()
+    output_overrides: dict[str, object] = {}
+    if config_path is not None:
+        import yaml
+
+        raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if isinstance(raw_config, dict) and isinstance(raw_config.get("output"), dict):
+            output_overrides = dict(raw_config["output"])
+
+    def _output_override(name: str):
+        return getattr(config.output, name) if name in output_overrides else None
+
     result = estimate_vsi_direct_plating(
         vsi_path,
         source_level=source_level,
@@ -664,9 +675,28 @@ def estimate_vsi_plating_cmd(
         tile_config=config.tiles,
         metadata_backend=metadata_backend,
         metadata_schema=metadata_schema,
+        compression=_output_override("compression"),
+        store_tissue_mask=_output_override("store_tissue_mask"),
+        primary_rgb_mode=_output_override("primary_rgb_mode"),
+        masked_rgb_fill_value=_output_override("masked_rgb_fill_value"),
+        store_unmasked_rgb=_output_override("store_unmasked_rgb"),
+        materialize_masked_rgb=_output_override("materialize_masked_rgb"),
+        sparse_zero_chunks=_output_override("sparse_zero_chunks"),
+        pyramid_generation_policy=_output_override("pyramid_generation_policy"),
+        source_tile_aligned_canvas=_output_override("source_tile_aligned_canvas"),
+        native_mip_stop_level=_output_override("native_mip_stop_level"),
+        config_source=str(config_path) if config_path else "default PipelineConfig",
     )
     totals = result["totals"]
     console.print(f"[bold green]Estimated tissues:[/] {result['tissue_count']}")
+    console.print(
+        "[bold blue]Production semantics:[/] "
+        f"primary_rgb_mode={result.get('primary_rgb_mode')} "
+        f"fill={result.get('masked_rgb_fill_value')} "
+        f"policy={result.get('pyramid_generation_policy')} "
+        f"aligned={result.get('source_tile_aligned_canvas')} "
+        f"mip_stop={result.get('native_mip_stop_level_source')}"
+    )
     console.print(
         "[bold blue]RGB pyramid bytes:[/] "
         f"{totals['rgb_uncompressed_size_all_mips']} "
@@ -683,6 +713,23 @@ def estimate_vsi_plating_cmd(
         f"{totals['total_uncompressed_size_rgb_plus_mask']} "
         f"({totals['combined_logical_chunks']} logical chunks)"
     )
+    projection = result.get("projection") or {}
+    if projection.get("projected_elapsed_min") is not None:
+        console.print(
+            "[bold blue]Projected elapsed:[/] "
+            f"{projection['projected_elapsed_min']:.1f} min from validated source-level-2 baseline"
+        )
+    if projection.get("projected_disk_actual_size"):
+        console.print(
+            "[bold blue]Projected disk:[/] "
+            f"{projection['projected_disk_actual_size']} actual, "
+            f"{projection.get('projected_disk_apparent_size')} apparent"
+        )
+    if totals.get("rgb_chunks_skippable_before_decode") is not None:
+        console.print(
+            "[bold blue]RGB chunks skippable before decode:[/] "
+            f"{totals['rgb_chunks_skippable_before_decode']}"
+        )
     if totals.get("warnings"):
         console.print(f"[bold yellow]Warnings:[/] {', '.join(totals['warnings'])}")
     if output_json is not None:
@@ -763,8 +810,12 @@ def estimate_vsi_plating_cmd(
     multiple=True,
     help="Benchmark codec variant to run. Repeat for a codec sweep.",
 )
-@click.option("--max-tissues", type=int, default=None, help="Limit benchmark to the first N tissues.")
-@click.option("--max-blocks", type=int, default=None, help="Limit each tissue to the first N output chunks.")
+@click.option(
+    "--max-tissues", type=int, default=None, help="Limit benchmark to the first N tissues."
+)
+@click.option(
+    "--max-blocks", type=int, default=None, help="Limit each tissue to the first N output chunks."
+)
 @click.option(
     "--block-sampling",
     default="first",

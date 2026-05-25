@@ -273,7 +273,9 @@ def _normalize_output_profile(output_profile: str | None) -> str:
         "database": "upload_staging",
     }
     if normalized not in aliases:
-        raise ValueError("output_profile must be one of 'validation', 'production', or 'upload_staging'.")
+        raise ValueError(
+            "output_profile must be one of 'validation', 'production', or 'upload_staging'."
+        )
     return aliases[normalized]
 
 
@@ -283,7 +285,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
         return {
             "crop_shape_policy": "compact_rectangle",
             "tile_frame_level": "segmentation",
-            "extra_margin_px": 64,
+            "extra_margin_px": 0,
             "compression": "lossless",
             "store_tissue_mask": True,
             "primary_rgb_mode": "masked_rgb",
@@ -293,12 +295,13 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "sparse_zero_chunks": True,
             "pyramid_generation_policy": "native_source_pyramid_crop",
             "source_tile_aligned_canvas": True,
+            "native_mip_stop_level": "segmentation_level",
         }
     if profile == "upload_staging":
         return {
             "crop_shape_policy": "compact_rectangle",
             "tile_frame_level": "segmentation",
-            "extra_margin_px": 64,
+            "extra_margin_px": 0,
             "compression": "none",
             "store_tissue_mask": True,
             "primary_rgb_mode": "masked_rgb",
@@ -308,6 +311,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "sparse_zero_chunks": False,
             "pyramid_generation_policy": "native_source_pyramid_crop",
             "source_tile_aligned_canvas": True,
+            "native_mip_stop_level": "segmentation_level",
         }
     return {
         "crop_shape_policy": "notebook_square",
@@ -322,6 +326,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
         "sparse_zero_chunks": False,
         "pyramid_generation_policy": "downsample_streamed_s0",
         "source_tile_aligned_canvas": False,
+        "native_mip_stop_level": "segmentation_level",
     }
 
 
@@ -414,6 +419,188 @@ def _estimate_warning(*, bytes_all_mips: int, s0_chunks: int) -> str | None:
     if s0_chunks >= 100_000:
         return "many_s0_chunks_over_100k"
     return None
+
+
+_VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE: dict[str, Any] = {
+    "source_level": 2,
+    "segmentation_level": 7,
+    "elapsed_s": 228.3,
+    "disk_actual_bytes": 703 * 1024**2,
+    "disk_apparent_bytes": 688 * 1024**2,
+    "file_count": 5171,
+    "config": {
+        "primary_rgb_mode": "masked_rgb",
+        "masked_rgb_fill_value": 0,
+        "extra_margin_px": 0,
+        "pyramid_generation_policy": "native_source_pyramid_crop",
+        "source_tile_aligned_canvas": True,
+        "native_mip_stop_level": "segmentation_level",
+        "store_tissue_mask": True,
+        "sparse_zero_chunks": True,
+        "compression_mode": "lossless",
+    },
+}
+
+
+def _normalize_native_mip_stop_level(
+    native_mip_stop_level: int | str | None,
+    *,
+    segmentation_level: int,
+) -> tuple[int | None, str]:
+    if native_mip_stop_level is None:
+        return int(segmentation_level), "segmentation_level"
+    if isinstance(native_mip_stop_level, str):
+        normalized = native_mip_stop_level.strip().lower().replace("-", "_")
+        if normalized in {"", "segmentation", "segmentation_level"}:
+            return int(segmentation_level), "segmentation_level"
+        if normalized in {"none", "all", "available", "available_source_levels"}:
+            return None, "available_source_levels"
+        return int(normalized), "explicit_level"
+    return int(native_mip_stop_level), "explicit_level"
+
+
+def _native_mip_stop_reason(
+    *,
+    specs: list[_NativePyramidLevelSpec],
+    requested_mips: int | None,
+    native_mip_stop_level: int | None,
+    native_mip_stop_source: str,
+    source_level: int,
+    available_mips: int,
+    min_side_mip_count: int,
+) -> str:
+    if not specs:
+        return "no_mips"
+    num_mips = len(specs)
+    if (
+        native_mip_stop_source == "segmentation_level"
+        and native_mip_stop_level is not None
+        and specs[-1].source_level == int(native_mip_stop_level)
+    ):
+        return "segmentation_level"
+    if native_mip_stop_level is not None and specs[-1].source_level == int(native_mip_stop_level):
+        return "native_mip_stop_level"
+    if requested_mips is not None and num_mips == max(1, int(requested_mips)):
+        return "requested_mips"
+    if num_mips == int(min_side_mip_count):
+        return "min_side_for_mips"
+    if num_mips == int(available_mips):
+        return "available_source_levels"
+    _ = source_level
+    return "combined_limits"
+
+
+def _bounds_expansion_yx(outer: BoundsYX, inner: BoundsYX) -> dict[str, int]:
+    return {
+        "top": int(inner.y0 - outer.y0),
+        "bottom": int(outer.y1 - inner.y1),
+        "left": int(inner.x0 - outer.x0),
+        "right": int(outer.x1 - inner.x1),
+    }
+
+
+def _projection_from_validated_source_level2(
+    *,
+    estimate_totals: dict[str, Any],
+    baseline_totals: dict[str, Any] | None,
+) -> dict[str, Any]:
+    baseline = _VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE
+    if not baseline_totals:
+        return {
+            "baseline": baseline,
+            "method": "unavailable_no_baseline_estimate",
+            "warnings": ["projection_baseline_estimate_unavailable"],
+        }
+    baseline_chunks = int(baseline_totals.get("combined_logical_chunks", 0))
+    estimate_chunks = int(estimate_totals.get("combined_logical_chunks", 0))
+    baseline_bytes = int(baseline_totals.get("total_uncompressed_bytes_rgb_plus_mask", 0))
+    estimate_bytes = int(estimate_totals.get("total_uncompressed_bytes_rgb_plus_mask", 0))
+    chunk_ratio = float(estimate_chunks / baseline_chunks) if baseline_chunks else None
+    byte_ratio = float(estimate_bytes / baseline_bytes) if baseline_bytes else None
+    runtime_ratio = chunk_ratio if chunk_ratio is not None else byte_ratio
+    projected_elapsed = (
+        float(baseline["elapsed_s"] * runtime_ratio) if runtime_ratio is not None else None
+    )
+    actual_disk = (
+        int(round(int(baseline["disk_actual_bytes"]) * byte_ratio))
+        if byte_ratio is not None
+        else None
+    )
+    apparent_disk = (
+        int(round(int(baseline["disk_apparent_bytes"]) * byte_ratio))
+        if byte_ratio is not None
+        else None
+    )
+    file_count = (
+        int(math.ceil(int(baseline["file_count"]) * chunk_ratio))
+        if chunk_ratio is not None
+        else None
+    )
+    return {
+        "baseline": baseline,
+        "method": "validated_source_level2_native_masked_ratio",
+        "logical_chunk_ratio_to_baseline": chunk_ratio,
+        "logical_byte_ratio_to_baseline": byte_ratio,
+        "projected_elapsed_s": projected_elapsed,
+        "projected_elapsed_min": (
+            projected_elapsed / 60.0 if projected_elapsed is not None else None
+        ),
+        "projected_disk_actual_bytes": actual_disk,
+        "projected_disk_actual_size": (
+            _human_bytes(actual_disk) if actual_disk is not None else None
+        ),
+        "projected_disk_apparent_bytes": apparent_disk,
+        "projected_disk_apparent_size": (
+            _human_bytes(apparent_disk) if apparent_disk is not None else None
+        ),
+        "projected_file_count": file_count,
+    }
+
+
+def _baseline_config_mismatch_warnings(
+    *,
+    source_level: int,
+    segmentation_level: int,
+    primary_rgb_mode: str,
+    masked_rgb_fill_value: int,
+    extra_margin_px: int,
+    pyramid_generation_policy: str,
+    source_tile_aligned_canvas: bool,
+    native_mip_stop_source: str,
+    store_tissue_mask: bool,
+    sparse_zero_chunks: bool,
+    compression: str,
+) -> list[str]:
+    baseline = _VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE
+    expected = baseline["config"]
+    warnings: list[str] = []
+    checks = {
+        "segmentation_level": (int(segmentation_level), int(baseline["segmentation_level"])),
+        "primary_rgb_mode": (primary_rgb_mode, expected["primary_rgb_mode"]),
+        "masked_rgb_fill_value": (int(masked_rgb_fill_value), expected["masked_rgb_fill_value"]),
+        "extra_margin_px": (int(extra_margin_px), expected["extra_margin_px"]),
+        "pyramid_generation_policy": (
+            pyramid_generation_policy,
+            expected["pyramid_generation_policy"],
+        ),
+        "source_tile_aligned_canvas": (
+            bool(source_tile_aligned_canvas),
+            expected["source_tile_aligned_canvas"],
+        ),
+        "native_mip_stop_level": (native_mip_stop_source, expected["native_mip_stop_level"]),
+        "store_tissue_mask": (bool(store_tissue_mask), expected["store_tissue_mask"]),
+        "sparse_zero_chunks": (bool(sparse_zero_chunks), expected["sparse_zero_chunks"]),
+        "compression_mode": (
+            _normalize_compression_mode(compression),
+            expected["compression_mode"],
+        ),
+    }
+    for key, (actual, want) in checks.items():
+        if actual != want:
+            warnings.append(f"baseline_config_mismatch:{key}:actual={actual}:baseline={want}")
+    if int(source_level) == int(baseline["source_level"]):
+        warnings.append("estimate_source_level_matches_projection_baseline")
+    return warnings
 
 
 def _resolve_ets_level(
@@ -536,16 +723,24 @@ def _bounds_from_frame_debug(frame_debug: dict[str, Any] | None, key: str) -> Bo
         return None
 
 
-def _record_logical_canvas_source_yx(record: TissueTileRecord) -> BoundsYX:
-    canvas = _bounds_from_frame_debug(record.frame_debug, "logical_canvas_source_yx")
+def _record_logical_canvas_source_yx(record: Any) -> BoundsYX:
+    direct_canvas = getattr(record, "logical_canvas_source_yx", None)
+    if isinstance(direct_canvas, BoundsYX):
+        return direct_canvas
+    canvas = _bounds_from_frame_debug(
+        getattr(record, "frame_debug", None), "logical_canvas_source_yx"
+    )
     if canvas is not None:
         return canvas
     x0, y0, x1, y1 = map(int, record.crop_bounds_source_level)
     return BoundsYX(y0=y0, x0=x0, y1=y1, x1=x1)
 
 
-def _record_label_crop_seg_yx(record: TissueTileRecord) -> BoundsYX:
-    label_crop = _bounds_from_frame_debug(record.frame_debug, "label_crop_seg_yx")
+def _record_label_crop_seg_yx(record: Any) -> BoundsYX:
+    direct_label_crop = getattr(record, "label_crop_seg_yx", None)
+    if isinstance(direct_label_crop, BoundsYX):
+        return direct_label_crop
+    label_crop = _bounds_from_frame_debug(getattr(record, "frame_debug", None), "label_crop_seg_yx")
     if label_crop is not None:
         return label_crop
     x0, y0, x1, y1 = map(int, record.crop_bounds_segmentation_level)
@@ -595,7 +790,7 @@ def _canonical_canvas_in_source_level_coordinates(
 
 def _native_pyramid_level_specs(
     *,
-    record: TissueTileRecord,
+    record: Any,
     source_level: int,
     source_shape_yx: tuple[int, int],
     ets_level_shapes_yx: list[tuple[int, int]],
@@ -605,6 +800,7 @@ def _native_pyramid_level_specs(
     source_tile_aligned_canvas: bool,
     source_tile_size_yx: tuple[int, int],
     requested_mips: int | None = None,
+    native_mip_stop_level: int | None = None,
 ) -> list[_NativePyramidLevelSpec]:
     canonical_canvas = _canonical_canvas_in_source_level_coordinates(
         record,
@@ -620,7 +816,22 @@ def _native_pyramid_level_specs(
         max(1, int(requested_mips)) if requested_mips is not None else int(min_side_mip_count)
     )
     available_mips = max(1, len(ets_level_shapes_yx) - int(source_level))
-    num_mips = max(1, min(int(requested_mip_count), int(available_mips), int(min_side_mip_count)))
+    if native_mip_stop_level is None:
+        stop_level_mips = available_mips
+    else:
+        stop_level = max(
+            int(source_level), min(int(native_mip_stop_level), len(ets_level_shapes_yx) - 1)
+        )
+        stop_level_mips = max(1, int(stop_level) - int(source_level) + 1)
+    num_mips = max(
+        1,
+        min(
+            int(requested_mip_count),
+            int(available_mips),
+            int(min_side_mip_count),
+            int(stop_level_mips),
+        ),
+    )
     source_h, source_w = map(int, source_shape_yx)
     source_px, source_py = map(float, source_phys_xy_um)
     specs: list[_NativePyramidLevelSpec] = []
@@ -942,6 +1153,8 @@ def write_native_ets_tissue_pyramid_ome(
     metadata_schema: str = "v0.4",
     min_side_for_mips: int | None = None,
     requested_mips: int | None = None,
+    native_mip_stop_level: int | None = None,
+    native_mip_stop_source: str = "available_source_levels",
     max_chunks_per_level: int | None = None,
     source_tile_aligned_canvas: bool = False,
     primary_rgb_mode: str = "unmasked_rgb",
@@ -1002,7 +1215,9 @@ def write_native_ets_tissue_pyramid_ome(
     unique_mask_chunks: set[tuple[int, int, int]] = set()
 
     with ETSFile(ets_path) as ets:
-        ets_level_shapes = [tuple(map(int, ets.level_shape(idx))) for idx in range(int(ets.nlevels))]
+        ets_level_shapes = [
+            tuple(map(int, ets.level_shape(idx))) for idx in range(int(ets.nlevels))
+        ]
         source_tile_size_yx = (int(ets.tile_ysize), int(ets.tile_xsize))
         specs = _native_pyramid_level_specs(
             record=record,
@@ -1013,6 +1228,7 @@ def write_native_ets_tissue_pyramid_ome(
             block_xy=int(block_xy),
             min_side_for_mips=min_side_for_mips,
             requested_mips=requested_mips,
+            native_mip_stop_level=native_mip_stop_level,
             source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
             source_tile_size_yx=source_tile_size_yx,
         )
@@ -1063,7 +1279,11 @@ def write_native_ets_tissue_pyramid_ome(
             level_expected_full = max(1, math.ceil(out_h / block_xy)) * max(
                 1, math.ceil(out_w / block_xy)
             )
-            level_expected = min(level_expected_full, chunk_limit) if chunk_limit is not None else level_expected_full
+            level_expected = (
+                min(level_expected_full, chunk_limit)
+                if chunk_limit is not None
+                else level_expected_full
+            )
             stats["rgb_chunks_expected"] = int(stats.get("rgb_chunks_expected", 0)) + int(
                 level_expected
             )
@@ -1184,21 +1404,22 @@ def write_native_ets_tissue_pyramid_ome(
     native_metadata = dict(root.attrs.get("native_source_pyramid", {}))
     native_metadata["levels"] = per_scale
     native_metadata["requested_mips"] = int(requested_mips) if requested_mips is not None else None
+    native_metadata["native_mip_stop_level"] = (
+        int(native_mip_stop_level) if native_mip_stop_level is not None else None
+    )
     native_metadata["min_side_for_mips"] = (
         int(min_side_for_mips) if min_side_for_mips is not None else None
     )
-    native_metadata["canonical_canvas_in_source_level_coordinates"] = (
-        specs[0].canonical_canvas_source_yx.as_dict()
-    )
+    native_metadata["canonical_canvas_in_source_level_coordinates"] = specs[
+        0
+    ].canonical_canvas_source_yx.as_dict()
     root.attrs["native_source_pyramid"] = native_metadata
     unique_source_tiles = stats.pop("unique_source_tiles_touched", set())
     stats["unique_source_tiles_touched"] = len(unique_source_tiles)
     stats["unique_rgb_chunks_written"] = len(unique_rgb_chunks)
     stats["unique_mask_chunks_written"] = len(unique_mask_chunks)
     stats["rgb_write_amplification"] = (
-        float(stats["rgb_chunk_write_calls"] / len(unique_rgb_chunks))
-        if unique_rgb_chunks
-        else 0.0
+        float(stats["rgb_chunk_write_calls"] / len(unique_rgb_chunks)) if unique_rgb_chunks else 0.0
     )
     stats["mask_write_amplification"] = (
         float(stats["mask_chunk_write_calls"] / len(unique_mask_chunks))
@@ -1207,8 +1428,25 @@ def write_native_ets_tissue_pyramid_ome(
     )
     stats["num_mips"] = len(specs)
     stats["requested_mips"] = int(requested_mips) if requested_mips is not None else None
+    stats["native_mip_stop_level"] = (
+        int(native_mip_stop_level) if native_mip_stop_level is not None else None
+    )
     stats["available_native_mips"] = max(1, len(ets_level_shapes) - int(source_level))
     stats["min_side_for_mips"] = int(min_side_for_mips) if min_side_for_mips is not None else None
+    min_side_mip_count = compute_num_mips_min_side(
+        specs[0].canonical_canvas_source_yx.w,
+        specs[0].canonical_canvas_source_yx.h,
+        int(min_side_for_mips or block_xy),
+    )
+    stats["mip_stop_reason"] = _native_mip_stop_reason(
+        specs=specs,
+        requested_mips=requested_mips,
+        native_mip_stop_level=native_mip_stop_level,
+        native_mip_stop_source=native_mip_stop_source,
+        source_level=int(source_level),
+        available_mips=int(stats["available_native_mips"]),
+        min_side_mip_count=int(min_side_mip_count),
+    )
     stats["rgb_s0_chunks_expected"] = int(
         max(1, math.ceil(specs[0].output_shape_yx[0] / block_xy))
         * max(1, math.ceil(specs[0].output_shape_yx[1] / block_xy))
@@ -1219,9 +1457,9 @@ def write_native_ets_tissue_pyramid_ome(
     )
     stats["output_scale_to_source_level"] = output_scale_to_source_level
     stats["native_pyramid_levels"] = per_scale
-    stats["canonical_canvas_in_source_level_coordinates"] = (
-        specs[0].canonical_canvas_source_yx.as_dict()
-    )
+    stats["canonical_canvas_in_source_level_coordinates"] = specs[
+        0
+    ].canonical_canvas_source_yx.as_dict()
     if run_manifest is not None:
         run_manifest.update(_json_ready(stats))
     return _json_ready(stats)
@@ -1640,7 +1878,9 @@ def _place_region_in_canvas(
     clipped_bounds: BoundsYX,
     region: np.ndarray,
 ) -> np.ndarray:
-    out = np.zeros((int(canvas_shape_yx[0]), int(canvas_shape_yx[1]), region.shape[2]), dtype=region.dtype)
+    out = np.zeros(
+        (int(canvas_shape_yx[0]), int(canvas_shape_yx[1]), region.shape[2]), dtype=region.dtype
+    )
     dst_y0 = int(clipped_bounds.y0 - canvas_bounds.y0)
     dst_x0 = int(clipped_bounds.x0 - canvas_bounds.x0)
     out[dst_y0 : dst_y0 + region.shape[0], dst_x0 : dst_x0 + region.shape[1], :] = region
@@ -1738,7 +1978,9 @@ def _direct_record_debug_arrays(
     mask_canvas = np.zeros((canvas.h, canvas.w), dtype=bool)
     dst_y0 = int(clipped.y0 - canvas.y0)
     dst_x0 = int(clipped.x0 - canvas.x0)
-    mask_canvas[dst_y0 : dst_y0 + mask_region.shape[0], dst_x0 : dst_x0 + mask_region.shape[1]] = mask_region
+    mask_canvas[dst_y0 : dst_y0 + mask_region.shape[0], dst_x0 : dst_x0 + mask_region.shape[1]] = (
+        mask_region
+    )
     masked = np.where(mask_canvas[..., None], unmasked, 0)
     streamed_tile = record.tile.compute()
 
@@ -1813,7 +2055,9 @@ def _write_four_panel_debug(
         _resize_panel_yxc(masked, target_shape),
     ]
     spacer = np.ones((target_shape[0], 8, 3), dtype=np.uint8) * 255
-    panel = np.concatenate([panels[0], spacer, panels[1], spacer, panels[2], spacer, panels[3]], axis=1)
+    panel = np.concatenate(
+        [panels[0], spacer, panels[1], spacer, panels[2], spacer, panels[3]], axis=1
+    )
     out_path = output_path / f"tissue_{int(tissue_index):02d}_four_panel_debug.png"
     iio.imwrite(out_path, panel)
     return out_path
@@ -1845,7 +2089,9 @@ def _write_pixel_path_debug(
         _resize_panel_yxc(readback_or_streamed, target_shape),
     ]
     spacer = np.ones((target_shape[0], 8, 3), dtype=np.uint8) * 255
-    panel = np.concatenate([panels[0], spacer, panels[1], spacer, panels[2], spacer, panels[3]], axis=1)
+    panel = np.concatenate(
+        [panels[0], spacer, panels[1], spacer, panels[2], spacer, panels[3]], axis=1
+    )
     out_path = output_path / f"tissue_{int(tissue_index):02d}_pixel_path_debug.png"
     iio.imwrite(out_path, panel)
     return out_path
@@ -1925,13 +2171,15 @@ def diagnose_vsi_replating(
     scale_x = float(source_shape_yx[1] / ets_mask.shape[1])
     nominal_scale = float(2 ** (int(segmentation_idx) - int(source_idx)))
     first_record = tile_records[0] if tile_records else None
-    source_tile_dim = int(first_record.source_tile_dim or first_record.tile_dim) if first_record else int(tile_dim)
+    source_tile_dim = (
+        int(first_record.source_tile_dim or first_record.tile_dim)
+        if first_record
+        else int(tile_dim)
+    )
     segmentation_tile_dim = (
         int(first_record.segmentation_tile_dim)
         if first_record and first_record.segmentation_tile_dim is not None
-        else int(np.ceil(source_tile_dim / max(scale_y, scale_x)))
-        if source_tile_dim
-        else 0
+        else int(np.ceil(source_tile_dim / max(scale_y, scale_x))) if source_tile_dim else 0
     )
     effective_segmentation_tile_dim = (
         float(source_tile_dim / max(scale_y, scale_x)) if source_tile_dim else 0.0
@@ -2050,13 +2298,15 @@ def diagnose_vsi_replating(
         "segmentation_level": int(segmentation_idx),
         "tile_frame_level": str(tile_frame_level),
         "source_shape_yx": list(source_shape_yx),
-        "source_full_read_level": _array_stats(full_source_yxc)
-        if full_source_yxc is not None
-        else {
-            "skipped": "source level exceeds max_debug_pixels",
-            "source_pixels": int(source_shape_yx[0]) * int(source_shape_yx[1]),
-            "max_debug_pixels": int(max_debug_pixels),
-        },
+        "source_full_read_level": (
+            _array_stats(full_source_yxc)
+            if full_source_yxc is not None
+            else {
+                "skipped": "source level exceeds max_debug_pixels",
+                "source_pixels": int(source_shape_yx[0]) * int(source_shape_yx[1]),
+                "max_debug_pixels": int(max_debug_pixels),
+            }
+        ),
         "readback_ome_zarr": str(readback_root) if readback_root is not None else None,
         "scale_y": scale_y,
         "scale_x": scale_x,
@@ -2077,7 +2327,9 @@ def diagnose_vsi_replating(
         "comparison": comparison,
         "tile_dim": int(tile_dim),
         "debug_sidecars": {
-            "diagnostics_json": str(output_path / "diagnostics.json") if output_path is not None else None,
+            "diagnostics_json": (
+                str(output_path / "diagnostics.json") if output_path is not None else None
+            ),
             "four_panel_pngs": four_panel_paths,
             "pixel_path_pngs": pixel_path_panel_paths,
         },
@@ -2143,6 +2395,10 @@ def estimate_vsi_direct_plating(
     store_unmasked_rgb: bool | None = None,
     materialize_masked_rgb: bool | None = None,
     sparse_zero_chunks: bool | None = None,
+    pyramid_generation_policy: str | None = None,
+    source_tile_aligned_canvas: bool | None = None,
+    native_mip_stop_level: int | str | None = None,
+    config_source: str | None = None,
 ) -> dict[str, Any]:
     """
     Estimate a direct VSI/ETS plating run without writing tissue OME-Zarrs.
@@ -2174,11 +2430,20 @@ def estimate_vsi_direct_plating(
     store_unmasked_rgb = bool(rgb_options["store_unmasked_rgb"])
     if sparse_zero_chunks is None:
         sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
+    if pyramid_generation_policy is None:
+        pyramid_generation_policy = str(
+            defaults.get("pyramid_generation_policy", "downsample_streamed_s0")
+        )
+    if source_tile_aligned_canvas is None:
+        source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
+    if native_mip_stop_level is None:
+        native_mip_stop_level = defaults.get("native_mip_stop_level", "segmentation_level")
     if tile_frame_level == "segmentation" and output_profile in {"production", "upload_staging"}:
         tile_frame_level = str(defaults["tile_frame_level"])
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
+    pyramid_generation_policy = _normalize_pyramid_generation_policy(pyramid_generation_policy)
 
     ets_path = find_ets_file(vsi_path)
     if ets_path is None:
@@ -2219,7 +2484,16 @@ def estimate_vsi_direct_plating(
             label="segmentation",
         )
         source_shape_yx = tuple(map(int, ets.level_shape(source_idx)))
+        ets_level_shapes_yx = [tuple(map(int, ets.level_shape(idx))) for idx in range(ets.nlevels)]
+        source_tile_size_yx = (
+            int(getattr(ets, "tile_ysize", plate_chunk_xy)),
+            int(getattr(ets, "tile_xsize", plate_chunk_xy)),
+        )
         segmentation_yxc = ets.read_level(segmentation_idx)
+    resolved_native_mip_stop_level, native_mip_stop_source = _normalize_native_mip_stop_level(
+        native_mip_stop_level,
+        segmentation_level=int(segmentation_idx),
+    )
 
     seg_cyx = da.from_array(
         np.moveaxis(segmentation_yxc, -1, 0),
@@ -2234,9 +2508,11 @@ def estimate_vsi_direct_plating(
         segment_fn=segment_fn,
         segmentation_config=segmentation_config,
         min_size=segmentation_config.min_area_px if segmentation_config is not None else min_size,
-        struct_elem_px=segmentation_config.struct_elem_px
-        if segmentation_config is not None
-        else struct_elem_px,
+        struct_elem_px=(
+            segmentation_config.struct_elem_px
+            if segmentation_config is not None
+            else struct_elem_px
+        ),
     )
     lr_labels = _filled_lr_labels(np.asarray(filled_lr, dtype=bool))
     if lr_labels.max() == 0:
@@ -2303,6 +2579,11 @@ def estimate_vsi_direct_plating(
     dtype_obj = np.dtype(dtype if dtype else np.uint8)
     bytes_per_pixel = int(dtype_obj.itemsize)
     min_side = int(min_side_for_mips or plate_chunk_xy)
+    base_phys_xy_um = _physical_xy_from_metadata(metadata) or (1.0, 1.0)
+    source_phys_xy_um = (
+        float(base_phys_xy_um[0]) * (2**source_idx),
+        float(base_phys_xy_um[1]) * (2**source_idx),
+    )
     tissues: list[dict[str, Any]] = []
     total_s0_chunks = 0
     total_all_mip_chunks = 0
@@ -2312,6 +2593,8 @@ def estimate_vsi_direct_plating(
     total_mask_empty_chunks = 0
     total_mask_positive_chunks = 0
     total_rgb_chunks_skippable_before_decode = 0
+    total_projection_baseline_chunks = 0
+    total_projection_baseline_bytes = 0
     warnings: list[str] = []
 
     for spec in frame_specs:
@@ -2319,14 +2602,102 @@ def estimate_vsi_direct_plating(
         clipped = spec.clipped_source_yx
         if clipped.h <= 0 or clipped.w <= 0:
             continue
-        channels = int(segmentation_yxc.shape[-1]) if segmentation_yxc.ndim == 3 else 1
-        num_mips = compute_num_mips_min_side(canvas.w, canvas.h, min_side)
-        shapes_yxc = _pyramid_shapes_yxc(
-            base_shape_yxc=(canvas.h, canvas.w, channels),
-            num_mips=num_mips,
-        )
+        channels = 3
+        native_specs: list[_NativePyramidLevelSpec] = []
+        output_scale_to_source_level: dict[str, int] | None = None
+        per_scale_shapes_yx: list[list[int]] | None = None
+        per_scale_native_levels: list[dict[str, Any]] | None = None
+        mip_stop_reason = "min_side_for_mips"
+        context_margin_px = int(tile_extra_margin_px)
+        source_tile_alignment_expansion_yx = {"top": 0, "bottom": 0, "left": 0, "right": 0}
+        projection_baseline_chunks = 0
+        projection_baseline_bytes = 0
+        if pyramid_generation_policy == "native_source_pyramid_crop":
+            native_specs = _native_pyramid_level_specs(
+                record=spec,
+                source_level=int(source_idx),
+                source_shape_yx=source_shape_yx,
+                ets_level_shapes_yx=ets_level_shapes_yx,
+                source_phys_xy_um=source_phys_xy_um,
+                block_xy=plate_chunk_xy,
+                min_side_for_mips=min_side_for_mips,
+                source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
+                source_tile_size_yx=source_tile_size_yx,
+                requested_mips=None,
+                native_mip_stop_level=resolved_native_mip_stop_level,
+            )
+            shapes_yxc = [
+                (int(level.output_shape_yx[0]), int(level.output_shape_yx[1]), channels)
+                for level in native_specs
+            ]
+            output_scale_to_source_level = {
+                f"s{level.output_index}": int(level.source_level) for level in native_specs
+            }
+            per_scale_shapes_yx = [
+                [int(level.output_shape_yx[0]), int(level.output_shape_yx[1])]
+                for level in native_specs
+            ]
+            per_scale_native_levels = [
+                {
+                    "path": f"s{level.output_index}",
+                    "source_level": int(level.source_level),
+                    "output_shape_yx": list(map(int, level.output_shape_yx)),
+                    "output_canvas_source_yx": level.canvas_source_yx.as_dict(),
+                    "source_read_envelope_yx": level.source_read_envelope_yx.as_dict(),
+                    "source_read_envelope_clipped_yx": (
+                        level.clipped_source_read_envelope_yx.as_dict()
+                    ),
+                    "scale_from_parent_yx": list(map(float, level.scale_from_parent_yx)),
+                    "translation_yx_um": list(map(float, level.translation_yx_um)),
+                }
+                for level in native_specs
+            ]
+            source_tile_alignment_expansion_yx = _bounds_expansion_yx(
+                native_specs[0].canonical_canvas_source_yx,
+                spec.logical_canvas_source_yx,
+            )
+            min_side_mip_count = compute_num_mips_min_side(
+                native_specs[0].canonical_canvas_source_yx.w,
+                native_specs[0].canonical_canvas_source_yx.h,
+                min_side,
+            )
+            available_mips = max(1, len(ets_level_shapes_yx) - int(source_idx))
+            mip_stop_reason = _native_mip_stop_reason(
+                specs=native_specs,
+                requested_mips=None,
+                native_mip_stop_level=resolved_native_mip_stop_level,
+                native_mip_stop_source=native_mip_stop_source,
+                source_level=int(source_idx),
+                available_mips=available_mips,
+                min_side_mip_count=min_side_mip_count,
+            )
+            for level, shape_yxc in zip(native_specs, shapes_yxc, strict=True):
+                if level.source_level >= int(
+                    _VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE["source_level"]
+                ):
+                    level_rgb_chunks = _chunk_count_yx(
+                        y=shape_yxc[0],
+                        x=shape_yxc[1],
+                        chunk_xy=plate_chunk_xy,
+                    )
+                    projection_baseline_chunks += level_rgb_chunks
+                    projection_baseline_bytes += int(
+                        shape_yxc[0] * shape_yxc[1] * channels * bytes_per_pixel
+                    )
+                    if store_tissue_mask:
+                        projection_baseline_chunks += level_rgb_chunks
+                        projection_baseline_bytes += int(shape_yxc[0] * shape_yxc[1])
+        else:
+            num_mips = compute_num_mips_min_side(canvas.w, canvas.h, min_side)
+            shapes_yxc = _pyramid_shapes_yxc(
+                base_shape_yxc=(canvas.h, canvas.w, channels),
+                num_mips=num_mips,
+            )
+            mip_stop_reason = "min_side_for_mips"
+        num_mips = len(shapes_yxc)
+        s0_canvas = native_specs[0].canvas_source_yx if native_specs else canvas
         mask_shapes_yx = [(y, x) for y, x, _c in shapes_yxc]
-        s0_chunks = _chunk_count_yx(y=canvas.h, x=canvas.w, chunk_xy=plate_chunk_xy)
+        s0_chunks = _chunk_count_yx(y=shapes_yxc[0][0], x=shapes_yxc[0][1], chunk_xy=plate_chunk_xy)
         all_mip_chunks = sum(
             _chunk_count_yx(y=y, x=x, chunk_xy=plate_chunk_xy) for y, x, _c in shapes_yxc
         )
@@ -2339,25 +2710,35 @@ def estimate_vsi_direct_plating(
             shapes_yxc=shapes_yxc,
             bytes_per_pixel=bytes_per_pixel,
         )
-        mask_bytes_all_mips = (
-            int(sum(y * x for y, x in mask_shapes_yx)) if store_tissue_mask else 0
-        )
-        mask_activity = (
-            _estimate_mask_s0_chunk_activity(
-                lr_labels=lr_labels,
-                label_id=int(spec.label_id),
-                label_crop_seg_yx=spec.label_crop_seg_yx,
-                source_shape_yx=source_shape_yx,
-                canvas=canvas,
-                chunk_xy=plate_chunk_xy,
-            )
-            if primary_rgb_mode == "masked_rgb" or store_tissue_mask
-            else {
+        mask_bytes_all_mips = int(sum(y * x for y, x in mask_shapes_yx)) if store_tissue_mask else 0
+        if primary_rgb_mode == "masked_rgb" or store_tissue_mask:
+            mask_activity = {
                 "mask_empty_chunks": 0,
                 "mask_positive_chunks": 0,
                 "rgb_chunks_skippable_before_decode": 0,
             }
-        )
+            mask_levels = native_specs if native_specs else [None]
+            for native_level in mask_levels:
+                activity = _estimate_mask_s0_chunk_activity(
+                    lr_labels=lr_labels,
+                    label_id=int(spec.label_id),
+                    label_crop_seg_yx=spec.label_crop_seg_yx,
+                    source_shape_yx=(
+                        native_level.source_shape_yx
+                        if native_level is not None
+                        else source_shape_yx
+                    ),
+                    canvas=native_level.canvas_source_yx if native_level is not None else canvas,
+                    chunk_xy=plate_chunk_xy,
+                )
+                for key in mask_activity:
+                    mask_activity[key] += int(activity[key])
+        else:
+            mask_activity = {
+                "mask_empty_chunks": 0,
+                "mask_positive_chunks": 0,
+                "rgb_chunks_skippable_before_decode": 0,
+            }
         if not (primary_rgb_mode == "masked_rgb" and masked_rgb_fill_value == 0):
             mask_activity["rgb_chunks_skippable_before_decode"] = 0
         warning = _estimate_warning(bytes_all_mips=bytes_all_mips, s0_chunks=s0_chunks)
@@ -2369,6 +2750,8 @@ def estimate_vsi_direct_plating(
         total_mask_all_mip_chunks += mask_mip_chunks
         total_bytes += bytes_all_mips
         total_mask_bytes += mask_bytes_all_mips
+        total_projection_baseline_chunks += int(projection_baseline_chunks)
+        total_projection_baseline_bytes += int(projection_baseline_bytes)
         total_mask_empty_chunks += int(mask_activity["mask_empty_chunks"])
         total_mask_positive_chunks += int(mask_activity["mask_positive_chunks"])
         total_rgb_chunks_skippable_before_decode += int(
@@ -2385,8 +2768,12 @@ def estimate_vsi_direct_plating(
                 "logical_frame_segmentation_yx": spec.logical_frame_seg_yx.as_dict(),
                 "clipped_frame_segmentation_yx": spec.clipped_frame_seg_yx.as_dict(),
                 "crop_shape_policy": crop_shape_policy,
-                "tile_shape_yx": [int(canvas.h), int(canvas.w)],
-                "child_origin_in_parent_source_level": [int(canvas.x0), int(canvas.y0)],
+                "context_margin_px": int(context_margin_px),
+                "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
+                "source_tile_alignment_expansion_yx": source_tile_alignment_expansion_yx,
+                "tile_shape_yx": [int(shapes_yxc[0][0]), int(shapes_yxc[0][1])],
+                "s0_shape_yx": [int(shapes_yxc[0][0]), int(shapes_yxc[0][1])],
+                "child_origin_in_parent_source_level": [int(s0_canvas.x0), int(s0_canvas.y0)],
                 "source_tile_dim": int(spec.source_canvas_dim),
                 "segmentation_tile_dim": int(spec.segmentation_tile_dim),
                 "effective_segmentation_tile_dim": float(
@@ -2394,8 +2781,10 @@ def estimate_vsi_direct_plating(
                 ),
                 "scale_y": float(spec.scale_y),
                 "scale_x": float(spec.scale_x),
-                "s0_shape_yxc": [int(canvas.h), int(canvas.w), channels],
-                "mask_s0_shape_yx": [int(canvas.h), int(canvas.w)] if store_tissue_mask else None,
+                "s0_shape_yxc": [int(shapes_yxc[0][0]), int(shapes_yxc[0][1]), channels],
+                "mask_s0_shape_yx": (
+                    [int(shapes_yxc[0][0]), int(shapes_yxc[0][1])] if store_tissue_mask else None
+                ),
                 "s0_chunks": int(s0_chunks),
                 "mask_empty_chunks": int(mask_activity["mask_empty_chunks"]),
                 "mask_positive_chunks": int(mask_activity["mask_positive_chunks"]),
@@ -2408,6 +2797,10 @@ def estimate_vsi_direct_plating(
                     else "post_decode_sparse_zero_only"
                 ),
                 "num_mips": int(num_mips),
+                "per_scale_shapes_yx": per_scale_shapes_yx,
+                "output_scale_to_source_level": output_scale_to_source_level,
+                "native_pyramid_levels": per_scale_native_levels,
+                "mip_stop_reason": mip_stop_reason,
                 "mip_shapes_yxc": [list(map(int, shape)) for shape in shapes_yxc],
                 "all_mip_chunks": int(all_mip_chunks),
                 "mask_all_mip_chunks": int(mask_mip_chunks),
@@ -2435,8 +2828,38 @@ def estimate_vsi_direct_plating(
     )
     if total_warning is not None:
         warnings.append(f"total:{total_warning}")
+    warnings.extend(
+        _baseline_config_mismatch_warnings(
+            source_level=int(source_idx),
+            segmentation_level=int(segmentation_idx),
+            primary_rgb_mode=primary_rgb_mode,
+            masked_rgb_fill_value=int(masked_rgb_fill_value),
+            extra_margin_px=int(tile_extra_margin_px),
+            pyramid_generation_policy=pyramid_generation_policy,
+            source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
+            native_mip_stop_source=native_mip_stop_source,
+            store_tissue_mask=bool(store_tissue_mask),
+            sparse_zero_chunks=bool(sparse_zero_chunks),
+            compression=compression,
+        )
+    )
+    projection_baseline_totals = (
+        {
+            "combined_logical_chunks": int(total_projection_baseline_chunks),
+            "total_uncompressed_bytes_rgb_plus_mask": int(total_projection_baseline_bytes),
+        }
+        if pyramid_generation_policy == "native_source_pyramid_crop"
+        and total_projection_baseline_chunks > 0
+        else None
+    )
+    projection = _projection_from_validated_source_level2(
+        estimate_totals={
+            "combined_logical_chunks": int(total_all_mip_chunks + total_mask_all_mip_chunks),
+            "total_uncompressed_bytes_rgb_plus_mask": int(total_bytes + total_mask_bytes),
+        },
+        baseline_totals=projection_baseline_totals,
+    )
 
-    base_phys_xy_um = _physical_xy_from_metadata(metadata) or (1.0, 1.0)
     result = {
         "vsi_path": str(vsi_path),
         "ets_path": str(ets_path),
@@ -2448,6 +2871,10 @@ def estimate_vsi_direct_plating(
         "tile_frame_level": tile_frame_level,
         "crop_shape_policy": crop_shape_policy,
         "compression": _compression_descriptor(compression),
+        "pyramid_generation_policy": pyramid_generation_policy,
+        "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
+        "native_mip_stop_level": resolved_native_mip_stop_level,
+        "native_mip_stop_level_source": native_mip_stop_source,
         "store_tissue_mask": bool(store_tissue_mask),
         "primary_rgb_mode": primary_rgb_mode,
         "masked_rgb_fill_value": int(masked_rgb_fill_value),
@@ -2460,13 +2887,17 @@ def estimate_vsi_direct_plating(
         ),
         "masked_rgb_pyramid_semantics": (
             "mask_projected_per_scale"
-            if defaults.get("pyramid_generation_policy") == "native_source_pyramid_crop"
+            if pyramid_generation_policy == "native_source_pyramid_crop"
             and primary_rgb_mode == "masked_rgb"
-            else "masked_s0_then_downsampled"
-            if primary_rgb_mode == "masked_rgb"
-            else "not_applicable"
+            else (
+                "masked_s0_then_downsampled"
+                if primary_rgb_mode == "masked_rgb"
+                else "not_applicable"
+            )
         ),
         "sparse_zero_chunks": bool(sparse_zero_chunks),
+        "config_source": config_source or "programmatic/default",
+        "context_margin_px": int(tile_extra_margin_px),
         "source_shape_yx": list(source_shape_yx),
         "segmentation_shape_yx": list(map(int, lr_labels.shape)),
         "source_physical_pixel_size": {
@@ -2508,8 +2939,15 @@ def estimate_vsi_direct_plating(
             "uncompressed_size_all_mips": _human_bytes(total_bytes),
             "compressed_bytes_sample_estimate": None,
             "compressed_estimate_method": None,
+            "projection_baseline_logical_chunks": int(total_projection_baseline_chunks),
+            "projection_baseline_uncompressed_bytes_rgb_plus_mask": int(
+                total_projection_baseline_bytes
+            ),
+            "projected_source_level0_from_validated_source_level2": projection,
             "warnings": warnings,
         },
+        "projection": projection,
+        "validated_source_level2_baseline": _VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE,
         "segmentation_info": segmentation_info,
         "elapsed_s": time.monotonic() - started,
     }
@@ -2659,6 +3097,7 @@ def process_vsi_with_direct_plating(
     sparse_zero_chunks: bool | None = None,
     pyramid_generation_policy: str | None = None,
     source_tile_aligned_canvas: bool | None = None,
+    native_mip_stop_level: int | str | None = None,
     resume: bool = False,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
@@ -2693,9 +3132,13 @@ def process_vsi_with_direct_plating(
     if sparse_zero_chunks is None:
         sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
     if pyramid_generation_policy is None:
-        pyramid_generation_policy = str(defaults.get("pyramid_generation_policy", "downsample_streamed_s0"))
+        pyramid_generation_policy = str(
+            defaults.get("pyramid_generation_policy", "downsample_streamed_s0")
+        )
     if source_tile_aligned_canvas is None:
         source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
+    if native_mip_stop_level is None:
+        native_mip_stop_level = defaults.get("native_mip_stop_level", "segmentation_level")
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
@@ -2728,9 +3171,13 @@ def process_vsi_with_direct_plating(
         tile_pad_multiple = plate_chunk_xy
 
     if precomputed_plate_path and crop_shape_policy == "compact_rectangle":
-        raise ValueError("compact_rectangle outputs are variable-shape and cannot be written as a single plate stack.")
+        raise ValueError(
+            "compact_rectangle outputs are variable-shape and cannot be written as a single plate stack."
+        )
     if precomputed_plate_path and pyramid_generation_policy == "native_source_pyramid_crop":
-        raise ValueError("native_source_pyramid_crop does not currently support precomputed plate output.")
+        raise ValueError(
+            "native_source_pyramid_crop does not currently support precomputed plate output."
+        )
 
     with ETSFile(ets_path) as ets:
         source_idx = _resolve_ets_level(
@@ -2747,6 +3194,10 @@ def process_vsi_with_direct_plating(
         )
         source_shape_yx = tuple(map(int, ets.level_shape(source_idx)))
         segmentation_yxc = ets.read_level(segmentation_idx)
+    resolved_native_mip_stop_level, native_mip_stop_source = _normalize_native_mip_stop_level(
+        native_mip_stop_level,
+        segmentation_level=int(segmentation_idx),
+    )
 
     logger.info(
         "Resolved ETS levels for %s: source level %d shape=%s; segmentation level %d shape=%s.",
@@ -2759,7 +3210,11 @@ def process_vsi_with_direct_plating(
 
     seg_cyx = da.from_array(
         np.moveaxis(segmentation_yxc, -1, 0),
-        chunks=(3, min(plate_chunk_xy, segmentation_yxc.shape[0]), min(plate_chunk_xy, segmentation_yxc.shape[1])),
+        chunks=(
+            3,
+            min(plate_chunk_xy, segmentation_yxc.shape[0]),
+            min(plate_chunk_xy, segmentation_yxc.shape[1]),
+        ),
     )
     filled_lr, _ = _segment_for_plating(
         seg_cyx,
@@ -2822,11 +3277,15 @@ def process_vsi_with_direct_plating(
             "mask_projected_per_scale"
             if pyramid_generation_policy == "native_source_pyramid_crop"
             and primary_rgb_mode == "masked_rgb"
-            else "masked_s0_then_downsampled"
-            if primary_rgb_mode == "masked_rgb"
-            else "not_applicable"
+            else (
+                "masked_s0_then_downsampled"
+                if primary_rgb_mode == "masked_rgb"
+                else "not_applicable"
+            )
         ),
         "requested_mips": int(requested_mips) if requested_mips is not None else None,
+        "native_mip_stop_level": resolved_native_mip_stop_level,
+        "native_mip_stop_level_source": native_mip_stop_source,
     }
     source_ngff_metadata = metadata
     source_metadata_schema = metadata_schema
@@ -2892,7 +3351,9 @@ def process_vsi_with_direct_plating(
                 tuple(map(int, tile_dask.shape)),
                 compression,
             )
-            force_streaming = bool(store_tissue_mask or sparse_zero_chunks or crop_shape_policy != "notebook_square")
+            force_streaming = bool(
+                store_tissue_mask or sparse_zero_chunks or crop_shape_policy != "notebook_square"
+            )
             if pyramid_generation_policy == "native_source_pyramid_crop":
                 work_dir = ngff_dir.with_name(f".{ngff_dir.name}.incomplete")
                 if work_dir.exists() and not resume:
@@ -2900,8 +3361,12 @@ def process_vsi_with_direct_plating(
                 if ngff_dir.exists() and not resume:
                     shutil.rmtree(ngff_dir)
                 work_dir.mkdir(parents=True, exist_ok=True)
-                origin_y = int((record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("y0", 0))
-                origin_x = int((record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("x0", 0))
+                origin_y = int(
+                    (record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("y0", 0)
+                )
+                origin_x = int(
+                    (record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("x0", 0)
+                )
                 run_manifest = {
                     "output_profile": output_profile,
                     "crop_shape_policy": crop_shape_policy,
@@ -2929,6 +3394,8 @@ def process_vsi_with_direct_plating(
                     ),
                     "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
                     "requested_mips": int(requested_mips) if requested_mips is not None else None,
+                    "native_mip_stop_level": resolved_native_mip_stop_level,
+                    "native_mip_stop_level_source": native_mip_stop_source,
                     "status": "running",
                     "started_at_unix": time.time(),
                     "source_level_origin_yx": [origin_y, origin_x],
@@ -2953,6 +3420,8 @@ def process_vsi_with_direct_plating(
                     metadata_schema=source_metadata_schema,
                     min_side_for_mips=min_side_for_mips,
                     requested_mips=requested_mips,
+                    native_mip_stop_level=resolved_native_mip_stop_level,
+                    native_mip_stop_source=native_mip_stop_source,
                     source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
                     primary_rgb_mode=primary_rgb_mode,
                     masked_rgb_fill_value=int(masked_rgb_fill_value),
@@ -2979,9 +3448,7 @@ def process_vsi_with_direct_plating(
                     "mask_pyramid_semantics": native_stats.get("mask_pyramid_semantics"),
                     "primary_rgb_mode": native_stats.get("primary_rgb_mode"),
                     "masked_rgb_fill_value": native_stats.get("masked_rgb_fill_value"),
-                    "mask_applied_to_primary_rgb": native_stats.get(
-                        "mask_applied_to_primary_rgb"
-                    ),
+                    "mask_applied_to_primary_rgb": native_stats.get("mask_applied_to_primary_rgb"),
                     "masked_rgb_pyramid_semantics": native_stats.get(
                         "masked_rgb_pyramid_semantics"
                     ),
@@ -3064,8 +3531,12 @@ def process_vsi_with_direct_plating(
                     json.dumps(_json_ready(run_manifest), indent=2),
                     encoding="utf-8",
                 )
-                origin_y = int((record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("y0", 0))
-                origin_x = int((record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("x0", 0))
+                origin_y = int(
+                    (record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("y0", 0)
+                )
+                origin_x = int(
+                    (record.frame_debug or {}).get("logical_canvas_source_yx", {}).get("x0", 0)
+                )
                 write_ngff_from_tile_streaming_ome(
                     tile_yxc_da=tlazy,
                     out_dir=work_dir,
@@ -3214,6 +3685,7 @@ def process_vsi_directory_with_plating(
     sparse_zero_chunks: bool | None = None,
     pyramid_generation_policy: str | None = None,
     source_tile_aligned_canvas: bool | None = None,
+    native_mip_stop_level: int | str | None = None,
     resume: bool = False,
     progress_mode: str | bool | None = "none",
     progress_interval_s: float = 30.0,
@@ -3255,9 +3727,13 @@ def process_vsi_directory_with_plating(
     if sparse_zero_chunks is None:
         sparse_zero_chunks = bool(defaults["sparse_zero_chunks"])
     if pyramid_generation_policy is None:
-        pyramid_generation_policy = str(defaults.get("pyramid_generation_policy", "downsample_streamed_s0"))
+        pyramid_generation_policy = str(
+            defaults.get("pyramid_generation_policy", "downsample_streamed_s0")
+        )
     if source_tile_aligned_canvas is None:
         source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
+    if native_mip_stop_level is None:
+        native_mip_stop_level = defaults.get("native_mip_stop_level", "segmentation_level")
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
@@ -3342,6 +3818,7 @@ def process_vsi_directory_with_plating(
                 sparse_zero_chunks=sparse_zero_chunks,
                 pyramid_generation_policy=pyramid_generation_policy,
                 source_tile_aligned_canvas=source_tile_aligned_canvas,
+                native_mip_stop_level=native_mip_stop_level,
                 resume=resume,
                 progress_mode=progress_mode,
                 progress_interval_s=progress_interval_s,

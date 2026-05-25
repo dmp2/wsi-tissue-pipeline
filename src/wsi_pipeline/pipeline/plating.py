@@ -102,7 +102,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
     if output_profile == "production":
         return {
             "crop_shape_policy": "compact_rectangle",
-            "extra_margin_px": 64,
+            "extra_margin_px": 0,
             "compression": "lossless",
             "store_tissue_mask": True,
             "primary_rgb_mode": "masked_rgb",
@@ -114,7 +114,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
     if output_profile == "upload_staging":
         return {
             "crop_shape_policy": "compact_rectangle",
-            "extra_margin_px": 64,
+            "extra_margin_px": 0,
             "compression": "none",
             "store_tissue_mask": True,
             "primary_rgb_mode": "masked_rgb",

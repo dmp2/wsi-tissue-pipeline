@@ -1,6 +1,5 @@
-# E241 VSI/ETS production configuration.
-# Production uses masked RGB, no arbitrary context margin, and source-tile
-# alignment for IO/storage efficiency.
+# E241 VSI/ETS debug/context configuration.
+# This keeps a 64 px context margin for visual inspection/rich debug exports.
 
 segmentation:
   backend: "local-entropy"
@@ -26,7 +25,7 @@ segmentation:
 tiles:
   chunk_size: 512
   pad_multiple: 512
-  extra_margin_px: 0
+  extra_margin_px: 64
   crop_shape_policy: "compact_rectangle"
 
 output:
@@ -35,16 +34,16 @@ output:
   compression: "zstd"
   sparse_zero_chunks: true
   store_tissue_mask: true
-  primary_rgb_mode: "masked_rgb"
+  primary_rgb_mode: "unmasked_rgb"
   masked_rgb_fill_value: 0
   store_unmasked_rgb: false
-  materialize_masked_rgb: true
+  materialize_masked_rgb: false
   pyramid_generation_policy: "native_source_pyramid_crop"
   source_tile_aligned_canvas: true
   native_mip_stop_level: "segmentation_level"
   compression_level: 5
   convert_to_uint8: true
-  generate_qc: false
+  generate_qc: true
 
 mlflow:
   enabled: false

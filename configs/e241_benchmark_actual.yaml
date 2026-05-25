@@ -34,7 +34,13 @@ output:
   compression: "zstd"
   sparse_zero_chunks: true
   store_tissue_mask: true
-  materialize_masked_rgb: false
+  primary_rgb_mode: "masked_rgb"
+  masked_rgb_fill_value: 0
+  store_unmasked_rgb: false
+  materialize_masked_rgb: true
+  pyramid_generation_policy: "native_source_pyramid_crop"
+  source_tile_aligned_canvas: true
+  native_mip_stop_level: "segmentation_level"
   compression_level: 5
   convert_to_uint8: true
   generate_qc: false
