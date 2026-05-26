@@ -684,6 +684,7 @@ def estimate_vsi_plating_cmd(
         sparse_zero_chunks=_output_override("sparse_zero_chunks"),
         pyramid_generation_policy=_output_override("pyramid_generation_policy"),
         source_tile_aligned_canvas=_output_override("source_tile_aligned_canvas"),
+        native_mip_stop_policy=_output_override("native_mip_stop_policy"),
         native_mip_stop_level=_output_override("native_mip_stop_level"),
         config_source=str(config_path) if config_path else "default PipelineConfig",
     )
@@ -695,7 +696,8 @@ def estimate_vsi_plating_cmd(
         f"fill={result.get('masked_rgb_fill_value')} "
         f"policy={result.get('pyramid_generation_policy')} "
         f"aligned={result.get('source_tile_aligned_canvas')} "
-        f"mip_stop={result.get('native_mip_stop_level_source')}"
+        f"mip_stop_policy={result.get('native_mip_stop_policy')} "
+        f"mip_stop_level={result.get('native_mip_stop_level')}"
     )
     console.print(
         "[bold blue]RGB pyramid bytes:[/] "

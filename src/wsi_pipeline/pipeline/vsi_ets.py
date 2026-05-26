@@ -295,6 +295,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "sparse_zero_chunks": True,
             "pyramid_generation_policy": "native_source_pyramid_crop",
             "source_tile_aligned_canvas": True,
+            "native_mip_stop_policy": "segmentation_level",
             "native_mip_stop_level": "segmentation_level",
         }
     if profile == "upload_staging":
@@ -311,6 +312,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
             "sparse_zero_chunks": False,
             "pyramid_generation_policy": "native_source_pyramid_crop",
             "source_tile_aligned_canvas": True,
+            "native_mip_stop_policy": "segmentation_level",
             "native_mip_stop_level": "segmentation_level",
         }
     return {
@@ -326,6 +328,7 @@ def _profile_defaults(output_profile: str) -> dict[str, Any]:
         "sparse_zero_chunks": False,
         "pyramid_generation_policy": "downsample_streamed_s0",
         "source_tile_aligned_canvas": False,
+        "native_mip_stop_policy": "segmentation_level",
         "native_mip_stop_level": "segmentation_level",
     }
 
@@ -434,6 +437,7 @@ _VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE: dict[str, Any] = {
         "extra_margin_px": 0,
         "pyramid_generation_policy": "native_source_pyramid_crop",
         "source_tile_aligned_canvas": True,
+        "native_mip_stop_policy": "segmentation_level",
         "native_mip_stop_level": "segmentation_level",
         "store_tissue_mask": True,
         "sparse_zero_chunks": True,
@@ -442,11 +446,163 @@ _VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE: dict[str, Any] = {
 }
 
 
+@dataclass(frozen=True)
+class NativeOutputLevelPlan:
+    source_levels: tuple[int, ...]
+    native_mip_stop_policy: str
+    native_mip_stop_level: int
+    mip_stop_reason: str
+    coarsest_segmentation_level_not_written: bool
+    warnings: tuple[str, ...] = ()
+
+
+def _normalize_native_mip_stop_policy(
+    native_mip_stop_policy: str | None,
+    *,
+    native_mip_stop_level: int | str | None = None,
+) -> str:
+    if native_mip_stop_policy is None:
+        if isinstance(native_mip_stop_level, str):
+            normalized_level = native_mip_stop_level.strip().lower().replace("-", "_")
+            if normalized_level in {"none", "all", "available", "available_source_levels"}:
+                return "available_source_levels"
+            if normalized_level not in {"", "segmentation", "segmentation_level"}:
+                return "explicit_level"
+        return "segmentation_level"
+    normalized = str(native_mip_stop_policy).strip().lower().replace("-", "_")
+    aliases = {
+        "segmentation": "segmentation_level",
+        "segmentation_level": "segmentation_level",
+        "min_side": "min_side_for_mips",
+        "min_side_for_mips": "min_side_for_mips",
+        "available": "available_source_levels",
+        "available_source_levels": "available_source_levels",
+        "all": "available_source_levels",
+        "requested": "requested_mips",
+        "requested_mips": "requested_mips",
+        "explicit": "explicit_level",
+        "explicit_level": "explicit_level",
+        "native_mip_stop_level": "explicit_level",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "native_mip_stop_policy must be one of "
+            "'segmentation_level', 'min_side_for_mips', "
+            "'available_source_levels', or 'requested_mips'."
+        )
+    return aliases[normalized]
+
+
+def _explicit_native_mip_stop_level(
+    native_mip_stop_level: int | str | None,
+    *,
+    segmentation_level: int,
+) -> int | None:
+    if native_mip_stop_level is None:
+        return None
+    if isinstance(native_mip_stop_level, str):
+        normalized = native_mip_stop_level.strip().lower().replace("-", "_")
+        if normalized in {"", "segmentation", "segmentation_level"}:
+            return int(segmentation_level)
+        if normalized in {"none", "all", "available", "available_source_levels"}:
+            return None
+        return int(normalized)
+    return int(native_mip_stop_level)
+
+
+def resolve_native_output_levels(
+    source_level: int,
+    segmentation_level: int,
+    n_ets_levels: int,
+    native_mip_stop_policy: str | None,
+    native_mip_stop_level: int | str | None,
+    min_side_for_mips: int | None = None,
+    requested_mips: int | None = None,
+    *,
+    min_side_mip_count: int | None = None,
+) -> NativeOutputLevelPlan:
+    """Resolve native ETS levels used for an output OME-Zarr pyramid."""
+    del min_side_for_mips  # The caller computes min_side_mip_count from the mapped FOV.
+    source_idx = int(source_level)
+    segmentation_idx = int(segmentation_level)
+    nlevels = int(n_ets_levels)
+    if nlevels <= 0:
+        raise ValueError("n_ets_levels must be positive.")
+    if source_idx < 0 or source_idx >= nlevels:
+        raise ValueError(f"source_level {source_idx} is outside ETS levels 0..{nlevels - 1}.")
+    if segmentation_idx < source_idx:
+        raise ValueError(
+            f"segmentation_level {segmentation_idx} must be >= source_level {source_idx}."
+        )
+    if segmentation_idx >= nlevels:
+        raise ValueError(
+            f"segmentation_level {segmentation_idx} is outside ETS levels 0..{nlevels - 1}."
+        )
+
+    policy = _normalize_native_mip_stop_policy(
+        native_mip_stop_policy,
+        native_mip_stop_level=native_mip_stop_level,
+    )
+    explicit_level = _explicit_native_mip_stop_level(
+        native_mip_stop_level,
+        segmentation_level=segmentation_idx,
+    )
+    available_stop_level = nlevels - 1
+    warnings: list[str] = []
+
+    if policy == "segmentation_level":
+        final_source_level = segmentation_idx
+        reason = "segmentation_level"
+    elif policy == "min_side_for_mips":
+        count = int(min_side_mip_count) if min_side_mip_count is not None else None
+        if count is None:
+            count = int(requested_mips) if requested_mips is not None else nlevels - source_idx
+        final_source_level = source_idx + max(1, int(count)) - 1
+        reason = "min_side_for_mips"
+    elif policy == "requested_mips":
+        count = int(requested_mips) if requested_mips is not None else nlevels - source_idx
+        final_source_level = source_idx + max(1, int(count)) - 1
+        reason = "requested_mips"
+    elif policy == "available_source_levels":
+        final_source_level = available_stop_level
+        reason = "available_source_levels"
+    else:
+        if explicit_level is None:
+            raise ValueError("native_mip_stop_policy='explicit_level' requires a stop level.")
+        final_source_level = int(explicit_level)
+        reason = "native_mip_stop_level"
+
+    if policy not in {"segmentation_level", "explicit_level"} and explicit_level is not None:
+        final_source_level = min(int(final_source_level), int(explicit_level))
+        if final_source_level == int(explicit_level):
+            reason = "native_mip_stop_level"
+
+    final_source_level = max(source_idx, min(int(final_source_level), available_stop_level))
+    coarsest_segmentation_level_not_written = final_source_level < segmentation_idx
+    if coarsest_segmentation_level_not_written:
+        warnings.append(
+            "coarsest_segmentation_level_not_written:"
+            f"final_source_level={final_source_level}:segmentation_level={segmentation_idx}"
+        )
+
+    return NativeOutputLevelPlan(
+        source_levels=tuple(range(source_idx, final_source_level + 1)),
+        native_mip_stop_policy=policy,
+        native_mip_stop_level=int(final_source_level),
+        mip_stop_reason=reason,
+        coarsest_segmentation_level_not_written=bool(
+            coarsest_segmentation_level_not_written
+        ),
+        warnings=tuple(warnings),
+    )
+
+
 def _normalize_native_mip_stop_level(
     native_mip_stop_level: int | str | None,
     *,
     segmentation_level: int,
 ) -> tuple[int | None, str]:
+    """Backward-compatible normalizer retained for older call sites/tests."""
     if native_mip_stop_level is None:
         return int(segmentation_level), "segmentation_level"
     if isinstance(native_mip_stop_level, str):
@@ -566,7 +722,7 @@ def _baseline_config_mismatch_warnings(
     extra_margin_px: int,
     pyramid_generation_policy: str,
     source_tile_aligned_canvas: bool,
-    native_mip_stop_source: str,
+    native_mip_stop_policy: str,
     store_tissue_mask: bool,
     sparse_zero_chunks: bool,
     compression: str,
@@ -587,7 +743,10 @@ def _baseline_config_mismatch_warnings(
             bool(source_tile_aligned_canvas),
             expected["source_tile_aligned_canvas"],
         ),
-        "native_mip_stop_level": (native_mip_stop_source, expected["native_mip_stop_level"]),
+        "native_mip_stop_policy": (
+            native_mip_stop_policy,
+            expected["native_mip_stop_policy"],
+        ),
         "store_tissue_mask": (bool(store_tissue_mask), expected["store_tissue_mask"]),
         "sparse_zero_chunks": (bool(sparse_zero_chunks), expected["sparse_zero_chunks"]),
         "compression_mode": (
@@ -800,7 +959,9 @@ def _native_pyramid_level_specs(
     source_tile_aligned_canvas: bool,
     source_tile_size_yx: tuple[int, int],
     requested_mips: int | None = None,
-    native_mip_stop_level: int | None = None,
+    segmentation_level: int | None = None,
+    native_mip_stop_policy: str | None = None,
+    native_mip_stop_level: int | str | None = None,
 ) -> list[_NativePyramidLevelSpec]:
     canonical_canvas = _canonical_canvas_in_source_level_coordinates(
         record,
@@ -812,31 +973,41 @@ def _native_pyramid_level_specs(
         canonical_canvas.h,
         int(min_side_for_mips or block_xy),
     )
-    requested_mip_count = (
-        max(1, int(requested_mips)) if requested_mips is not None else int(min_side_mip_count)
-    )
-    available_mips = max(1, len(ets_level_shapes_yx) - int(source_level))
-    if native_mip_stop_level is None:
-        stop_level_mips = available_mips
-    else:
-        stop_level = max(
-            int(source_level), min(int(native_mip_stop_level), len(ets_level_shapes_yx) - 1)
+    policy = native_mip_stop_policy
+    if policy is None:
+        policy = (
+            "segmentation_level"
+            if segmentation_level is not None
+            else ("requested_mips" if requested_mips is not None else "min_side_for_mips")
         )
-        stop_level_mips = max(1, int(stop_level) - int(source_level) + 1)
-    num_mips = max(
-        1,
-        min(
-            int(requested_mip_count),
-            int(available_mips),
-            int(min_side_mip_count),
-            int(stop_level_mips),
-        ),
+    explicit_stop_level = _explicit_native_mip_stop_level(
+        native_mip_stop_level,
+        segmentation_level=len(ets_level_shapes_yx) - 1,
+    )
+    effective_segmentation_level = (
+        int(segmentation_level)
+        if segmentation_level is not None
+        else (
+            int(explicit_stop_level)
+            if explicit_stop_level is not None
+            else len(ets_level_shapes_yx) - 1
+        )
+    )
+    level_plan = resolve_native_output_levels(
+        int(source_level),
+        int(effective_segmentation_level),
+        len(ets_level_shapes_yx),
+        policy,
+        native_mip_stop_level,
+        min_side_for_mips=min_side_for_mips,
+        requested_mips=requested_mips,
+        min_side_mip_count=min_side_mip_count,
     )
     source_h, source_w = map(int, source_shape_yx)
     source_px, source_py = map(float, source_phys_xy_um)
     specs: list[_NativePyramidLevelSpec] = []
-    for output_index in range(num_mips):
-        ets_level = int(source_level + output_index)
+    for output_index, ets_level in enumerate(level_plan.source_levels):
+        ets_level = int(ets_level)
         level_shape = tuple(map(int, ets_level_shapes_yx[ets_level]))
         level_h, level_w = level_shape
         level_canvas = _map_parent_bounds_to_level(
@@ -1153,7 +1324,9 @@ def write_native_ets_tissue_pyramid_ome(
     metadata_schema: str = "v0.4",
     min_side_for_mips: int | None = None,
     requested_mips: int | None = None,
-    native_mip_stop_level: int | None = None,
+    segmentation_level: int | None = None,
+    native_mip_stop_policy: str | None = None,
+    native_mip_stop_level: int | str | None = None,
     native_mip_stop_source: str = "available_source_levels",
     max_chunks_per_level: int | None = None,
     source_tile_aligned_canvas: bool = False,
@@ -1191,6 +1364,11 @@ def write_native_ets_tissue_pyramid_ome(
         "rgb_pyramid_semantics": "native_scanner_pyramid",
         "reference_policy": "downsample_streamed_s0",
         "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
+        "native_mip_stop_policy": (
+            native_mip_stop_policy
+            if native_mip_stop_policy is not None
+            else native_mip_stop_source
+        ),
         "primary_rgb_mode": primary_rgb_mode,
         "masked_rgb_fill_value": int(masked_rgb_fill_value),
         "mask_applied_to_primary_rgb": bool(mask_applied_to_primary_rgb),
@@ -1228,9 +1406,45 @@ def write_native_ets_tissue_pyramid_ome(
             block_xy=int(block_xy),
             min_side_for_mips=min_side_for_mips,
             requested_mips=requested_mips,
+            segmentation_level=segmentation_level,
+            native_mip_stop_policy=native_mip_stop_policy,
             native_mip_stop_level=native_mip_stop_level,
             source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
             source_tile_size_yx=source_tile_size_yx,
+        )
+        min_side_mip_count = compute_num_mips_min_side(
+            specs[0].canonical_canvas_source_yx.w,
+            specs[0].canonical_canvas_source_yx.h,
+            int(min_side_for_mips or block_xy),
+        )
+        explicit_stop_level = _explicit_native_mip_stop_level(
+            native_mip_stop_level,
+            segmentation_level=int(specs[-1].source_level),
+        )
+        effective_segmentation_level = (
+            int(segmentation_level)
+            if segmentation_level is not None
+            else (
+                int(explicit_stop_level)
+                if explicit_stop_level is not None
+                else int(specs[-1].source_level)
+            )
+        )
+        level_plan = resolve_native_output_levels(
+            int(source_level),
+            int(effective_segmentation_level),
+            len(ets_level_shapes),
+            native_mip_stop_policy
+            if native_mip_stop_policy is not None
+            else (
+                "segmentation_level"
+                if segmentation_level is not None
+                else ("requested_mips" if requested_mips is not None else "min_side_for_mips")
+            ),
+            native_mip_stop_level,
+            min_side_for_mips=min_side_for_mips,
+            requested_mips=requested_mips,
+            min_side_mip_count=min_side_mip_count,
         )
         root = open_group_v2(str(out_dir), mode="w")
         rgb_arrays = []
@@ -1404,9 +1618,14 @@ def write_native_ets_tissue_pyramid_ome(
     native_metadata = dict(root.attrs.get("native_source_pyramid", {}))
     native_metadata["levels"] = per_scale
     native_metadata["requested_mips"] = int(requested_mips) if requested_mips is not None else None
-    native_metadata["native_mip_stop_level"] = (
-        int(native_mip_stop_level) if native_mip_stop_level is not None else None
+    native_metadata["native_mip_stop_policy"] = level_plan.native_mip_stop_policy
+    native_metadata["native_mip_stop_level"] = int(level_plan.native_mip_stop_level)
+    native_metadata["native_mip_stop_level_source"] = level_plan.native_mip_stop_policy
+    native_metadata["mip_stop_reason"] = level_plan.mip_stop_reason
+    native_metadata["coarsest_segmentation_level_not_written"] = bool(
+        level_plan.coarsest_segmentation_level_not_written
     )
+    native_metadata["mip_stop_warnings"] = list(level_plan.warnings)
     native_metadata["min_side_for_mips"] = (
         int(min_side_for_mips) if min_side_for_mips is not None else None
     )
@@ -1428,25 +1647,16 @@ def write_native_ets_tissue_pyramid_ome(
     )
     stats["num_mips"] = len(specs)
     stats["requested_mips"] = int(requested_mips) if requested_mips is not None else None
-    stats["native_mip_stop_level"] = (
-        int(native_mip_stop_level) if native_mip_stop_level is not None else None
-    )
+    stats["native_mip_stop_policy"] = level_plan.native_mip_stop_policy
+    stats["native_mip_stop_level"] = int(level_plan.native_mip_stop_level)
+    stats["native_mip_stop_level_source"] = level_plan.native_mip_stop_policy
     stats["available_native_mips"] = max(1, len(ets_level_shapes) - int(source_level))
     stats["min_side_for_mips"] = int(min_side_for_mips) if min_side_for_mips is not None else None
-    min_side_mip_count = compute_num_mips_min_side(
-        specs[0].canonical_canvas_source_yx.w,
-        specs[0].canonical_canvas_source_yx.h,
-        int(min_side_for_mips or block_xy),
+    stats["mip_stop_reason"] = level_plan.mip_stop_reason
+    stats["coarsest_segmentation_level_not_written"] = bool(
+        level_plan.coarsest_segmentation_level_not_written
     )
-    stats["mip_stop_reason"] = _native_mip_stop_reason(
-        specs=specs,
-        requested_mips=requested_mips,
-        native_mip_stop_level=native_mip_stop_level,
-        native_mip_stop_source=native_mip_stop_source,
-        source_level=int(source_level),
-        available_mips=int(stats["available_native_mips"]),
-        min_side_mip_count=int(min_side_mip_count),
-    )
+    stats["mip_stop_warnings"] = list(level_plan.warnings)
     stats["rgb_s0_chunks_expected"] = int(
         max(1, math.ceil(specs[0].output_shape_yx[0] / block_xy))
         * max(1, math.ceil(specs[0].output_shape_yx[1] / block_xy))
@@ -2397,6 +2607,7 @@ def estimate_vsi_direct_plating(
     sparse_zero_chunks: bool | None = None,
     pyramid_generation_policy: str | None = None,
     source_tile_aligned_canvas: bool | None = None,
+    native_mip_stop_policy: str | None = None,
     native_mip_stop_level: int | str | None = None,
     config_source: str | None = None,
 ) -> dict[str, Any]:
@@ -2436,6 +2647,8 @@ def estimate_vsi_direct_plating(
         )
     if source_tile_aligned_canvas is None:
         source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
+    if native_mip_stop_policy is None:
+        native_mip_stop_policy = str(defaults.get("native_mip_stop_policy", "segmentation_level"))
     if native_mip_stop_level is None:
         native_mip_stop_level = defaults.get("native_mip_stop_level", "segmentation_level")
     if tile_frame_level == "segmentation" and output_profile in {"production", "upload_staging"}:
@@ -2444,6 +2657,10 @@ def estimate_vsi_direct_plating(
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
     pyramid_generation_policy = _normalize_pyramid_generation_policy(pyramid_generation_policy)
+    native_mip_stop_policy = _normalize_native_mip_stop_policy(
+        native_mip_stop_policy,
+        native_mip_stop_level=native_mip_stop_level,
+    )
 
     ets_path = find_ets_file(vsi_path)
     if ets_path is None:
@@ -2490,11 +2707,6 @@ def estimate_vsi_direct_plating(
             int(getattr(ets, "tile_xsize", plate_chunk_xy)),
         )
         segmentation_yxc = ets.read_level(segmentation_idx)
-    resolved_native_mip_stop_level, native_mip_stop_source = _normalize_native_mip_stop_level(
-        native_mip_stop_level,
-        segmentation_level=int(segmentation_idx),
-    )
-
     seg_cyx = da.from_array(
         np.moveaxis(segmentation_yxc, -1, 0),
         chunks=(
@@ -2532,6 +2744,15 @@ def estimate_vsi_direct_plating(
                 "mask_applied_to_primary_rgb": primary_rgb_mode == "masked_rgb",
                 "store_tissue_mask": bool(store_tissue_mask),
                 "store_unmasked_rgb": bool(store_unmasked_rgb),
+                "pyramid_generation_policy": pyramid_generation_policy,
+                "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
+                "native_mip_stop_policy": native_mip_stop_policy,
+                "native_mip_stop_level": int(segmentation_idx),
+                "native_mip_stop_level_source": native_mip_stop_policy,
+                "mip_stop_reason": "segmentation_level",
+                "coarsest_segmentation_level_not_written": False,
+                "context_margin_px": int(tile_extra_margin_px),
+                "effective_extra_margin_px": int(tile_extra_margin_px),
                 "source_shape_yx": list(source_shape_yx),
                 "segmentation_shape_yx": list(map(int, lr_labels.shape)),
                 "tissue_count": 0,
@@ -2608,6 +2829,10 @@ def estimate_vsi_direct_plating(
         per_scale_shapes_yx: list[list[int]] | None = None
         per_scale_native_levels: list[dict[str, Any]] | None = None
         mip_stop_reason = "min_side_for_mips"
+        tissue_native_mip_stop_policy: str | None = None
+        tissue_native_mip_stop_level: int | None = None
+        coarsest_segmentation_level_not_written = False
+        mip_stop_warnings: list[str] = []
         context_margin_px = int(tile_extra_margin_px)
         source_tile_alignment_expansion_yx = {"top": 0, "bottom": 0, "left": 0, "right": 0}
         projection_baseline_chunks = 0
@@ -2624,7 +2849,9 @@ def estimate_vsi_direct_plating(
                 source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
                 source_tile_size_yx=source_tile_size_yx,
                 requested_mips=None,
-                native_mip_stop_level=resolved_native_mip_stop_level,
+                segmentation_level=int(segmentation_idx),
+                native_mip_stop_policy=native_mip_stop_policy,
+                native_mip_stop_level=native_mip_stop_level,
             )
             shapes_yxc = [
                 (int(level.output_shape_yx[0]), int(level.output_shape_yx[1]), channels)
@@ -2661,16 +2888,24 @@ def estimate_vsi_direct_plating(
                 native_specs[0].canonical_canvas_source_yx.h,
                 min_side,
             )
-            available_mips = max(1, len(ets_level_shapes_yx) - int(source_idx))
-            mip_stop_reason = _native_mip_stop_reason(
-                specs=native_specs,
+            level_plan = resolve_native_output_levels(
+                int(source_idx),
+                int(segmentation_idx),
+                len(ets_level_shapes_yx),
+                native_mip_stop_policy,
+                native_mip_stop_level,
+                min_side_for_mips=min_side_for_mips,
                 requested_mips=None,
-                native_mip_stop_level=resolved_native_mip_stop_level,
-                native_mip_stop_source=native_mip_stop_source,
-                source_level=int(source_idx),
-                available_mips=available_mips,
                 min_side_mip_count=min_side_mip_count,
             )
+            tissue_native_mip_stop_policy = level_plan.native_mip_stop_policy
+            tissue_native_mip_stop_level = int(level_plan.native_mip_stop_level)
+            mip_stop_reason = level_plan.mip_stop_reason
+            coarsest_segmentation_level_not_written = bool(
+                level_plan.coarsest_segmentation_level_not_written
+            )
+            mip_stop_warnings = list(level_plan.warnings)
+            warnings.extend(f"tissue_{spec.tissue_index:02d}:{w}" for w in mip_stop_warnings)
             for level, shape_yxc in zip(native_specs, shapes_yxc, strict=True):
                 if level.source_level >= int(
                     _VALIDATED_SOURCE_LEVEL2_NATIVE_BASELINE["source_level"]
@@ -2800,7 +3035,13 @@ def estimate_vsi_direct_plating(
                 "per_scale_shapes_yx": per_scale_shapes_yx,
                 "output_scale_to_source_level": output_scale_to_source_level,
                 "native_pyramid_levels": per_scale_native_levels,
+                "native_mip_stop_policy": tissue_native_mip_stop_policy,
+                "native_mip_stop_level": tissue_native_mip_stop_level,
                 "mip_stop_reason": mip_stop_reason,
+                "coarsest_segmentation_level_not_written": bool(
+                    coarsest_segmentation_level_not_written
+                ),
+                "mip_stop_warnings": mip_stop_warnings,
                 "mip_shapes_yxc": [list(map(int, shape)) for shape in shapes_yxc],
                 "all_mip_chunks": int(all_mip_chunks),
                 "mask_all_mip_chunks": int(mask_mip_chunks),
@@ -2837,7 +3078,7 @@ def estimate_vsi_direct_plating(
             extra_margin_px=int(tile_extra_margin_px),
             pyramid_generation_policy=pyramid_generation_policy,
             source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
-            native_mip_stop_source=native_mip_stop_source,
+            native_mip_stop_policy=native_mip_stop_policy,
             store_tissue_mask=bool(store_tissue_mask),
             sparse_zero_chunks=bool(sparse_zero_chunks),
             compression=compression,
@@ -2859,6 +3100,20 @@ def estimate_vsi_direct_plating(
         },
         baseline_totals=projection_baseline_totals,
     )
+    native_tissues = [t for t in tissues if t.get("native_mip_stop_level") is not None]
+    top_native_mip_stop_level = (
+        int(native_tissues[0]["native_mip_stop_level"]) if native_tissues else None
+    )
+    top_mip_stop_reason = native_tissues[0]["mip_stop_reason"] if native_tissues else None
+    if native_tissues and any(
+        int(t["native_mip_stop_level"]) != top_native_mip_stop_level
+        or t["mip_stop_reason"] != top_mip_stop_reason
+        for t in native_tissues
+    ):
+        top_mip_stop_reason = "mixed"
+    top_coarsest_segmentation_level_not_written = any(
+        bool(t.get("coarsest_segmentation_level_not_written")) for t in native_tissues
+    )
 
     result = {
         "vsi_path": str(vsi_path),
@@ -2873,8 +3128,13 @@ def estimate_vsi_direct_plating(
         "compression": _compression_descriptor(compression),
         "pyramid_generation_policy": pyramid_generation_policy,
         "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
-        "native_mip_stop_level": resolved_native_mip_stop_level,
-        "native_mip_stop_level_source": native_mip_stop_source,
+        "native_mip_stop_policy": native_mip_stop_policy,
+        "native_mip_stop_level": top_native_mip_stop_level,
+        "native_mip_stop_level_source": native_mip_stop_policy,
+        "mip_stop_reason": top_mip_stop_reason,
+        "coarsest_segmentation_level_not_written": bool(
+            top_coarsest_segmentation_level_not_written
+        ),
         "store_tissue_mask": bool(store_tissue_mask),
         "primary_rgb_mode": primary_rgb_mode,
         "masked_rgb_fill_value": int(masked_rgb_fill_value),
@@ -2898,6 +3158,7 @@ def estimate_vsi_direct_plating(
         "sparse_zero_chunks": bool(sparse_zero_chunks),
         "config_source": config_source or "programmatic/default",
         "context_margin_px": int(tile_extra_margin_px),
+        "effective_extra_margin_px": int(tile_extra_margin_px),
         "source_shape_yx": list(source_shape_yx),
         "segmentation_shape_yx": list(map(int, lr_labels.shape)),
         "source_physical_pixel_size": {
@@ -3097,6 +3358,7 @@ def process_vsi_with_direct_plating(
     sparse_zero_chunks: bool | None = None,
     pyramid_generation_policy: str | None = None,
     source_tile_aligned_canvas: bool | None = None,
+    native_mip_stop_policy: str | None = None,
     native_mip_stop_level: int | str | None = None,
     resume: bool = False,
     progress_mode: str | bool | None = "none",
@@ -3137,12 +3399,18 @@ def process_vsi_with_direct_plating(
         )
     if source_tile_aligned_canvas is None:
         source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
+    if native_mip_stop_policy is None:
+        native_mip_stop_policy = str(defaults.get("native_mip_stop_policy", "segmentation_level"))
     if native_mip_stop_level is None:
         native_mip_stop_level = defaults.get("native_mip_stop_level", "segmentation_level")
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
     pyramid_generation_policy = _normalize_pyramid_generation_policy(pyramid_generation_policy)
+    native_mip_stop_policy = _normalize_native_mip_stop_policy(
+        native_mip_stop_policy,
+        native_mip_stop_level=native_mip_stop_level,
+    )
     compressor = _compressor_for_compression_mode(compression)
 
     ets_path = find_ets_file(vsi_path)
@@ -3194,10 +3462,6 @@ def process_vsi_with_direct_plating(
         )
         source_shape_yx = tuple(map(int, ets.level_shape(source_idx)))
         segmentation_yxc = ets.read_level(segmentation_idx)
-    resolved_native_mip_stop_level, native_mip_stop_source = _normalize_native_mip_stop_level(
-        native_mip_stop_level,
-        segmentation_level=int(segmentation_idx),
-    )
 
     logger.info(
         "Resolved ETS levels for %s: source level %d shape=%s; segmentation level %d shape=%s.",
@@ -3284,8 +3548,9 @@ def process_vsi_with_direct_plating(
             )
         ),
         "requested_mips": int(requested_mips) if requested_mips is not None else None,
-        "native_mip_stop_level": resolved_native_mip_stop_level,
-        "native_mip_stop_level_source": native_mip_stop_source,
+        "native_mip_stop_policy": native_mip_stop_policy,
+        "native_mip_stop_level": native_mip_stop_level,
+        "native_mip_stop_level_source": native_mip_stop_policy,
     }
     source_ngff_metadata = metadata
     source_metadata_schema = metadata_schema
@@ -3394,8 +3659,9 @@ def process_vsi_with_direct_plating(
                     ),
                     "source_tile_aligned_canvas": bool(source_tile_aligned_canvas),
                     "requested_mips": int(requested_mips) if requested_mips is not None else None,
-                    "native_mip_stop_level": resolved_native_mip_stop_level,
-                    "native_mip_stop_level_source": native_mip_stop_source,
+                    "native_mip_stop_policy": native_mip_stop_policy,
+                    "native_mip_stop_level": native_mip_stop_level,
+                    "native_mip_stop_level_source": native_mip_stop_policy,
                     "status": "running",
                     "started_at_unix": time.time(),
                     "source_level_origin_yx": [origin_y, origin_x],
@@ -3420,8 +3686,10 @@ def process_vsi_with_direct_plating(
                     metadata_schema=source_metadata_schema,
                     min_side_for_mips=min_side_for_mips,
                     requested_mips=requested_mips,
-                    native_mip_stop_level=resolved_native_mip_stop_level,
-                    native_mip_stop_source=native_mip_stop_source,
+                    segmentation_level=int(segmentation_idx),
+                    native_mip_stop_policy=native_mip_stop_policy,
+                    native_mip_stop_level=native_mip_stop_level,
+                    native_mip_stop_source=native_mip_stop_policy,
                     source_tile_aligned_canvas=bool(source_tile_aligned_canvas),
                     primary_rgb_mode=primary_rgb_mode,
                     masked_rgb_fill_value=int(masked_rgb_fill_value),
@@ -3442,6 +3710,12 @@ def process_vsi_with_direct_plating(
                     ),
                     "output_scale_to_source_level": native_stats.get(
                         "output_scale_to_source_level"
+                    ),
+                    "native_mip_stop_policy": native_stats.get("native_mip_stop_policy"),
+                    "native_mip_stop_level": native_stats.get("native_mip_stop_level"),
+                    "mip_stop_reason": native_stats.get("mip_stop_reason"),
+                    "coarsest_segmentation_level_not_written": native_stats.get(
+                        "coarsest_segmentation_level_not_written"
                     ),
                     "native_pyramid_levels": native_stats.get("native_pyramid_levels"),
                     "mask_generation_policy": native_stats.get("mask_generation_policy"),
@@ -3685,6 +3959,7 @@ def process_vsi_directory_with_plating(
     sparse_zero_chunks: bool | None = None,
     pyramid_generation_policy: str | None = None,
     source_tile_aligned_canvas: bool | None = None,
+    native_mip_stop_policy: str | None = None,
     native_mip_stop_level: int | str | None = None,
     resume: bool = False,
     progress_mode: str | bool | None = "none",
@@ -3732,12 +4007,18 @@ def process_vsi_directory_with_plating(
         )
     if source_tile_aligned_canvas is None:
         source_tile_aligned_canvas = bool(defaults.get("source_tile_aligned_canvas", False))
+    if native_mip_stop_policy is None:
+        native_mip_stop_policy = str(defaults.get("native_mip_stop_policy", "segmentation_level"))
     if native_mip_stop_level is None:
         native_mip_stop_level = defaults.get("native_mip_stop_level", "segmentation_level")
     tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
     crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
     compression = _normalize_compression_mode(compression)
     pyramid_generation_policy = _normalize_pyramid_generation_policy(pyramid_generation_policy)
+    native_mip_stop_policy = _normalize_native_mip_stop_policy(
+        native_mip_stop_policy,
+        native_mip_stop_level=native_mip_stop_level,
+    )
 
     results: dict[str, list[Path]] = {}
     vsi_paths = sorted(input_dir.glob(pattern))
@@ -3818,6 +4099,7 @@ def process_vsi_directory_with_plating(
                 sparse_zero_chunks=sparse_zero_chunks,
                 pyramid_generation_policy=pyramid_generation_policy,
                 source_tile_aligned_canvas=source_tile_aligned_canvas,
+                native_mip_stop_policy=native_mip_stop_policy,
                 native_mip_stop_level=native_mip_stop_level,
                 resume=resume,
                 progress_mode=progress_mode,

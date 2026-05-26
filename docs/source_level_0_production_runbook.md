@@ -9,6 +9,7 @@ Production semantics:
 - `extra_margin_px=0`
 - `pyramid_generation_policy=native_source_pyramid_crop`
 - `source_tile_aligned_canvas=true`
+- `native_mip_stop_policy=segmentation_level`
 - `native_mip_stop_level=segmentation_level`
 - `labels/tissue_mask` retained
 - empty mask chunks skip RGB ETS decode and RGB writes
@@ -48,7 +49,11 @@ $PY -m wsi_pipeline.cli estimate-vsi-plating \
 Review the estimate before running production. Confirm:
 
 - `extra_margin_px` and `context_margin_px` are `0`
+- `effective_extra_margin_px` is `0`
 - `source_tile_aligned_canvas` is `true`
+- `native_mip_stop_policy` is `segmentation_level`
+- `native_mip_stop_level` is `7`
+- `num_mips` is `8` for each tissue
 - `output_scale_to_source_level` maps `s0..s7` to `0..7`
 - `mip_stop_reason` is `segmentation_level`
 - projected disk and runtime are acceptable
@@ -121,6 +126,7 @@ process_vsi_directory_with_plating(
     sparse_zero_chunks=True,
     pyramid_generation_policy="native_source_pyramid_crop",
     source_tile_aligned_canvas=True,
+    native_mip_stop_policy="segmentation_level",
     native_mip_stop_level="segmentation_level",
     resume=True,
     progress_mode="both",
@@ -184,6 +190,9 @@ for tissue_dir in tissues:
     assert manifest["mask_applied_to_primary_rgb"] is True
     assert manifest["pyramid_generation_policy"] == "native_source_pyramid_crop"
     assert manifest["source_tile_aligned_canvas"] is True
+    assert run_manifest["native_mip_stop_policy"] == "segmentation_level"
+    assert run_manifest["native_mip_stop_level"] == 7
+    assert run_manifest["num_mips"] == 8
     assert run_manifest["mip_stop_reason"] == "segmentation_level"
     assert run_manifest["output_scale_to_source_level"] == {f"s{i}": i for i in range(8)}
 

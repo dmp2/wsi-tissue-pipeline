@@ -1488,6 +1488,8 @@ def _run_single_mode(
                 store_tissue_mask=True,
                 metadata_schema="v0.4",
                 requested_mips=tissue.num_mips,
+                segmentation_level=geometry.segmentation_level,
+                native_mip_stop_policy="segmentation_level",
                 native_mip_stop_level=geometry.segmentation_level,
                 native_mip_stop_source="segmentation_level",
                 max_chunks_per_level=native_chunk_limit,

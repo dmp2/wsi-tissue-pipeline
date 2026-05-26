@@ -297,6 +297,15 @@ class OutputConfig(BaseModel):
         ),
     )
 
+    native_mip_stop_policy: Literal[
+        "segmentation_level", "min_side_for_mips", "available_source_levels", "requested_mips"
+    ] = Field(
+        default="segmentation_level",
+        description=(
+            "Policy used to select native ETS output levels for native_source_pyramid_crop."
+        ),
+    )
+
     native_mip_stop_level: int | Literal["segmentation_level"] | None = Field(
         default="segmentation_level",
         description=(

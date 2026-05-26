@@ -432,6 +432,142 @@ def test_estimate_vsi_direct_plating_native_stops_at_segmentation_level(monkeypa
     )
 
 
+def test_resolve_native_output_levels_stops_at_segmentation_level():
+    from wsi_pipeline.pipeline import vsi_ets
+
+    plan = vsi_ets.resolve_native_output_levels(
+        source_level=0,
+        segmentation_level=7,
+        n_ets_levels=10,
+        native_mip_stop_policy="segmentation_level",
+        native_mip_stop_level="segmentation_level",
+        min_side_for_mips=512,
+        requested_mips=None,
+        min_side_mip_count=7,
+    )
+
+    assert plan.source_levels == tuple(range(8))
+    assert plan.native_mip_stop_policy == "segmentation_level"
+    assert plan.native_mip_stop_level == 7
+    assert plan.mip_stop_reason == "segmentation_level"
+    assert plan.coarsest_segmentation_level_not_written is False
+
+    plan = vsi_ets.resolve_native_output_levels(
+        source_level=2,
+        segmentation_level=7,
+        n_ets_levels=10,
+        native_mip_stop_policy="segmentation_level",
+        native_mip_stop_level="segmentation_level",
+    )
+    assert plan.source_levels == (2, 3, 4, 5, 6, 7)
+
+
+def test_resolve_native_output_levels_validates_level_order():
+    from wsi_pipeline.pipeline import vsi_ets
+
+    with pytest.raises(ValueError, match="must be >= source_level"):
+        vsi_ets.resolve_native_output_levels(
+            source_level=7,
+            segmentation_level=6,
+            n_ets_levels=10,
+            native_mip_stop_policy="segmentation_level",
+            native_mip_stop_level="segmentation_level",
+        )
+    with pytest.raises(ValueError, match="outside ETS levels"):
+        vsi_ets.resolve_native_output_levels(
+            source_level=0,
+            segmentation_level=10,
+            n_ets_levels=10,
+            native_mip_stop_policy="segmentation_level",
+            native_mip_stop_level="segmentation_level",
+        )
+
+
+def test_resolve_native_output_levels_min_side_policy_reports_early_stop():
+    from wsi_pipeline.pipeline import vsi_ets
+
+    plan = vsi_ets.resolve_native_output_levels(
+        source_level=0,
+        segmentation_level=7,
+        n_ets_levels=10,
+        native_mip_stop_policy="min_side_for_mips",
+        native_mip_stop_level=None,
+        min_side_for_mips=512,
+        min_side_mip_count=7,
+    )
+
+    assert plan.source_levels == tuple(range(7))
+    assert plan.native_mip_stop_level == 6
+    assert plan.mip_stop_reason == "min_side_for_mips"
+    assert plan.coarsest_segmentation_level_not_written is True
+    assert plan.warnings
+
+
+def test_estimate_source_level0_native_policy_emits_segmentation_level(monkeypatch, tmp_path):
+    from wsi_pipeline.config import TileConfig
+    from wsi_pipeline.pipeline import vsi_ets
+
+    vsi_path = tmp_path / "sample.vsi"
+    vsi_path.touch()
+    ets_path = tmp_path / "_sample_" / "stack10002" / "frame_t.ets"
+    ets_path.parent.mkdir(parents=True)
+    ets_path.touch()
+    shapes = [(4096 // (2**level), 4096 // (2**level)) for level in range(8)]
+
+    class _DummyETS:
+        nlevels = 8
+        tile_xsize = 64
+        tile_ysize = 64
+
+        def __init__(self, path):
+            assert Path(path) == ets_path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def level_shape(self, level):
+            return shapes[int(level)]
+
+        def read_level(self, level):
+            return np.zeros((*self.level_shape(level), 3), dtype=np.uint8)
+
+    def _fake_segment(image, **kwargs):  # noqa: ARG001
+        mask = np.zeros(shapes[7], dtype=bool)
+        mask[8:24, 8:24] = True
+        return mask, {}
+
+    monkeypatch.setattr(vsi_ets, "find_ets_file", lambda path: ets_path)
+    monkeypatch.setattr(
+        vsi_ets,
+        "get_vsi_metadata",
+        lambda *args, **kwargs: {"physical_pixel_size_um": {"x": 0.25, "y": 0.5}},
+    )
+    monkeypatch.setattr(vsi_ets, "ETSFile", _DummyETS)
+    monkeypatch.setattr(vsi_ets, "_segment_for_plating", _fake_segment)
+
+    estimate = vsi_ets.estimate_vsi_direct_plating(
+        vsi_path,
+        source_level=0,
+        segmentation_level=7,
+        output_profile="production",
+        tile_config=TileConfig(chunk_size=64, pad_multiple=64, extra_margin_px=0),
+        min_side_for_mips=4096,
+    )
+
+    tissue = estimate["tissues"][0]
+    assert estimate["native_mip_stop_policy"] == "segmentation_level"
+    assert estimate["native_mip_stop_level"] == 7
+    assert estimate["mip_stop_reason"] == "segmentation_level"
+    assert estimate["effective_extra_margin_px"] == 0
+    assert tissue["num_mips"] == 8
+    assert tissue["native_mip_stop_level"] == 7
+    assert tissue["mip_stop_reason"] == "segmentation_level"
+    assert tissue["output_scale_to_source_level"] == {f"s{i}": i for i in range(8)}
+
+
 def test_primary_rgb_resolution_rejects_secondary_unmasked_rgb():
     from wsi_pipeline.pipeline import vsi_ets
 
@@ -456,6 +592,7 @@ def test_e241_production_config_uses_masked_native_zero_margin():
     assert defaults["primary_rgb_mode"] == "masked_rgb"
     assert defaults["pyramid_generation_policy"] == "native_source_pyramid_crop"
     assert defaults["source_tile_aligned_canvas"] is True
+    assert defaults["native_mip_stop_policy"] == "segmentation_level"
     assert defaults["native_mip_stop_level"] == "segmentation_level"
     assert config.tiles.extra_margin_px == 0
     assert config.output.primary_rgb_mode == "masked_rgb"
@@ -463,6 +600,7 @@ def test_e241_production_config_uses_masked_native_zero_margin():
     assert config.output.store_tissue_mask is True
     assert config.output.pyramid_generation_policy == "native_source_pyramid_crop"
     assert config.output.source_tile_aligned_canvas is True
+    assert config.output.native_mip_stop_policy == "segmentation_level"
     assert config.output.native_mip_stop_level == "segmentation_level"
 
 
