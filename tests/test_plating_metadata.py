@@ -495,4 +495,11 @@ def test_plating_writes_derivative_manifest_and_forwards_config(monkeypatch, tmp
             "extract_tissue",
             "write_ome_zarr",
         ],
+        "primary_rgb_mode": "masked_rgb",
+        "mask_applied_to_primary_rgb": True,
+        "masked_rgb_fill_value": 0,
+        "masked_rgb_pyramid_semantics": "masked_s0_then_downsampled",
+        "store_tissue_mask": False,
+        "store_unmasked_rgb": False,
+        "materialize_masked_rgb_deprecated_alias_used": False,
     }
