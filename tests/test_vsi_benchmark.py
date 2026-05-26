@@ -389,6 +389,8 @@ def test_benchmark_native_mode_records_alignment_and_write_metrics(monkeypatch, 
 
     row = result["rows"][0]
     assert calls[0]["source_tile_aligned_canvas"] is True
+    assert calls[0]["segmentation_level"] == 1
+    assert calls[0]["native_mip_stop_policy"] == "segmentation_level"
     assert calls[0]["max_chunks_per_level"] == 0
     assert row["source_tile_aligned_canvas"] is True
     assert row["native_writer_metrics"]["rgb_write_amplification"] == 1.0
