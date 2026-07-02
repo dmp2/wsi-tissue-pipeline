@@ -26,6 +26,7 @@ class StorageConfig:
     - Data (raw/processed)
     - Outputs
     """
+
     persistent_base: Path
     temporary_base: Path
     scratch_base: Path
@@ -37,9 +38,7 @@ class StorageConfig:
 
     @classmethod
     def for_sciserver(
-        cls,
-        username: str | None = None,
-        volume_name: str = "UserVolume"
+        cls, username: str | None = None, volume_name: str = "UserVolume"
     ) -> StorageConfig:
         """
         Create storage config for SciServer environment.

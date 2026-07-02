@@ -249,15 +249,15 @@ def _load_image(input_path: Path) -> np.ndarray:
 
     if suffix == ".vsi":
         from .vsi_converter import vsi_to_flat_image
+
         img = vsi_to_flat_image(input_path, level=0)
         if img is None:
-            raise FileNotFoundError(
-                f"Could not read VSI file (no ETS data found): {input_path}"
-            )
+            raise FileNotFoundError(f"Could not read VSI file (no ETS data found): {input_path}")
         return img
 
     if suffix == ".ets":
         from .vsi_converter import ets_to_flat_image
+
         img = ets_to_flat_image(input_path, level=0)
         if img is None:
             raise FileNotFoundError(f"Could not read ETS file: {input_path}")
@@ -265,6 +265,7 @@ def _load_image(input_path: Path) -> np.ndarray:
 
     # Standard image formats
     import imageio.v3 as iio
+
     return iio.imread(input_path)
 
 
@@ -456,8 +457,14 @@ def segment_tissue(
         logger.debug(
             "[segmenter] backend=%s size_t=(%d, %d) struct_elem_px=%s min_area=%s "
             "stain_gate=%s r_split=%s CCs: %s",
-            backend, Ht, Wt, struct_elem_scaled, min_area_scaled, stain_gate,
-            r_split, n_components
+            backend,
+            Ht,
+            Wt,
+            struct_elem_scaled,
+            min_area_scaled,
+            stain_gate,
+            r_split,
+            n_components,
         )
 
     # Upsample mask to full resolution
@@ -516,6 +523,7 @@ def extract_tissue_tiles(
     tiles, _tile_dim = generate_tissue_tiles(
         s0_cyx=s0_cyx,
         low_res_filled=np.asarray(mask, dtype=bool),
+        tile_frame_level="source",
         chunk=chunk_size,
         pad_multiple=pad_multiple,
         extra_margin_px=extra_margin_px,
@@ -620,15 +628,15 @@ def process_wsi(
             }
             mask = filter_mask_by_labels(mask, labels_to_keep)
             component_qc_records = [
-                record for record in component_qc_records
+                record
+                for record in component_qc_records
                 if int(record["component_label"]) in labels_to_keep
             ]
             for new_idx, record in enumerate(component_qc_records):
                 record["tile_index_on_source"] = new_idx
 
         component_qc_by_tile = {
-            int(record["tile_index_on_source"]): record
-            for record in component_qc_records
+            int(record["tile_index_on_source"]): record for record in component_qc_records
         }
 
     # Extract tiles
@@ -867,9 +875,7 @@ class WSIProcessor:
         pattern: str = "*.vsi",
     ) -> dict[Path, list[Path]]:
         """Process all images in a directory."""
-        return process_directory(
-            input_dir, output_dir, pattern=pattern, config=self.config
-        )
+        return process_directory(input_dir, output_dir, pattern=pattern, config=self.config)
 
     def process_specimen(
         self,

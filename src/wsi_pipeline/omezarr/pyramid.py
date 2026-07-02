@@ -40,11 +40,12 @@ def build_mips_from_yxc(base_yxc: np.ndarray, num_mips: int) -> list[np.ndarray]
     # tinybrain operates on 2D; pool channel-by-channel, then restack
     per_channel = []
     for c in range(C):
-        first = base_yxc[..., c]               # (H,W)
+        first = base_yxc[..., c]  # (H,W)
         downs = list(tinybrain.accelerated.average_pooling_2x2(first, num_mips - 1))
-        per_channel.append([first] + downs)         # len = num_mips
+        per_channel.append([first] + downs)  # len = num_mips
 
-    mips = [np.stack([per_channel[c][lvl] for c in range(C)], axis=-1)
-            for lvl in range(num_mips)] # list of (H,W,C)
+    mips = [
+        np.stack([per_channel[c][lvl] for c in range(C)], axis=-1) for lvl in range(num_mips)
+    ]  # list of (H,W,C)
 
     return mips

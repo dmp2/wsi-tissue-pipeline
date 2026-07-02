@@ -69,7 +69,7 @@ def create_precomputed_tensorstore(
     voxel_size_nm = [
         int(round(voxel_size_um[0] * 1000)),
         int(round(voxel_size_um[1] * 1000)),
-        int(round(voxel_size_um[2] * 1000))
+        int(round(voxel_size_um[2] * 1000)),
     ]
 
     # Generate scales info
@@ -84,7 +84,7 @@ def create_precomputed_tensorstore(
         "data_type": dtype,
         "num_channels": 3,
         "scales": [],
-        "type": "image"
+        "type": "image",
     }
 
     # Add scales
@@ -98,7 +98,7 @@ def create_precomputed_tensorstore(
             "key": str(mip),
             "resolution": [vx, vy, vz],
             "size": [w, h, Z],
-            "voxel_offset": [0, 0, 0]
+            "voxel_offset": [0, 0, 0],
         }
         info["scales"].append(scale_info)
 
@@ -109,7 +109,11 @@ def create_precomputed_tensorstore(
 
     logger.info(
         "Created TensorStore info with %d mips | base resolution: %s nm | base size: %dx%dx%d | channels: 3 (RGB)",
-        num_mips, voxel_size_nm, W, H, Z,
+        num_mips,
+        voxel_size_nm,
+        W,
+        H,
+        Z,
     )
 
     # Create TensorStore for each mip level
@@ -117,18 +121,18 @@ def create_precomputed_tensorstore(
         w, h = sizes_xy[mip]
 
         spec = {
-            'driver': 'neuroglancer_precomputed',
-            'kvstore': {
-                'driver': 'file',
-                'path': precomp_path,
+            "driver": "neuroglancer_precomputed",
+            "kvstore": {
+                "driver": "file",
+                "path": precomp_path,
             },
-            'context': {
-                'cache_pool': {'total_bytes_limit': 100_000_000},
-                'data_copy_concurrency': {'limit': 4},
+            "context": {
+                "cache_pool": {"total_bytes_limit": 100_000_000},
+                "data_copy_concurrency": {"limit": 4},
             },
-            'recheck_cached_data': 'open',
-            'scale_index': mip,
-            'open': True,
+            "recheck_cached_data": "open",
+            "scale_index": mip,
+            "open": True,
         }
 
         try:

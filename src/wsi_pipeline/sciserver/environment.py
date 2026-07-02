@@ -19,6 +19,7 @@ def is_sciserver_environment() -> bool:
     """
     try:
         from SciServer import Config
+
         return Config.isSciServerComputeEnvironment()
     except ImportError:
         return False
@@ -39,6 +40,7 @@ def get_sciserver_user() -> str | None:
         return None
     try:
         from SciServer import Authentication
+
         user = Authentication.getKeystoneUserWithToken()
         return user.userName if user else None
     except Exception:
@@ -58,6 +60,7 @@ def get_sciserver_token() -> str | None:
         return None
     try:
         from SciServer import Authentication
+
         return Authentication.getToken()
     except Exception:
         return None

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from PIL import Image
 
 
@@ -25,6 +26,35 @@ def _write_manifest(input_dir: Path, records: list[dict[str, object]]) -> Path:
     }
     manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return manifest_path
+
+
+def _write_tissue_ome_zarr(path: Path, *, value: int, tissue_index: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "tissue_manifest.json").write_text(
+        json.dumps(
+            {
+                "role": "derivative",
+                "derivative_type": "tissue_crop_ome_zarr",
+                "source_vsi": "/data/source.vsi",
+                "source_ets": "/data/source.ets",
+                "source_ome_zarr": "/data/source.ome.zarr",
+                "source_level": 0,
+                "segmentation_level": 7,
+                "tissue_index": tissue_index,
+                "crop_bounds_source_level": [0, 0, 20, 16],
+                "crop_bounds_segmentation_level": [0, 0, 10, 8],
+                "physical_pixel_size": {"x": 0.25, "y": 0.5, "unit": "micrometer"},
+                "operations": [
+                    "read_ets_pyramid",
+                    "segment_lowres",
+                    "extract_tissue",
+                    "write_ome_zarr",
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def test_process_wsi_metadata_includes_tile_records(sample_image: Path, temp_dir: Path):
@@ -358,6 +388,127 @@ def test_run_qc_workflow_falls_back_to_processing_metadata(temp_dir: Path):
     assert len(result.artifacts.per_slide_grids) == 2
 
 
+def test_run_qc_workflow_consumes_tissue_ome_zarr_manifests(monkeypatch, temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    input_dir = temp_dir / "per_tissue_ngff"
+    input_dir.mkdir()
+    output_dir = input_dir / "_qc_grids"
+
+    _write_tissue_ome_zarr(input_dir / "source_tissue_00.ome.zarr", value=80, tissue_index=0)
+    _write_tissue_ome_zarr(input_dir / "source_tissue_01.ome.zarr", value=130, tissue_index=1)
+
+    class _FakeRoot:
+        attrs = {
+            "multiscales": [
+                {
+                    "datasets": [
+                        {"path": "s0", "coordinateTransformations": []},
+                        {"path": "s1", "coordinateTransformations": []},
+                    ]
+                }
+            ]
+        }
+
+    class _FakeArray:
+        def __init__(self, path: str):
+            value = 80 if "source_tissue_00" in path else 130
+            self.data = np.full((3, 16, 20), value, dtype=np.uint8)
+            if path.endswith("s1"):
+                self.data = self.data[:, ::2, ::2]
+
+        @property
+        def shape(self):
+            return self.data.shape
+
+        def __getitem__(self, item):
+            return self.data[item]
+
+    monkeypatch.setattr(qc_grid.zarr, "open_group", lambda *args, **kwargs: _FakeRoot())
+    monkeypatch.setattr(qc_grid.zarr, "open_array", lambda path, **kwargs: _FakeArray(str(path)))
+
+    result = qc_grid.run_qc_workflow(input_dir, output_dir)
+
+    assert len(result.records) == 2
+    assert result.artifacts.records_manifest is None
+    assert [record.filename for record in result.records] == [
+        "source_tissue_00.ome.zarr",
+        "source_tissue_01.ome.zarr",
+    ]
+    assert [record.tile_index_on_source for record in result.records] == [0, 1]
+    assert [record.width for record in result.records] == [20, 20]
+    assert [record.height for record in result.records] == [16, 16]
+    assert result.artifacts.master_contact_sheet is not None
+    assert result.artifacts.master_contact_sheet.exists()
+    assert result.artifacts.stats_csv is not None
+    stats_df = pd.read_csv(result.artifacts.stats_csv)
+    assert set(stats_df["filename"]) == {
+        "source_tissue_00.ome.zarr",
+        "source_tissue_01.ome.zarr",
+    }
+
+
+def test_ome_zarr_qc_uses_axes_and_s0_for_small_stats(monkeypatch, temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    input_dir = temp_dir / "per_tissue_ngff"
+    input_dir.mkdir()
+    output_dir = input_dir / "_qc_grids"
+
+    _write_tissue_ome_zarr(input_dir / "source_tissue_00.ome.zarr", value=0, tissue_index=0)
+
+    class _FakeRoot:
+        attrs = {
+            "multiscales": [
+                {
+                    "axes": [
+                        {"name": "c", "type": "channel"},
+                        {"name": "y", "type": "space"},
+                        {"name": "x", "type": "space"},
+                    ],
+                    "datasets": [
+                        {"path": "s0", "coordinateTransformations": []},
+                        {"path": "s1", "coordinateTransformations": []},
+                    ],
+                }
+            ]
+        }
+
+    class _FakeArray:
+        def __init__(self, path: str):
+            if path.endswith("s0"):
+                self.data = np.zeros((3, 8, 10), dtype=np.uint8)
+                self.data[0, :, :] = 10
+                self.data[1, :, :] = 20
+                self.data[2, :, :] = 30
+            else:
+                self.data = np.full((3, 4, 5), 99, dtype=np.uint8)
+
+        @property
+        def shape(self):
+            return self.data.shape
+
+        def __getitem__(self, item):
+            return self.data[item]
+
+    monkeypatch.setattr(qc_grid.zarr, "open_group", lambda *args, **kwargs: _FakeRoot())
+    monkeypatch.setattr(qc_grid.zarr, "open_array", lambda path, **kwargs: _FakeArray(str(path)))
+
+    result = qc_grid.run_qc_workflow(input_dir, output_dir)
+
+    assert result.artifacts.stats_csv is not None
+    stats_df = pd.read_csv(result.artifacts.stats_csv)
+    row = stats_df.iloc[0]
+    assert row["ngff_dataset_path"] == "s0"
+    assert row["ngff_axes"] == "c,y,x"
+    assert row["ngff_raw_shape"] == "3x8x10"
+    assert row["image_mean_intensity"] == 20.0
+    assert row["image_mean_red"] == 10.0
+    assert row["image_mean_green"] == 20.0
+    assert row["image_mean_blue"] == 30.0
+    assert not bool(row["channels_nearly_identical"])
+
+
 def test_build_qc_grids_uses_pil_default_even_when_torch_available(
     monkeypatch,
     temp_dir: Path,
@@ -411,3 +562,62 @@ def test_build_qc_grids_uses_pil_default_even_when_torch_available(
         "slide_01_grid.png",
         "master_contact_sheet.png",
     ]
+
+
+def test_ome_zarr_qc_masked_rgb_composes_from_unmasked_primary(temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    tissue_dir = temp_dir / "tissue_00.ome.zarr"
+    tissue_dir.mkdir()
+    raw = np.full((4, 4, 3), 120, dtype=np.uint8)
+    mask = np.zeros((4, 4), dtype=bool)
+    mask[:, :2] = True
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        qc_grid,
+        "_load_ngff_level",
+        lambda *args, **kwargs: qc_grid.NGFFLevelSelection(
+            dataset_path="s0",
+            axes=("c", "y", "x"),
+            raw_shape=(3, 4, 4),
+            array_yxc=raw,
+        ),
+    )
+    monkeypatch.setattr(qc_grid, "_ngff_primary_rgb_mode", lambda path: "unmasked_rgb")
+    monkeypatch.setattr(qc_grid, "_load_ngff_mask_for_dataset", lambda path, dataset_path: mask)
+
+    try:
+        img = qc_grid.load_thumbnail(tissue_dir, size=8, qc_display_mode="masked_rgb")
+        arr = np.asarray(img)
+    finally:
+        monkeypatch.undo()
+
+    assert arr[:, :2].max() == 120
+    assert arr[:, 2:].max() == 0
+
+
+def test_ome_zarr_qc_raw_rgb_fails_for_masked_primary(temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    tissue_dir = temp_dir / "masked.ome.zarr"
+    tissue_dir.mkdir()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(
+        qc_grid,
+        "_load_ngff_level",
+        lambda *args, **kwargs: qc_grid.NGFFLevelSelection(
+            dataset_path="s0",
+            axes=("c", "y", "x"),
+            raw_shape=(3, 2, 2),
+            array_yxc=np.zeros((2, 2, 3), dtype=np.uint8),
+        ),
+    )
+    monkeypatch.setattr(qc_grid, "_ngff_primary_rgb_mode", lambda path: "masked_rgb")
+    monkeypatch.setattr(qc_grid, "_load_ngff_mask_for_dataset", lambda path, dataset_path: None)
+
+    try:
+        with pytest.raises(ValueError, match="Raw RGB is not stored"):
+            qc_grid.load_thumbnail(tissue_dir, size=8, qc_display_mode="raw_rgb")
+    finally:
+        monkeypatch.undo()

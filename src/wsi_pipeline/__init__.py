@@ -45,6 +45,12 @@ from wsi_pipeline.config import PipelineConfig, load_config
 
 # ETS/VSI file handling
 from wsi_pipeline.etsfile import ETSFile, ETSFileError
+from wsi_pipeline.pipeline import (
+    diagnose_vsi_replating,
+    process_vsi_directory_with_plating,
+    process_vsi_with_direct_plating,
+    vsi_to_source_ome_zarr,
+)
 
 # Quality control
 from wsi_pipeline.qc_grid import QCGridBuilder, build_qc_grids, run_qc_workflow
@@ -84,6 +90,10 @@ __all__ = [
     "process_wsi",
     "process_directory",
     "process_specimen",
+    "process_vsi_directory_with_plating",
+    "process_vsi_with_direct_plating",
+    "diagnose_vsi_replating",
+    "vsi_to_source_ome_zarr",
     # Segmentation
     "WSISegmenter",
     "segment_mask",

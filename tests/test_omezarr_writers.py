@@ -6,9 +6,11 @@ import dask.array as da
 import numpy as np
 import pytest
 import zarr
+import wsi_pipeline.omezarr.streaming as streaming_mod
 
 from wsi_pipeline.omezarr import (
     materialize_ngff_root_attrs,
+    write_ets_pyramid_to_ngff_zarr,
     write_ngff_from_mips,
     write_ngff_from_mips_ngffzarr,
     write_ngff_from_tile_streaming_ome,
@@ -134,6 +136,83 @@ def _root_attrs(path) -> dict:
     return dict(zarr.open_group(str(path), mode="r").attrs)
 
 
+class _FakeETS:
+    nlevels = 2
+    tile_xsize = 4
+    tile_ysize = 4
+
+    def level_shape(self, level: int) -> tuple[int, int]:
+        return [(5, 7), (3, 4)][level]
+
+    def level_ntiles(self, level: int) -> tuple[int, int]:
+        height, width = self.level_shape(level)
+        n_cols = (width + self.tile_xsize - 1) // self.tile_xsize
+        n_rows = (height + self.tile_ysize - 1) // self.tile_ysize
+        return n_cols, n_rows
+
+    def get_tile_decoded(self, level: int, col: int, row: int) -> np.ndarray:
+        base = level * 100 + row * 10 + col
+        tile = np.zeros((self.tile_ysize, self.tile_xsize, 3), dtype=np.uint8)
+        tile[..., 0] = base
+        tile[..., 1] = base + 1
+        tile[..., 2] = base + 2
+        return tile
+
+
+def test_write_ets_pyramid_to_ngff_zarr_streams_tiles_and_metadata(tmp_path, monkeypatch):
+    import wsi_pipeline.omezarr.ets_writer as ets_writer_mod
+
+    payload = _make_metadata_payload(dataset_count=2, name="direct-ets")
+    out_dir = tmp_path / "direct.ome.zarr"
+    group = type("FakeGroup", (), {"attrs": {}, "arrays": {}})()
+
+    class FakeArray:
+        def __init__(self, *, shape, chunks, dtype):
+            self.shape = shape
+            self.chunks = chunks
+            self.data = np.zeros(shape, dtype=dtype)
+            self.attrs = {}
+
+        def __setitem__(self, key, value):
+            self.data[key] = value
+
+        def __getitem__(self, key):
+            return self.data[key]
+
+    class FakeAttrs(dict):
+        def put(self, values):
+            self.update(values)
+
+    group.attrs = FakeAttrs()
+
+    def fake_create_group_array(root, name, **kwargs):
+        arr = FakeArray(shape=kwargs["shape"], chunks=kwargs["chunks"], dtype=kwargs["dtype"])
+        root.arrays[name] = arr
+        return arr
+
+    monkeypatch.setattr(ets_writer_mod, "open_group_v2", lambda *args, **kwargs: group)
+    monkeypatch.setattr(ets_writer_mod, "create_group_array", fake_create_group_array)
+
+    write_ets_pyramid_to_ngff_zarr(
+        _FakeETS(),
+        out_dir,
+        phys_xy_um=(0.25, 0.5),
+        chunks_xy=4,
+        ngff_metadata=payload,
+        metadata_schema="v0.4",
+        progress_interval_s=0,
+    )
+
+    assert group.arrays["s0"].shape == (3, 5, 7)
+    assert group.arrays["s0"].chunks == (3, 4, 4)
+    assert group.arrays["s1"].shape == (3, 3, 4)
+    assert group.arrays["s0"][:, 0, 0].tolist() == [0, 1, 2]
+    assert group.arrays["s0"][:, 4, 6].tolist() == [11, 12, 13]
+    assert group.attrs["multiscales"] == materialize_ngff_root_attrs(payload, "v0.4")["multiscales"]
+    assert group.attrs["omero"]["channels"][0]["label"] == "label_0"
+    assert group.attrs["omero"]["channels"][0]["color"] == "FF0000"
+
+
 def test_create_group_array_falls_back_to_create_dataset():
     calls: list[tuple[str, tuple, dict]] = []
 
@@ -154,6 +233,8 @@ def test_write_ngff_from_mips_preserves_default_v04_root_attrs(tmp_path):
 
     write_ngff_from_mips(mips, out_dir, phys_xy_um=(0.25, 0.5))
 
+    assert (out_dir / ".zgroup").is_file()
+    assert (out_dir / ".zattrs").is_file()
     attrs = _root_attrs(out_dir)
     assert attrs["multiscales"][0]["version"] == "0.4"
     assert attrs["multiscales"][0]["axes"][0]["name"] == "c^"
@@ -162,7 +243,8 @@ def test_write_ngff_from_mips_preserves_default_v04_root_attrs(tmp_path):
         0.5,
         0.25,
     ]
-    assert attrs["omero"]["channels"][0]["label"] == "ch0"
+    assert attrs["omero"]["channels"][0]["label"] == "red"
+    assert attrs["omero"]["channels"][0]["color"] == "FF0000"
 
 
 def test_write_ngff_from_mips_emits_no_zarr_format_warning(tmp_path):
@@ -346,6 +428,134 @@ def test_write_ngff_from_tile_streaming_ome_uses_shared_metadata_path(tmp_path):
         assert attrs[key] == value
     assert zarr.open_group(str(out_dir), mode="r")["s0"].shape == (3, 16, 12)
     assert not any("compressor" in str(w.message).lower() for w in captured)
+
+
+def test_write_ngff_from_tile_streaming_ome_progress_and_uncompressed(tmp_path, monkeypatch):
+    tile = da.from_array(_make_mips(levels=1)[0], chunks=(8, 8, 3))
+    out_dir = tmp_path / "tile-stream-progress.ome.zarr"
+    events: list[dict[str, object]] = []
+    created: dict[str, object] = {}
+
+    class FakeGroup:
+        def __init__(self):
+            self.attrs: dict[str, object] = {}
+
+    class FakeArray:
+        def __init__(self, *, shape, chunks, dtype):
+            self.shape = shape
+            self.chunks = chunks
+            self.dtype = np.dtype(dtype)
+            self.data = np.zeros(shape, dtype=dtype)
+
+        def __setitem__(self, key, value):
+            self.data[key] = value
+
+    fake_group = FakeGroup()
+
+    def fake_open_group(store, *, mode="w"):
+        created["store"] = store
+        created["mode"] = mode
+        return fake_group
+
+    def fake_create_group_array(root, name, **kwargs):
+        created[name] = kwargs
+        return FakeArray(shape=kwargs["shape"], chunks=kwargs["chunks"], dtype=kwargs["dtype"])
+
+    monkeypatch.setattr(streaming_mod, "open_group_v2", fake_open_group)
+    monkeypatch.setattr(streaming_mod, "_create_group_array", fake_create_group_array)
+
+    stats = streaming_mod.write_ngff_from_tile_streaming_ome(
+        tile,
+        out_dir,
+        phys_xy_um=(1.0, 1.0),
+        block_xy=8,
+        num_mips=1,
+        name="progress",
+        compressor=None,
+        progress_mode="log",
+        progress_interval_s=0.0,
+        progress_callback=events.append,
+        fill_value=0,
+        sparse_zero_chunks=True,
+    )
+
+    assert len(events) == 4
+    assert events[-1]["blocks_done"] == 4
+    assert events[-1]["total_blocks"] == 4
+    assert stats["rgb_chunks_expected"] == 4
+    assert stats["rgb_chunks_written"] + stats["rgb_chunks_skipped"] == stats["rgb_chunks_expected"]
+    assert created["s0"]["compressor"] is None
+    assert created["s0"]["fill_value"] == 0
+    assert fake_group.attrs["omero"]["channels"][0]["color"] == "FF0000"
+
+
+def test_tissue_mask_label_pyramid_reports_expected_chunks_and_binary_values(monkeypatch, tmp_path):
+    mask = np.zeros((16, 16), dtype=np.uint8)
+    mask[:8, :8] = 1
+    mask_da = da.from_array(mask, chunks=(8, 8))
+    out_dir = tmp_path / "mask-label.ome.zarr"
+
+    class FakeGroup:
+        def __init__(self):
+            self.attrs: dict[str, object] = {}
+            self.children: dict[str, FakeGroup] = {}
+
+        def create_group(self, name, overwrite=True):  # noqa: ARG002
+            child = FakeGroup()
+            self.children[name] = child
+            return child
+
+    class FakeArray:
+        def __init__(self, *, shape, chunks, dtype):
+            self.shape = shape
+            self.chunks = chunks
+            self.dtype = np.dtype(dtype)
+            self.data = np.zeros(shape, dtype=dtype)
+            self.attrs: dict[str, object] = {}
+
+        def __setitem__(self, key, value):
+            self.data[key] = value
+
+    fake_root = FakeGroup()
+    arrays: dict[str, FakeArray] = {}
+
+    def fake_open_group(store, *, mode="r+"):  # noqa: ARG001
+        return fake_root
+
+    def fake_create_group_array(root, name, **kwargs):  # noqa: ARG001
+        arr = FakeArray(shape=kwargs["shape"], chunks=kwargs["chunks"], dtype=kwargs["dtype"])
+        arr.fill_value = kwargs.get("fill_value")
+        arrays[name] = arr
+        return arr
+
+    monkeypatch.setattr(streaming_mod, "open_group_v2", fake_open_group)
+    monkeypatch.setattr(streaming_mod, "_create_group_array", fake_create_group_array)
+
+    stats = streaming_mod.write_tissue_mask_label_pyramid(
+        mask_da,
+        out_dir,
+        phys_xy_um=(0.25, 0.5),
+        block_xy=8,
+        num_mips=2,
+        compressor=None,
+        sparse_zero_chunks=True,
+        coordinate_translation_yx_um=(10.0, 20.0),
+    )
+
+    assert stats["mask_chunks_expected"] == 4
+    assert stats["mask_chunks_written"] + stats["mask_chunks_skipped"] == stats["mask_chunks_expected"]
+    assert stats["mask_chunks_written"] == 1
+    assert stats["mask_chunks_skipped"] == 3
+
+    label_group = fake_root.children["labels"].children["tissue_mask"]
+    assert arrays["s0"].shape == (16, 16)
+    assert arrays["s0"].fill_value == 0
+    assert sorted(np.unique(arrays["s0"].data).tolist()) == [0, 1]
+    attrs = dict(label_group.attrs)
+    assert [axis["name"] for axis in attrs["multiscales"][0]["axes"]] == ["y", "x"]
+    transforms = attrs["multiscales"][0]["datasets"][0]["coordinateTransformations"]
+    assert transforms[0]["scale"] == [0.5, 0.25]
+    assert transforms[1]["translation"] == [10.0, 20.0]
 
 
 def test_phys_xy_reader_handles_latest_writer_output(tmp_path):

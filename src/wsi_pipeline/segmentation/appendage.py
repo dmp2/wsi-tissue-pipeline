@@ -203,7 +203,9 @@ def refine_appendages(
         "trimmed_area_px": trimmed_area,
         "trimmed_fraction": float(trimmed_area / total_area),
         "appendage_reason": ";".join(
-            sorted({record.appendage_reason for record in flagged_records if record.appendage_reason})
+            sorted(
+                {record.appendage_reason for record in flagged_records if record.appendage_reason}
+            )
         ),
         "records": [record.to_dict() for record in records],
     }

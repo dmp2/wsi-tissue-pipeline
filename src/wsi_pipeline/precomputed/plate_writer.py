@@ -25,18 +25,23 @@ class PlatePrecomputedWriter:
     Preallocate a single precomputed layer and append tissues along Z.
     Backends: 'cloudvolume' or 'tensorstore'
     """
-    def __init__(self,
-                 precomp_path: str,
-                 width: int, height: int, z_slices: int,
-                 voxel_size_um=(1.0,1.0,1.0),
-                 chunk_xy: int = 512,
-                 min_side_for_mips: int | None = None,
-                 backend: str = "tensorstore", # "cloudvolume",
-                 dtype: str = "uint8",
-                 encoding: str = "raw",
-                 stream_min_side: int = 8192, # 2^13
-                 stream_bytes_threshold: int = 1_500_000_000,
-                 **kwargs): # **kwargs for cloudvolume-specific arguments
+
+    def __init__(
+        self,
+        precomp_path: str,
+        width: int,
+        height: int,
+        z_slices: int,
+        voxel_size_um=(1.0, 1.0, 1.0),
+        chunk_xy: int = 512,
+        min_side_for_mips: int | None = None,
+        backend: str = "tensorstore",  # "cloudvolume",
+        dtype: str = "uint8",
+        encoding: str = "raw",
+        stream_min_side: int = 8192,  # 2^13
+        stream_bytes_threshold: int = 1_500_000_000,
+        **kwargs,
+    ):  # **kwargs for cloudvolume-specific arguments
         self.precomp_path = precomp_path
         self.W, self.H, self.Z = width, height, z_slices
         self.voxel_size_um = voxel_size_um
@@ -47,30 +52,43 @@ class PlatePrecomputedWriter:
         self.stream_min_side = stream_min_side
         self.stream_bytes_threshold = stream_bytes_threshold
 
-
         if min_side_for_mips is None:
             min_side_for_mips = chunk_xy
         self.num_mips = compute_num_mips_min_side(width, height, min_side_for_mips)
 
-        logger.info("Creating %s writer: %dx%dx%d, %d mips", backend, width, height, z_slices, self.num_mips)
+        logger.info(
+            "Creating %s writer: %dx%dx%d, %d mips", backend, width, height, z_slices, self.num_mips
+        )
 
         if backend == "cloudvolume":
             self._writers = create_precomputed_cloudvolume(
-                precomp_path, width, height, z_slices, voxel_size_um,
-                num_mips=self.num_mips, chunk_xy=chunk_xy,
-                dtype=dtype, encoding=encoding, **kwargs
+                precomp_path,
+                width,
+                height,
+                z_slices,
+                voxel_size_um,
+                num_mips=self.num_mips,
+                chunk_xy=chunk_xy,
+                dtype=dtype,
+                encoding=encoding,
+                **kwargs,
             )
         elif backend == "tensorstore":
             self._writers = create_precomputed_tensorstore(
-                precomp_path, width, height, z_slices, voxel_size_um,
-                num_mips=self.num_mips, chunk_xy=chunk_xy,
-                dtype=dtype, encoding=encoding
+                precomp_path,
+                width,
+                height,
+                z_slices,
+                voxel_size_um,
+                num_mips=self.num_mips,
+                chunk_xy=chunk_xy,
+                dtype=dtype,
+                encoding=encoding,
             )
         else:
             raise ValueError("backend must be 'cloudvolume' or 'tensorstore'")
 
-
-    def should_stream(self, tile_shape_yxc: tuple[int,int,int], bytes_per_px: int = 1) -> bool:
+    def should_stream(self, tile_shape_yxc: tuple[int, int, int], bytes_per_px: int = 1) -> bool:
         y, x, c = tile_shape_yxc
         # Large side or large byte footprint? stream.
         if max(y, x) >= self.stream_min_side:
@@ -84,8 +102,6 @@ class PlatePrecomputedWriter:
         if self.backend != "tensorstore":
             raise NotImplementedError("Streaming is implemented for TensorStore backend.")
         write_slice_tensorstore_streaming(self._writers, z_index, tile_yxc, block_xy=self.chunk_xy)
-
-
 
     def write_slice(self, z_index: int, mips_or_tile) -> None:
         """
@@ -121,13 +137,12 @@ class PlatePrecomputedWriter:
         else:
             write_slice_cloudvolume(self._writers, z_index, mips)
 
-
     def close(self):
         """Ensure all data is written when done."""
         if self.backend == "cloudvolume":
             for writer in self._writers:
                 # Force any cached data to be written
-                if hasattr(writer, 'cache'):
+                if hasattr(writer, "cache"):
                     writer.cache.flush()
             # Clear references to ensure cleanup
             self._writers = None
@@ -135,7 +150,6 @@ class PlatePrecomputedWriter:
             logger.debug("TensorStore writes completed (no flush needed)")
             # Just clear references
             self._writers = None
-
 
     def verify_write(self):
         """Verify data was written correctly."""
@@ -148,8 +162,11 @@ class PlatePrecomputedWriter:
         info_path = path / "info"
         if info_path.exists():
             info = json.loads(info_path.read_text())
-            logger.info("Info file exists: %d channels, %d scales",
-                        info['num_channels'], len(info['scales']))
+            logger.info(
+                "Info file exists: %d channels, %d scales",
+                info["num_channels"],
+                len(info["scales"]),
+            )
 
         # Check for actual data files
         for scale_idx in range(min(2, self.num_mips)):  # Check first 2 scales
@@ -161,10 +178,11 @@ class PlatePrecomputedWriter:
                     first_chunk = chunks[0]
                     data = first_chunk.read_bytes()[:100]
                     has_data = any(b != 0 for b in data)
-                    logger.info("Scale %d: %d chunks, has_data=%s", scale_idx, len(chunks), has_data)
+                    logger.info(
+                        "Scale %d: %d chunks, has_data=%s", scale_idx, len(chunks), has_data
+                    )
                 else:
                     logger.info("Scale %d: no chunks found", scale_idx)
-
 
     def __enter__(self):
         return self

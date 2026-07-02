@@ -32,6 +32,12 @@ BIOFORMATS_DOWNLOAD_ENV = "WSI_PIPELINE_BIOFORMATS_DOWNLOAD"
 
 _CONFIGURED_JAR_PATH: Path | None = None
 
+_JDK_INSTALL_HINT = (
+    "Install a JDK, not only a JRE. Conda users can run "
+    "`conda install -n wsi-pipeline -c conda-forge openjdk>=17`; "
+    "system users can install `openjdk-17-jdk-headless` or `openjdk-21-jdk-headless`."
+)
+
 
 def _download_enabled() -> bool:
     """Return whether automatic jar download is enabled."""
@@ -75,9 +81,7 @@ def _sha256_file(path: Path) -> str:
 def _verify_managed_jar(path: Path) -> None:
     """Verify that the managed jar matches the pinned Bio-Formats artifact."""
     if _sha256_file(path) != BIOFORMATS_JAR_SHA256:
-        raise RuntimeError(
-            f"Cached Bio-Formats jar at {path} does not match the pinned SHA-256."
-        )
+        raise RuntimeError(f"Cached Bio-Formats jar at {path} does not match the pinned SHA-256.")
 
 
 @contextmanager
@@ -165,26 +169,184 @@ def _resolve_bioformats_jar_path() -> Path:
         return jar_path
 
 
-def _validate_java_runtime() -> Path:
-    """Ensure a Java runtime is available before importing Pyjnius."""
-    executable = "java.exe" if os.name == "nt" else "java"
-    java_home = os.getenv("JAVA_HOME")
+def _executable_name(name: str) -> str:
+    """Return platform-specific Java executable name."""
+    return f"{name}.exe" if os.name == "nt" else name
 
-    candidates: list[Path] = []
-    if java_home:
-        candidates.append(Path(java_home) / "bin" / executable)
 
-    on_path = shutil.which("java")
-    if on_path:
-        candidates.append(Path(on_path))
+def _candidate_home(home: str | os.PathLike[str] | None) -> Path | None:
+    """Normalize a possible Java home path."""
+    if not home:
+        return None
+    path = Path(home).expanduser()
+    return path if path.exists() else None
 
+
+def _candidate_home_variants(home: str | os.PathLike[str] | None) -> list[Path]:
+    """Return plausible Java homes for an env or prefix path."""
+    path = _candidate_home(home)
+    if path is None:
+        return []
+
+    variants: list[Path] = []
+    if path.name == "bin":
+        variants.append(path.parent)
+
+    # Conda's openjdk package exposes java/javac in <env>/bin, but the real
+    # JAVA_HOME for libjvm discovery is <env>/lib/jvm.
+    conda_jvm = path / "lib" / "jvm"
+    if conda_jvm.exists():
+        variants.append(conda_jvm)
+
+    variants.append(path)
+    return variants
+
+
+def _jdk_search_roots() -> list[Path]:
+    """Return platform roots that commonly contain JDK installations."""
+    if os.name == "nt":
+        return []
+    return [Path("/usr/lib/jvm")]
+
+
+def _java_tool(home: Path, name: str) -> Path:
+    """Return the expected path for a Java tool under a candidate home."""
+    return home / "bin" / _executable_name(name)
+
+
+def _has_jdk_tools(home: Path) -> bool:
+    """Return whether a candidate home contains both java and javac."""
+    return _java_tool(home, "java").exists() and _java_tool(home, "javac").exists()
+
+
+def _libjvm_name() -> str:
+    if os.name == "nt":
+        return "jvm.dll"
+    if sys.platform == "darwin":
+        return "libjvm.dylib"
+    return "libjvm.so"
+
+
+def _find_libjvm(home: Path) -> Path | None:
+    """Find the JVM shared library under a candidate Java home."""
+    libjvm = _libjvm_name()
+    candidates = [
+        home / "lib" / "server" / libjvm,
+        home / "jre" / "lib" / "server" / libjvm,
+        home / "jre" / "lib" / "amd64" / "server" / libjvm,
+        home / "lib" / "jvm" / "lib" / "server" / libjvm,
+    ]
     for candidate in candidates:
         if candidate.exists():
             return candidate
+    return None
+
+
+def _candidate_jdk_homes() -> list[Path]:
+    """Return ordered JDK home candidates from env vars, PATH, and system roots."""
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path | None) -> None:
+        if path is None:
+            return
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            candidates.append(path)
+
+    for variant in _candidate_home_variants(os.getenv("JAVA_HOME")):
+        add(variant)
+    for variant in _candidate_home_variants(os.getenv("CONDA_PREFIX")):
+        add(variant)
+    for variant in _candidate_home_variants(sys.prefix):
+        add(variant)
+
+    javac_on_path = shutil.which(_executable_name("javac"))
+    if javac_on_path:
+        for variant in _candidate_home_variants(Path(javac_on_path).resolve().parent.parent):
+            add(variant)
+
+    for root in _jdk_search_roots():
+        if not root.exists():
+            continue
+        for child in sorted(root.glob("*")):
+            if child.is_dir():
+                for variant in _candidate_home_variants(child):
+                    add(variant)
+
+    return candidates
+
+
+def discover_java_runtime() -> dict[str, str | bool | None]:
+    """
+    Discover Java/JDK availability without importing PyJNIus.
+
+    Returns a small status dictionary with ``java_home``, ``java``, ``javac``,
+    ``is_jdk``, ``jvm_path``, and ``has_libjvm`` keys. ``is_jdk`` is true only
+    when both ``java`` and ``javac`` are discoverable from the same Java home.
+    """
+    tool_only_status: dict[str, str | bool | None] | None = None
+    for home in _candidate_jdk_homes():
+        if _has_jdk_tools(home):
+            jvm_path = _find_libjvm(home)
+            status: dict[str, str | bool | None] = {
+                "java_home": str(home),
+                "java": str(_java_tool(home, "java")),
+                "javac": str(_java_tool(home, "javac")),
+                "is_jdk": True,
+                "jvm_path": str(jvm_path) if jvm_path else None,
+                "has_libjvm": jvm_path is not None,
+            }
+            if jvm_path is not None:
+                return status
+            if tool_only_status is None:
+                tool_only_status = status
+
+    if tool_only_status is not None:
+        return tool_only_status
+
+    java_on_path = shutil.which(_executable_name("java"))
+    javac_on_path = shutil.which(_executable_name("javac"))
+    return {
+        "java_home": None,
+        "java": java_on_path,
+        "javac": javac_on_path,
+        "is_jdk": False,
+        "jvm_path": None,
+        "has_libjvm": False,
+    }
+
+
+def _validate_java_runtime() -> Path:
+    """Ensure a JDK is available before importing Pyjnius."""
+    status = discover_java_runtime()
+    if status["is_jdk"] and status.get("has_libjvm"):
+        java_home = str(status["java_home"])
+        os.environ["JAVA_HOME"] = java_home
+        os.environ["JVM_PATH"] = str(status["jvm_path"])
+        bin_dir = str(Path(java_home) / "bin")
+        path_parts = os.getenv("PATH", "").split(os.pathsep) if os.getenv("PATH") else []
+        if bin_dir not in path_parts:
+            os.environ["PATH"] = os.pathsep.join([bin_dir, *path_parts])
+        return Path(str(status["java"]))
+
+    if status["is_jdk"]:
+        raise RuntimeError(
+            "JDK tools were found, but PyJNIus could not find the JVM shared library "
+            f"({_libjvm_name()}). Set JVM_PATH to the absolute libjvm path or install a full "
+            f"OpenJDK package. {_JDK_INSTALL_HINT}"
+        )
+
+    if status["java"]:
+        raise RuntimeError(
+            "Java runtime found, but no JDK compiler (`javac`) was found. "
+            "Bio-Formats metadata via PyJNIus requires a JDK. "
+            f"{_JDK_INSTALL_HINT}"
+        )
 
     raise RuntimeError(
-        "Java runtime not found. Install Java or set JAVA_HOME. "
-        "The curated Conda and Docker environments include Java automatically."
+        f"Java/JDK not found. Bio-Formats metadata via PyJNIus requires Java. {_JDK_INSTALL_HINT}"
     )
 
 
@@ -221,7 +383,7 @@ def ensure_bioformats_jnius():
     except ImportError as exc:
         raise RuntimeError(
             "Bio-Formats metadata backend requires the optional 'bioformats' dependencies. "
-            "Install the package with `pip install -e \".[bioformats]\"`."
+            'Install the package with `pip install -e ".[bioformats]"`.'
         ) from exc
 
     if _CONFIGURED_JAR_PATH is None:

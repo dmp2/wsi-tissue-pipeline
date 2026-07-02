@@ -67,12 +67,8 @@ class AtlasRegistrationConfig(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = True
-    downI: list[list[int]] = Field(
-        default_factory=lambda: [[4, 4, 4], [2, 2, 2], [1, 1, 1]]
-    )
-    downJ: list[list[int]] = Field(
-        default_factory=lambda: [[1, 4, 4], [1, 2, 2], [1, 1, 1]]
-    )
+    downI: list[list[int]] = Field(default_factory=lambda: [[4, 4, 4], [2, 2, 2], [1, 1, 1]])
+    downJ: list[list[int]] = Field(default_factory=lambda: [[1, 4, 4], [1, 2, 2], [1, 1, 1]])
     n_iter: list[int] = Field(default_factory=lambda: [100, 50, 25])
     a: list[float] = Field(default_factory=lambda: [500.0])
     dv: list[float] = Field(default_factory=lambda: [1000.0])
@@ -166,7 +162,9 @@ class EmlddmmWorkflowConfig(BaseModel):
     upsampling: UpsamplingConfig = Field(default_factory=UpsamplingConfig)
     outputs: OutputConfig = Field(default_factory=OutputConfig)
     normalization: NormalizationConfig = Field(default_factory=NormalizationConfig)
-    transformation_graph: TransformationGraphConfig = Field(default_factory=TransformationGraphConfig)
+    transformation_graph: TransformationGraphConfig = Field(
+        default_factory=TransformationGraphConfig
+    )
     debug: DebugConfig = Field(default_factory=DebugConfig)
     atlas_path: Path | None = None
     label_path: Path | None = None

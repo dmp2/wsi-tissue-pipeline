@@ -13,6 +13,23 @@ from typing import Any
 
 import zarr
 
+RGB_CHANNEL_LABELS = ["red", "green", "blue"]
+RGB_CHANNEL_COLORS = ["FF0000", "00FF00", "0000FF"]
+
+
+def default_channel_labels(channel_count: int) -> list[str]:
+    """Return display labels for a brightfield channel count."""
+    if int(channel_count) == 3:
+        return list(RGB_CHANNEL_LABELS)
+    return [f"ch{idx}" for idx in range(int(channel_count))]
+
+
+def default_channel_colors(channel_count: int) -> list[str]:
+    """Return OMERO display colors for a brightfield channel count."""
+    if int(channel_count) == 3:
+        return list(RGB_CHANNEL_COLORS)
+    return ["FFFFFF"] * int(channel_count)
+
 
 def _is_ngff_image_group(path: Path) -> bool:
     """Basic NGFF image check based on readable root attrs."""
@@ -41,7 +58,7 @@ def _get_multiscales_paths(root: zarr.Group) -> list[str]:
     return [d["path"] for d in ms["datasets"]]
 
 
-def _phys_xy_um(root: zarr.Group, L: int=0) -> tuple[float,float]:
+def _phys_xy_um(root: zarr.Group, L: int = 0) -> tuple[float, float]:
     """
     Read (phys_x_um, phys_y_um) from the child's NGFF multiscales at Lth resolution.
     L=0 is the highest resolution, used by default
@@ -51,7 +68,7 @@ def _phys_xy_um(root: zarr.Group, L: int=0) -> tuple[float,float]:
     scale = ms["datasets"][L]["coordinateTransformations"][0]["scale"]  # NGFF order: [c,y,x]
     phys_y = float(scale[1])
     phys_x = float(scale[2])
-    return phys_x, phys_y # (px_um, py_um)
+    return phys_x, phys_y  # (px_um, py_um)
 
 
 def _detect_source_ds_factor(root: zarr.Group) -> float:
@@ -59,19 +76,19 @@ def _detect_source_ds_factor(root: zarr.Group) -> float:
     Detect the source downsample schedule. Usually 2x or 4x.
     """
     ms = root.attrs["multiscales"][0]
-    s = [ds["coordinateTransformations"][0]["scale"] for ds in ms["datasets"]]  # [ [1, py, px], ... ]
+    s = [
+        ds["coordinateTransformations"][0]["scale"] for ds in ms["datasets"]
+    ]  # [ [1, py, px], ... ]
     ys = [float(si[1]) for si in s]  # use Y only (X should match)
-    ratios = [ys[i+1] / ys[i] for i in range(len(ys)-1)]
+    ratios = [ys[i + 1] / ys[i] for i in range(len(ys) - 1)]
 
     # Return the median rounded to 2 decimals (often ~2.0 or ~4.0)
     ratios.sort()
 
-    return round(ratios[len(ratios)//2], 2)
+    return round(ratios[len(ratios) // 2], 2)
 
 
-
-
-def _sizes_for_mips_xy(W: int, H: int, levels: int) -> list[tuple[int,int]]:
+def _sizes_for_mips_xy(W: int, H: int, levels: int) -> list[tuple[int, int]]:
     sizes = []
     w, h = W, H
     for _ in range(levels):
@@ -80,7 +97,10 @@ def _sizes_for_mips_xy(W: int, H: int, levels: int) -> list[tuple[int,int]]:
         h = max(1, h // 2)
     return sizes
 
-def _voxel_sizes_for_mips_xy(phys_xyz: int, levels: int, scale_factor: int = 2) -> list[tuple[int,int,int]]:
+
+def _voxel_sizes_for_mips_xy(
+    phys_xyz: int, levels: int, scale_factor: int = 2
+) -> list[tuple[int, int, int]]:
     """
     phys_xyz is (x_nm, y_nm, z_nm).
     Double XY per MIP; keep Z fixed.
@@ -226,7 +246,9 @@ def _dataset_paths(root_attrs: dict[str, Any]) -> list[str]:
     return [str(dataset.get("path", "")) for dataset in datasets]
 
 
-def _extract_phys_xy_from_root_attrs(root_attrs: dict[str, Any], level: int = 0) -> tuple[float, float] | None:
+def _extract_phys_xy_from_root_attrs(
+    root_attrs: dict[str, Any], level: int = 0
+) -> tuple[float, float] | None:
     """Read base physical spacing from root attrs when a scale transform exists."""
     try:
         dataset = root_attrs["multiscales"][0]["datasets"][level]
@@ -465,6 +487,7 @@ def _project_source_metadata_for_tile_writes(
     *,
     dataset_count: int,
     name: str,
+    phys_xy_um: tuple[float, float] | None = None,
 ) -> dict[str, Any]:
     """
     Re-project source metadata into tile-compatible dual NGFF payloads.
@@ -477,22 +500,31 @@ def _project_source_metadata_for_tile_writes(
 
     channel_count = _metadata_channel_count(source_metadata) or 3
     metadata_labels = _metadata_channel_labels(source_metadata) or []
-    channel_labels = [str(label) for label in metadata_labels[:channel_count]]
-    if len(channel_labels) < channel_count:
-        channel_labels.extend(f"ch{idx}" for idx in range(len(channel_labels), channel_count))
+    if metadata_labels:
+        channel_labels = [str(label) for label in metadata_labels[:channel_count]]
+        if len(channel_labels) < channel_count:
+            channel_labels.extend(
+                default_channel_labels(channel_count)[len(channel_labels) : channel_count]
+            )
+    else:
+        channel_labels = default_channel_labels(channel_count)
 
-    phys_xy_um = _extract_phys_xy_from_metadata_payload(source_metadata)
+    resolved_phys_xy_um = (
+        tuple(map(float, phys_xy_um))
+        if phys_xy_um is not None
+        else _extract_phys_xy_from_metadata_payload(source_metadata)
+    )
     latest_root = _build_default_ngff_root_attrs(
         name=name,
         dataset_count=dataset_count,
-        phys_xy_um=phys_xy_um,
+        phys_xy_um=resolved_phys_xy_um,
         schema="latest",
         channel_axis_name="c",
     )
     v04_root = _build_default_ngff_root_attrs(
         name=name,
         dataset_count=dataset_count,
-        phys_xy_um=phys_xy_um,
+        phys_xy_um=resolved_phys_xy_um,
         schema="v0.4",
         channel_axis_name="c",
     )
@@ -519,9 +551,7 @@ def _project_source_metadata_for_tile_writes(
             "warnings": compatibility_warnings,
         },
     }
-    payload["ngff"] = (
-        payload["ngff_latest"] if selected_schema == "latest" else payload["ngff_v04"]
-    )
+    payload["ngff"] = payload["ngff_latest"] if selected_schema == "latest" else payload["ngff_v04"]
     return payload
 
 
@@ -603,7 +633,7 @@ def _prepare_ngff_writer_metadata(
         else _metadata_channel_labels(ngff_metadata)
     )
     if resolved_channel_labels is None:
-        resolved_channel_labels = [f"ch{idx}" for idx in range(channel_count)]
+        resolved_channel_labels = default_channel_labels(channel_count)
     if len(resolved_channel_labels) != channel_count:
         raise ValueError(
             f"Writer received {len(resolved_channel_labels)} channel labels for {channel_count} channels."

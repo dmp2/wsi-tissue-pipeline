@@ -444,7 +444,9 @@ def hybrid_fps_pytorch3d(
                 for nb in neighbor_ids:
                     mask |= inv == nb
                 cell_to_points.append(torch.nonzero(mask, as_tuple=False).squeeze(1))
-            maxlen = max(int(indices.numel()) for indices in cell_to_points) if cell_to_points else 0
+            maxlen = (
+                max(int(indices.numel()) for indices in cell_to_points) if cell_to_points else 0
+            )
             padded = points.new_zeros((len(cell_to_points), maxlen, 3))
             idx_padded = torch.full(
                 (len(cell_to_points), maxlen),

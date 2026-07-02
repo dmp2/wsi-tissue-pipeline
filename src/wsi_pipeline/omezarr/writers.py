@@ -19,8 +19,8 @@ from ngff_zarr.v04.zarr_metadata import Axis, Dataset, Scale
 from ngff_zarr.v04.zarr_metadata import Metadata as V04Metadata
 from numcodecs import Blosc
 
-from .metadata import _prepare_ngff_writer_metadata
-from .zarr_compat import create_group_array
+from .metadata import _prepare_ngff_writer_metadata, default_channel_colors
+from .zarr_compat import create_group_array, open_group_v2
 
 
 def _omero_version(root_attrs: dict[str, Any], schema: str) -> str:
@@ -42,7 +42,7 @@ def _build_omero_block(
     channel_colors: list[str] | None,
 ) -> dict[str, Any]:
     """Build the standard OMERO display block used by the writers."""
-    colors = channel_colors or ["FFFFFF"] * len(channel_labels)
+    colors = channel_colors or default_channel_colors(len(channel_labels))
     if len(colors) != len(channel_labels):
         raise ValueError(
             f"Writer received {len(colors)} channel colors for {len(channel_labels)} channels."
@@ -140,15 +140,13 @@ def write_ngff_from_mips(
     resolved_channel_labels = prepared["resolved_channel_labels"]
     omero_version = _omero_version(root_attrs, prepared["schema"])
 
-    root = zarr.open_group(str(out_dir), mode="w")
+    root = open_group_v2(str(out_dir), mode="w")
 
     for lvl, img in enumerate(mips_yxc):
         if img.ndim != 3:
             raise ValueError(f"mips[{lvl}] must be (H,W,C), got shape {img.shape}")
         if img.shape[-1] != C:
-            raise ValueError(
-                f"mips[{lvl}] has {img.shape[-1]} channels, expected {C}."
-            )
+            raise ValueError(f"mips[{lvl}] has {img.shape[-1]} channels, expected {C}.")
 
         H, W, _ = img.shape
 
@@ -160,6 +158,7 @@ def write_ngff_from_mips(
             dtype=dtype,
             compressor=compressor,
             overwrite=True,
+            zarr_format=2,
         )
         arr[...] = np.moveaxis(img, -1, 0)
         arr.attrs["_ARRAY_DIMENSIONS"] = ["c^", "y", "x"]
@@ -252,9 +251,7 @@ def write_ngff_from_mips_ngffzarr(
         if yxc.ndim != 3:
             raise ValueError(f"mips[{lvl}] must be (Y,X,C), got shape {yxc.shape}")
         if yxc.shape[-1] != channel_count:
-            raise ValueError(
-                f"mips[{lvl}] has {yxc.shape[-1]} channels, expected {channel_count}."
-            )
+            raise ValueError(f"mips[{lvl}] has {yxc.shape[-1]} channels, expected {channel_count}.")
         if hasattr(yxc, "chunks"):  # dask array
             arr_yxc = yxc
         else:  # numpy -> dask
@@ -266,13 +263,13 @@ def write_ngff_from_mips_ngffzarr(
     # Build NgffImage objects with correct dims/units and per-level scale
     images = []
     for lvl, cyx in enumerate(cyx_levels):
-        scale_map = {"y": py_um * (2 ** lvl), "x": px_um * (2 ** lvl)}
+        scale_map = {"y": py_um * (2**lvl), "x": px_um * (2**lvl)}
         img = to_ngff_image(
             data=cyx,
             dims=("c", "y", "x"),
             scale=scale_map,
             name=resolved_name,
-            axes_units={"y": "micrometer", "x": "micrometer"}
+            axes_units={"y": "micrometer", "x": "micrometer"},
         )
         images.append(img)
 
@@ -286,9 +283,7 @@ def write_ngff_from_mips_ngffzarr(
         datasets=[
             Dataset(
                 path=f"s{lvl}",
-                coordinateTransformations=[
-                    Scale(scale=[1.0, py_um * (2 ** lvl), px_um * (2 ** lvl)])
-                ],
+                coordinateTransformations=[Scale(scale=[1.0, py_um * (2**lvl), px_um * (2**lvl)])],
             )
             for lvl in range(len(images))
         ],
@@ -301,11 +296,7 @@ def write_ngff_from_mips_ngffzarr(
 
     # Write with TensorStore backend
     to_ngff_zarr(
-        store=str(out_dir),
-        multiscales=ms,
-        version=version,
-        overwrite=True,
-        use_tensorstore=True
+        store=str(out_dir), multiscales=ms, version=version, overwrite=True, use_tensorstore=True
     )
 
     root = zarr.open_group(str(out_dir), mode="r+")

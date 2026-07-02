@@ -23,6 +23,7 @@ from typing import Any
 
 class EventType(str, Enum):
     """OpenLineage event types."""
+
     START = "START"
     RUNNING = "RUNNING"
     COMPLETE = "COMPLETE"
@@ -33,6 +34,7 @@ class EventType(str, Enum):
 @dataclass
 class DatasetFacets:
     """Facets describing a dataset."""
+
     schema_fields: list[dict[str, str]] = field(default_factory=list)
     data_source: str | None = None
     storage_format: str | None = None
@@ -55,6 +57,7 @@ class Dataset:
     facets : DatasetFacets, optional
         Additional dataset metadata.
     """
+
     namespace: str
     name: str
     facets: DatasetFacets | None = None
@@ -66,22 +69,16 @@ class Dataset:
         return d
 
     @classmethod
-    def from_path(
-        cls,
-        path: str | Path,
-        namespace_prefix: str = "sciserver://storage"
-    ) -> Dataset:
+    def from_path(cls, path: str | Path, namespace_prefix: str = "sciserver://storage") -> Dataset:
         """Create dataset reference from file path."""
         path = Path(path)
-        return cls(
-            namespace=namespace_prefix,
-            name=str(path.name)
-        )
+        return cls(namespace=namespace_prefix, name=str(path.name))
 
 
 @dataclass
 class JobFacets:
     """Facets describing a job."""
+
     source_code_location: str | None = None
     documentation: str | None = None
     sql: str | None = None
@@ -102,6 +99,7 @@ class Job:
     facets : JobFacets, optional
         Additional job metadata.
     """
+
     namespace: str
     name: str
     facets: JobFacets | None = None
@@ -116,6 +114,7 @@ class Job:
 @dataclass
 class RunFacets:
     """Facets describing a run."""
+
     nominal_time: str | None = None
     parent_run: dict[str, str] | None = None
     error_message: str | None = None
@@ -135,6 +134,7 @@ class Run:
     facets : RunFacets, optional
         Additional run metadata.
     """
+
     run_id: str
     facets: RunFacets | None = None
 
@@ -153,6 +153,7 @@ class LineageEvent:
     This follows the OpenLineage spec for interoperability
     with tools like Marquez, while storing events locally.
     """
+
     event_type: EventType
     event_time: str
     run: Run
@@ -171,7 +172,7 @@ class LineageEvent:
             "inputs": [ds.to_dict() for ds in self.inputs],
             "outputs": [ds.to_dict() for ds in self.outputs],
             "producer": self.producer,
-            "schemaURL": self.schema_url
+            "schemaURL": self.schema_url,
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -222,7 +223,7 @@ class LineageTracker:
         self,
         storage_path: str | Path,
         job_namespace: str = "sciserver://wsi-pipeline",
-        dataset_namespace: str = "sciserver://storage"
+        dataset_namespace: str = "sciserver://storage",
     ):
         self.storage_path = Path(storage_path)
         self.events_dir = self.storage_path / "events"
@@ -246,7 +247,7 @@ class LineageTracker:
             self.index = {
                 "runs": {},  # run_id -> {job, status, events}
                 "datasets": {},  # dataset_name -> [run_ids]
-                "jobs": {}  # job_name -> [run_ids]
+                "jobs": {},  # job_name -> [run_ids]
             }
 
     def _save_index(self):
@@ -275,7 +276,7 @@ class LineageTracker:
                 "status": event.event_type.value,
                 "events": [],
                 "inputs": [],
-                "outputs": []
+                "outputs": [],
             }
 
         self.index["runs"][run_id]["events"].append(event_id)
@@ -317,17 +318,16 @@ class LineageTracker:
             if isinstance(ds, Dataset):
                 result.append(ds)
             elif isinstance(ds, dict):
-                result.append(Dataset(
-                    namespace=ds.get("namespace", self.dataset_namespace),
-                    name=ds["name"],
-                    facets=DatasetFacets(**ds.get("facets", {})) if "facets" in ds else None
-                ))
+                result.append(
+                    Dataset(
+                        namespace=ds.get("namespace", self.dataset_namespace),
+                        name=ds["name"],
+                        facets=DatasetFacets(**ds.get("facets", {})) if "facets" in ds else None,
+                    )
+                )
             elif isinstance(ds, str):
                 # Assume it's a path or name
-                result.append(Dataset(
-                    namespace=self.dataset_namespace,
-                    name=Path(ds).name
-                ))
+                result.append(Dataset(namespace=self.dataset_namespace, name=Path(ds).name))
             else:
                 raise ValueError(f"Unknown dataset type: {type(ds)}")
         return result
@@ -366,7 +366,7 @@ class LineageTracker:
 
         run_facets = RunFacets(
             nominal_time=self._now_iso(),
-            parent_run={"runId": parent_run_id} if parent_run_id else None
+            parent_run={"runId": parent_run_id} if parent_run_id else None,
         )
 
         event = LineageEvent(
@@ -376,10 +376,10 @@ class LineageTracker:
             job=Job(
                 namespace=self.job_namespace,
                 name=job_name,
-                facets=JobFacets(**job_facets) if job_facets else None
+                facets=JobFacets(**job_facets) if job_facets else None,
             ),
             inputs=inputs,
-            outputs=[]
+            outputs=[],
         )
 
         self._emit_event(event)
@@ -389,7 +389,7 @@ class LineageTracker:
             "run_id": run_id,
             "job_name": job_name,
             "inputs": [ds.to_dict() for ds in inputs],
-            "started_at": self._now_iso()
+            "started_at": self._now_iso(),
         }
         run_file = self.runs_dir / f"{run_id}.json"
         run_file.write_text(json.dumps(run_state, indent=2))
@@ -436,9 +436,7 @@ class LineageTracker:
         inputs = self._parse_datasets(inputs or [])
         outputs = self._parse_datasets(outputs or [])
 
-        run_facets = RunFacets(
-            custom={"metrics": metrics} if metrics else {}
-        )
+        run_facets = RunFacets(custom={"metrics": metrics} if metrics else {})
 
         event = LineageEvent(
             event_type=EventType.COMPLETE,
@@ -446,7 +444,7 @@ class LineageTracker:
             run=Run(run_id=run_id, facets=run_facets),
             job=Job(namespace=self.job_namespace, name=job_name),
             inputs=inputs,
-            outputs=outputs
+            outputs=outputs,
         )
 
         return self._emit_event(event)
@@ -487,9 +485,7 @@ class LineageTracker:
 
         inputs = self._parse_datasets(inputs or [])
 
-        run_facets = RunFacets(
-            error_message=error_message
-        )
+        run_facets = RunFacets(error_message=error_message)
 
         event = LineageEvent(
             event_type=EventType.FAIL,
@@ -497,7 +493,7 @@ class LineageTracker:
             run=Run(run_id=run_id, facets=run_facets),
             job=Job(namespace=self.job_namespace, name=job_name),
             inputs=inputs,
-            outputs=[]
+            outputs=[],
         )
 
         return self._emit_event(event)
@@ -514,16 +510,9 @@ class LineageTracker:
         matches = []
         for ds_key, run_ids in self.index["datasets"].items():
             if dataset_name in ds_key:
-                matches.append({
-                    "dataset": ds_key,
-                    "run_ids": run_ids
-                })
+                matches.append({"dataset": ds_key, "run_ids": run_ids})
 
-        result = {
-            "dataset_name": dataset_name,
-            "matches": matches,
-            "runs": {}
-        }
+        result = {"dataset_name": dataset_name, "matches": matches, "runs": {}}
 
         # Load run details
         seen_runs = set()
@@ -550,9 +539,7 @@ class LineageTracker:
         for event_id in run_info.get("events", []):
             event_file = self.events_dir / f"{event_id}.json"
             if event_file.exists():
-                run_info["event_details"].append(
-                    json.loads(event_file.read_text())
-                )
+                run_info["event_details"].append(json.loads(event_file.read_text()))
 
         return run_info
 
@@ -584,13 +571,9 @@ class LineageTracker:
 
         return events
 
+
 @contextmanager
-def tracked_run(
-    tracker: LineageTracker,
-    job_name: str,
-    inputs: list = None,
-    **kwargs
-):
+def tracked_run(tracker: LineageTracker, job_name: str, inputs: list = None, **kwargs):
     """
     Context manager for automatic lineage tracking.
 
@@ -624,17 +607,10 @@ def tracked_run(
     try:
         yield ctx
         tracker.complete_run(
-            run_id=run_id,
-            job_name=job_name,
-            outputs=ctx.outputs,
-            metrics=ctx.metrics
+            run_id=run_id, job_name=job_name, outputs=ctx.outputs, metrics=ctx.metrics
         )
     except Exception as e:
-        tracker.fail_run(
-            run_id=run_id,
-            job_name=job_name,
-            error_message=str(e)
-        )
+        tracker.fail_run(run_id=run_id, job_name=job_name, error_message=str(e))
         raise
 
 
@@ -643,6 +619,7 @@ def get_default_tracker() -> LineageTracker:
     """Get a lineage tracker configured for SciServer."""
     try:
         from SciServer import Authentication, Config
+
         if Config.isSciServerComputeEnvironment():
             user = Authentication.getKeystoneUserWithToken()
             storage_path = f"/home/idies/workspace/Storage/{user.userName}/UserVolume/lineage"

@@ -16,9 +16,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import zarr
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 logger = logging.getLogger(__name__)
+
+NGFF_THUMBNAIL_FULL_RES_MAX_PIXELS = 25_000_000
+NGFF_STATS_FULL_RES_MAX_PIXELS = 50_000_000
 
 # Try to import torch for faster grid generation
 try:
@@ -118,6 +122,14 @@ class QCArtifacts:
 class QCWorkflowResult:
     records: list[QCRecord]
     artifacts: QCArtifacts
+
+
+@dataclass(frozen=True)
+class NGFFLevelSelection:
+    dataset_path: str
+    axes: tuple[str, ...] | None
+    raw_shape: tuple[int, ...]
+    array_yxc: np.ndarray
 
 
 def find_images(
@@ -236,6 +248,7 @@ def load_thumbnail(
     path: Path,
     size: int = 256,
     mode: str = "RGB",
+    qc_display_mode: str = "auto",
 ) -> Image.Image:
     """
     Load and resize image to thumbnail.
@@ -254,11 +267,322 @@ def load_thumbnail(
     PIL.Image
         Thumbnail image.
     """
+    if _is_ome_zarr_path(path):
+        return _load_ngff_thumbnail(path, size=size, mode=mode, qc_display_mode=qc_display_mode)
+
     with Image.open(path) as img:
         if img.mode != mode:
             img = img.convert(mode)
         img.thumbnail((size, size), Image.BICUBIC)
         return img.copy()
+
+
+def _is_ome_zarr_path(path: Path) -> bool:
+    return path.is_dir() and path.name.endswith(".ome.zarr")
+
+
+def _ngff_dataset_paths(path: Path) -> list[str]:
+    root = zarr.open_group(str(path), mode="r")
+    multiscales = root.attrs.get("multiscales")
+    if not isinstance(multiscales, list) or not multiscales:
+        raise ValueError(f"{path} is not a readable OME-Zarr image group.")
+    datasets = multiscales[0].get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        raise ValueError(f"{path} does not contain NGFF datasets.")
+    return [str(dataset["path"]) for dataset in datasets]
+
+
+def _ngff_axes(path: Path) -> tuple[str, ...] | None:
+    """Return NGFF axis names for the first multiscales entry when available."""
+    root = zarr.open_group(str(path), mode="r")
+    multiscales = root.attrs.get("multiscales")
+    if not isinstance(multiscales, list) or not multiscales:
+        return None
+    axes = multiscales[0].get("axes")
+    if not isinstance(axes, list):
+        return None
+    names: list[str] = []
+    for axis in axes:
+        if isinstance(axis, dict):
+            name = axis.get("name")
+        else:
+            name = axis
+        if name is None:
+            return None
+        names.append(str(name).lower())
+    return tuple(names)
+
+
+def _array_yx_shape(shape: tuple[int, ...], axes: tuple[str, ...] | None = None) -> tuple[int, int]:
+    if axes is not None and len(axes) == len(shape) and "y" in axes and "x" in axes:
+        return int(shape[axes.index("y")]), int(shape[axes.index("x")])
+    if len(shape) == 2:
+        return int(shape[0]), int(shape[1])
+    if len(shape) != 3:
+        raise ValueError(f"Expected 2D or 3D image array, got shape {shape}.")
+    if shape[0] in (1, 3, 4) and shape[-1] not in (1, 3, 4):
+        return int(shape[1]), int(shape[2])
+    return int(shape[0]), int(shape[1])
+
+
+def _to_yxc_array(arr: np.ndarray, axes: tuple[str, ...] | None = None) -> np.ndarray:
+    """Normalize NGFF/image arrays to YXC or YX before display/statistics."""
+    arr = np.asarray(arr)
+    if axes is not None and len(axes) == arr.ndim and "y" in axes and "x" in axes:
+        y_axis = axes.index("y")
+        x_axis = axes.index("x")
+        c_axis = axes.index("c") if "c" in axes else None
+        if c_axis is None:
+            return np.moveaxis(arr, (y_axis, x_axis), (0, 1))
+        return np.moveaxis(arr, (y_axis, x_axis, c_axis), (0, 1, 2))
+
+    if arr.ndim == 3:
+        if arr.shape[-1] in (1, 3, 4) and not (
+            arr.shape[0] in (1, 3, 4) and arr.shape[1] > 4
+        ):
+            return arr
+        if arr.shape[0] in (1, 3, 4):
+            return np.moveaxis(arr, 0, -1)
+    return arr
+
+
+def _to_display_uint8(arr: np.ndarray, axes: tuple[str, ...] | None = None) -> np.ndarray:
+    arr = _to_yxc_array(arr, axes)
+    if arr.ndim == 3 and arr.shape[-1] == 1:
+        arr = arr[:, :, 0]
+
+    if arr.dtype == np.uint8:
+        return arr
+    if np.issubdtype(arr.dtype, np.integer):
+        info = np.iinfo(arr.dtype)
+        return (arr.astype(np.float32) / max(1, info.max) * 255.0).clip(0, 255).astype(np.uint8)
+
+    arr_f = arr.astype(np.float32)
+    finite = np.isfinite(arr_f)
+    if finite.any() and float(np.nanmax(arr_f)) <= 1.0:
+        arr_f = arr_f * 255.0
+    return np.nan_to_num(arr_f, nan=0.0).clip(0, 255).astype(np.uint8)
+
+
+def _normalize_qc_display_mode(qc_display_mode: str | None) -> str:
+    normalized = str(qc_display_mode or "auto").strip().lower().replace("-", "_")
+    aliases = {
+        "auto": "auto",
+        "raw": "raw_rgb",
+        "raw_rgb": "raw_rgb",
+        "rgb": "raw_rgb",
+        "mask": "mask",
+        "tissue_mask": "mask",
+        "masked": "masked_rgb",
+        "masked_rgb": "masked_rgb",
+        "triptych": "triptych",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "qc_display_mode must be one of 'auto', 'raw_rgb', 'mask', 'masked_rgb', or 'triptych'."
+        )
+    return aliases[normalized]
+
+
+def _ngff_primary_rgb_mode(path: Path) -> str | None:
+    try:
+        root = zarr.open_group(str(path), mode="r")
+        mode = root.attrs.get("primary_rgb_mode")
+        if mode is not None:
+            return str(mode)
+    except Exception:
+        pass
+    manifest_path = path / "tissue_manifest.json"
+    if manifest_path.exists():
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            mode = payload.get("primary_rgb_mode")
+            if mode is not None:
+                return str(mode)
+        except Exception:
+            return None
+    return None
+
+
+def _load_ngff_mask_for_dataset(path: Path, dataset_path: str) -> np.ndarray | None:
+    mask_path = path / "labels" / "tissue_mask" / dataset_path
+    if not mask_path.exists():
+        return None
+    mask_group_path = path / "labels" / "tissue_mask"
+    try:
+        axes = _ngff_axes(mask_group_path)
+    except Exception:
+        axes = ("y", "x")
+    arr = zarr.open_array(str(mask_path), mode="r")
+    mask = _to_yxc_array(np.asarray(arr[...]), axes)
+    if mask.ndim == 3:
+        mask = mask[..., 0]
+    return mask.astype(bool)
+
+
+def _mask_rgb_for_display(rgb: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+    if mask is None:
+        return rgb
+    if rgb.ndim == 2:
+        return np.where(mask, rgb, 0).astype(rgb.dtype)
+    return np.where(mask[..., None], rgb, 0).astype(rgb.dtype)
+
+
+def _thumbnail_array(arr: np.ndarray, *, size: int, mode: str) -> Image.Image:
+    img = Image.fromarray(_to_display_uint8(arr))
+    if img.mode != mode:
+        img = img.convert(mode)
+    img.thumbnail((size, size), Image.BICUBIC)
+    return img.copy()
+
+
+def _triptych_thumbnail(
+    *,
+    raw: np.ndarray,
+    mask: np.ndarray | None,
+    size: int,
+    mode: str,
+) -> Image.Image:
+    if mask is None:
+        raise ValueError("triptych QC requires labels/tissue_mask.")
+    raw_img = _thumbnail_array(raw, size=size, mode=mode)
+    mask_img = _thumbnail_array((mask.astype(np.uint8) * 255), size=size, mode=mode)
+    masked_img = _thumbnail_array(_mask_rgb_for_display(raw, mask), size=size, mode=mode)
+    w = max(raw_img.width, mask_img.width, masked_img.width)
+    h = max(raw_img.height, mask_img.height, masked_img.height)
+    panels = [ImageOps.pad(img, (w, h), color=(255, 255, 255)) for img in (raw_img, mask_img, masked_img)]
+    out = Image.new(mode, (w * 3 + 2, h), (255, 255, 255))
+    for idx, panel in enumerate(panels):
+        out.paste(panel, (idx * (w + 1), 0))
+    return out
+
+
+def _choose_ngff_dataset_path(
+    path: Path,
+    *,
+    preferred_size: int,
+    prefer_full_resolution: bool = False,
+    max_full_res_pixels: int | None = None,
+) -> str:
+    dataset_paths = _ngff_dataset_paths(path)
+    axes = _ngff_axes(path)
+    if prefer_full_resolution and dataset_paths:
+        first = dataset_paths[0]
+        arr = zarr.open_array(str(path / first), mode="r")
+        y, x = _array_yx_shape(tuple(arr.shape), axes)
+        if max_full_res_pixels is None or int(y) * int(x) <= int(max_full_res_pixels):
+            return first
+
+    chosen = dataset_paths[-1]
+    for dataset_path in reversed(dataset_paths):
+        arr = zarr.open_array(str(path / dataset_path), mode="r")
+        y, x = _array_yx_shape(tuple(arr.shape), axes)
+        if max(y, x) >= preferred_size:
+            chosen = dataset_path
+            break
+    return chosen
+
+
+def _load_ngff_level(
+    path: Path,
+    *,
+    preferred_size: int = 512,
+    prefer_full_resolution: bool = False,
+    max_full_res_pixels: int | None = None,
+) -> NGFFLevelSelection:
+    axes = _ngff_axes(path)
+    chosen = _choose_ngff_dataset_path(
+        path,
+        preferred_size=preferred_size,
+        prefer_full_resolution=prefer_full_resolution,
+        max_full_res_pixels=max_full_res_pixels,
+    )
+    arr = zarr.open_array(str(path / chosen), mode="r")
+    raw = np.asarray(arr[...])
+    return NGFFLevelSelection(
+        dataset_path=chosen,
+        axes=axes,
+        raw_shape=tuple(map(int, raw.shape)),
+        array_yxc=_to_yxc_array(raw, axes),
+    )
+
+
+def _load_ngff_level_array(path: Path, *, preferred_size: int = 512) -> np.ndarray:
+    return _load_ngff_level(path, preferred_size=preferred_size).array_yxc
+
+
+def _load_ngff_thumbnail(
+    path: Path,
+    *,
+    size: int,
+    mode: str,
+    qc_display_mode: str = "auto",
+) -> Image.Image:
+    selection = _load_ngff_level(
+        path,
+        preferred_size=size,
+        prefer_full_resolution=True,
+        max_full_res_pixels=NGFF_THUMBNAIL_FULL_RES_MAX_PIXELS,
+    )
+    display_mode = _normalize_qc_display_mode(qc_display_mode)
+    primary_rgb_mode = (_ngff_primary_rgb_mode(path) or "unmasked_rgb").strip().lower()
+    mask = _load_ngff_mask_for_dataset(path, selection.dataset_path)
+    raw = _to_display_uint8(selection.array_yxc)
+
+    if display_mode == "auto":
+        if primary_rgb_mode == "masked_rgb":
+            display_mode = "masked_rgb"
+        elif mask is not None:
+            display_mode = "masked_rgb"
+        else:
+            display_mode = "raw_rgb"
+
+    if display_mode == "raw_rgb":
+        if primary_rgb_mode == "masked_rgb":
+            raise ValueError(
+                "Raw RGB is not stored in this masked-only production artifact. "
+                "Use a debug/unmasked profile or regenerate from the source VSI/ETS."
+            )
+        return _thumbnail_array(raw, size=size, mode=mode)
+    if display_mode == "mask":
+        if mask is None:
+            raise ValueError("QC mask display requested, but labels/tissue_mask is not present.")
+        return _thumbnail_array(mask.astype(np.uint8) * 255, size=size, mode=mode)
+    if display_mode == "triptych":
+        if primary_rgb_mode == "masked_rgb":
+            raise ValueError(
+                "Triptych QC requires raw RGB, but this artifact stores masked RGB as primary. "
+                "Use a debug/unmasked profile or regenerate from the source VSI/ETS."
+            )
+        return _triptych_thumbnail(raw=raw, mask=mask, size=size, mode=mode)
+
+    if primary_rgb_mode == "masked_rgb":
+        return _thumbnail_array(raw, size=size, mode=mode)
+    return _thumbnail_array(_mask_rgb_for_display(raw, mask), size=size, mode=mode)
+
+
+def _channel_stats(arr: np.ndarray) -> dict[str, float | bool]:
+    arr = np.asarray(arr)
+    if arr.ndim != 3 or arr.shape[-1] < 3:
+        return {}
+    rgb = arr[..., :3].reshape(-1, 3).astype(np.float64)
+    absdiffs = {
+        "rg": float(np.mean(np.abs(rgb[:, 0] - rgb[:, 1]))),
+        "rb": float(np.mean(np.abs(rgb[:, 0] - rgb[:, 2]))),
+        "gb": float(np.mean(np.abs(rgb[:, 1] - rgb[:, 2]))),
+    }
+    return {
+        "image_mean_red": float(rgb[:, 0].mean()),
+        "image_mean_green": float(rgb[:, 1].mean()),
+        "image_mean_blue": float(rgb[:, 2].mean()),
+        "image_std_red": float(rgb[:, 0].std()),
+        "image_std_green": float(rgb[:, 1].std()),
+        "image_std_blue": float(rgb[:, 2].std()),
+        "channel_absdiff_rg": absdiffs["rg"],
+        "channel_absdiff_rb": absdiffs["rb"],
+        "channel_absdiff_gb": absdiffs["gb"],
+        "channels_nearly_identical": bool(max(absdiffs.values()) <= 2.0),
+    }
 
 
 def annotate_image(
@@ -443,7 +767,10 @@ def _resolve_manifest_path(input_dir: str | Path, manifest_path: str | Path | No
         return chosen if chosen.exists() else None
 
     default_manifest = _default_manifest_path(input_dir)
-    return default_manifest if default_manifest.exists() else None
+    if default_manifest.exists():
+        return default_manifest
+    derivative_manifest = Path(input_dir) / "manifest.json"
+    return derivative_manifest if derivative_manifest.exists() else None
 
 
 def _normalize_backend(backend: str) -> str:
@@ -455,6 +782,12 @@ def _normalize_backend(backend: str) -> str:
 
 
 def _image_size(path: Path) -> tuple[int, int]:
+    if _is_ome_zarr_path(path):
+        axes = _ngff_axes(path)
+        dataset_path = _ngff_dataset_paths(path)[0]
+        arr = zarr.open_array(str(path / dataset_path), mode="r")
+        y, x = _array_yx_shape(tuple(arr.shape), axes)
+        return x, y
     with Image.open(path) as img:
         return img.width, img.height
 
@@ -465,8 +798,64 @@ def _legacy_source_image(parsed: dict[str, str | int]) -> str:
     return f"{prefix}_{slide_label}"
 
 
+def _derivative_source_image(payload: dict[str, Any]) -> str:
+    for key in ("source_vsi", "source_ome_zarr", "source_ets"):
+        value = payload.get(key)
+        if value:
+            return Path(str(value)).name
+    return "unknown_source"
+
+
+def _record_from_derivative_manifest(
+    input_dir: Path,
+    manifest_path: Path,
+    payload: dict[str, Any],
+    *,
+    fallback_overall_index: int,
+) -> QCRecord | None:
+    tissue_dir = manifest_path.parent
+    if not tissue_dir.exists():
+        logger.warning(
+            "Skipping derivative manifest with missing tissue directory: %s", manifest_path
+        )
+        return None
+    try:
+        relative_path = str(tissue_dir.relative_to(input_dir))
+    except ValueError:
+        relative_path = str(tissue_dir)
+    if relative_path == "":
+        relative_path = "."
+
+    try:
+        tissue_index = int(payload.get("tissue_index", fallback_overall_index - 1))
+    except (TypeError, ValueError):
+        tissue_index = fallback_overall_index - 1
+    width, height = _image_size(tissue_dir)
+    overall_index = tissue_index + 1
+    return _make_qc_record(
+        relative_path=relative_path,
+        filename=tissue_dir.name,
+        source_image=_derivative_source_image(payload),
+        tile_index_on_source=tissue_index,
+        overall_index=overall_index,
+        overall_label=f"{overall_index:04d}",
+        width=width,
+        height=height,
+        component_qc=None,
+    )
+
+
 def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecord]:
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if payload.get("role") == "derivative":
+        record = _record_from_derivative_manifest(
+            input_dir,
+            manifest_path,
+            payload,
+            fallback_overall_index=1,
+        )
+        return [record] if record is not None else []
+
     records = []
     for item in payload.get("records", []):
         record = _make_qc_record(
@@ -483,7 +872,45 @@ def _load_manifest_records(input_dir: Path, manifest_path: Path) -> list[QCRecor
         if record.path(input_dir).exists():
             records.append(record)
         else:
-            logger.warning("Skipping manifest record for missing QC image: %s", record.relative_path)
+            logger.warning(
+                "Skipping manifest record for missing QC image: %s", record.relative_path
+            )
+    return records
+
+
+def _load_derivative_manifest_records(input_dir: Path) -> list[QCRecord]:
+    if _is_ome_zarr_path(input_dir):
+        manifest_paths = [input_dir / "tissue_manifest.json"]
+    else:
+        manifest_paths = sorted(input_dir.glob("*.ome.zarr/tissue_manifest.json"))
+
+    records: list[QCRecord] = []
+    for ordinal, manifest_path in enumerate(manifest_paths, start=1):
+        if not manifest_path.exists():
+            continue
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            logger.warning("Skipping malformed derivative manifest %s: %s", manifest_path, exc)
+            continue
+        if payload.get("role") != "derivative":
+            continue
+        record = _record_from_derivative_manifest(
+            input_dir,
+            manifest_path,
+            payload,
+            fallback_overall_index=ordinal,
+        )
+        if record is not None and record.path(input_dir).exists():
+            records.append(record)
+
+    records.sort(
+        key=lambda record: (
+            record.source_image,
+            record.tile_index_on_source,
+            record.filename,
+        )
+    )
     return records
 
 
@@ -521,7 +948,13 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
             path = Path(str(item.get("path", "")))
             if not path.is_absolute():
                 path = input_dir / path
-            if not path.exists() or path.suffix.lower() not in {".tif", ".tiff", ".png", ".jpg", ".jpeg"}:
+            if not path.exists() or path.suffix.lower() not in {
+                ".tif",
+                ".tiff",
+                ".png",
+                ".jpg",
+                ".jpeg",
+            }:
                 continue
 
             width = int(item.get("width", 0) or 0)
@@ -533,7 +966,9 @@ def _load_processing_metadata_records(input_dir: Path) -> list[QCRecord]:
                 _make_qc_record(
                     relative_path=str(path.relative_to(input_dir)),
                     filename=path.name,
-                    source_image=str(item.get("source_image") or payload.get("input_path") or metadata_path.stem),
+                    source_image=str(
+                        item.get("source_image") or payload.get("input_path") or metadata_path.stem
+                    ),
                     tile_index_on_source=int(item.get("tile_index_on_source", 0)),
                     overall_index=0,
                     overall_label="",
@@ -610,6 +1045,9 @@ def load_qc_records(
     metadata_records = _load_processing_metadata_records(input_dir)
     if metadata_records:
         return metadata_records
+    derivative_records = _load_derivative_manifest_records(input_dir)
+    if derivative_records:
+        return derivative_records
     return _load_legacy_qc_records(input_dir, pattern=pattern)
 
 
@@ -643,25 +1081,56 @@ def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataF
     input_dir = Path(input_dir)
     rows: list[dict[str, Any]] = []
     for record in records:
-        with Image.open(record.path(input_dir)) as img:
-            arr = np.asarray(img)
-            rows.append(
-                {
-                    "relative_path": record.relative_path,
-                    "filename": record.filename,
-                    "source_image": record.source_image,
-                    "tile_index_on_source": record.tile_index_on_source,
-                    "overall_index": record.overall_index,
-                    "overall_label": record.overall_label,
-                    "width": img.width,
-                    "height": img.height,
-                    "area_px": img.width * img.height,
-                    "image_mean_intensity": float(arr.mean()),
-                    "image_std_intensity": float(arr.std()),
-                    "artifact_likely": _record_artifact_likely(record),
-                    "artifact_reason": _record_artifact_reason(record),
-                }
+        path = record.path(input_dir)
+        if _is_ome_zarr_path(path):
+            selection = _load_ngff_level(
+                path,
+                preferred_size=512,
+                prefer_full_resolution=True,
+                max_full_res_pixels=NGFF_STATS_FULL_RES_MAX_PIXELS,
             )
+            arr = _to_display_uint8(selection.array_yxc)
+            row = {
+                "relative_path": record.relative_path,
+                "filename": record.filename,
+                "source_image": record.source_image,
+                "tile_index_on_source": record.tile_index_on_source,
+                "overall_index": record.overall_index,
+                "overall_label": record.overall_label,
+                "width": record.width,
+                "height": record.height,
+                "area_px": record.width * record.height,
+                "image_mean_intensity": float(arr.mean()),
+                "image_std_intensity": float(arr.std()),
+                "ngff_dataset_path": selection.dataset_path,
+                "ngff_axes": ",".join(selection.axes) if selection.axes is not None else "",
+                "ngff_raw_shape": "x".join(str(dim) for dim in selection.raw_shape),
+                "artifact_likely": _record_artifact_likely(record),
+                "artifact_reason": _record_artifact_reason(record),
+            }
+            row.update(_channel_stats(arr))
+            rows.append(row)
+            continue
+
+        with Image.open(path) as img:
+            arr = np.asarray(img)
+            row = {
+                "relative_path": record.relative_path,
+                "filename": record.filename,
+                "source_image": record.source_image,
+                "tile_index_on_source": record.tile_index_on_source,
+                "overall_index": record.overall_index,
+                "overall_label": record.overall_label,
+                "width": img.width,
+                "height": img.height,
+                "area_px": img.width * img.height,
+                "image_mean_intensity": float(arr.mean()),
+                "image_std_intensity": float(arr.std()),
+                "artifact_likely": _record_artifact_likely(record),
+                "artifact_reason": _record_artifact_reason(record),
+            }
+            row.update(_channel_stats(arr))
+            rows.append(row)
             component_qc = _record_component_qc(record)
             if component_qc:
                 rows[-1].update(
@@ -695,7 +1164,9 @@ def _build_label(
         return f"{label}|ART?" if _record_artifact_likely(record) else label
     if label_mode == "both":
         if master:
-            label = f"s{group_ordinal:02d}:t{record.tile_index_on_source:02d}|g{record.overall_label}"
+            label = (
+                f"s{group_ordinal:02d}:t{record.tile_index_on_source:02d}|g{record.overall_label}"
+            )
         else:
             label = f"t{record.tile_index_on_source:02d}|g{record.overall_label}"
         return f"{label}|ART?" if _record_artifact_likely(record) else label
@@ -724,6 +1195,7 @@ def render_qc_grids(
     padding: int = 1,
     columns: int | str = "auto",
     label_mode: str = "slice",
+    qc_display_mode: str = "auto",
     backend: str = "pil",
     write_master: bool = True,
     write_per_slide: bool = True,
@@ -740,7 +1212,11 @@ def render_qc_grids(
         for group_ordinal, _source_image, group_records in grouped:
             thumbs = []
             for record in group_records:
-                thumb = load_thumbnail(record.path(input_dir), thumb_size)
+                thumb = load_thumbnail(
+                    record.path(input_dir),
+                    thumb_size,
+                    qc_display_mode=qc_display_mode,
+                )
                 label = _build_label(record, label_mode)
                 if label:
                     thumb = annotate_image(thumb, label)
@@ -763,7 +1239,11 @@ def render_qc_grids(
         all_thumbs = []
         for group_ordinal, _source_image, group_records in grouped:
             for record in group_records:
-                thumb = load_thumbnail(record.path(input_dir), thumb_size)
+                thumb = load_thumbnail(
+                    record.path(input_dir),
+                    thumb_size,
+                    qc_display_mode=qc_display_mode,
+                )
                 label = _build_label(record, label_mode, group_ordinal=group_ordinal, master=True)
                 if label:
                     thumb = annotate_image(thumb, label)
@@ -796,6 +1276,7 @@ def run_qc_workflow(
     padding: int = 1,
     columns: int | str = "auto",
     label_mode: str = "both",
+    qc_display_mode: str = "auto",
     backend: str = "pil",
     write_master: bool = True,
     write_per_slide: bool = True,
@@ -827,6 +1308,7 @@ def run_qc_workflow(
         padding=padding,
         columns=columns,
         label_mode=label_mode,
+        qc_display_mode=qc_display_mode,
         backend=backend,
         write_master=write_master,
         write_per_slide=write_per_slide,
@@ -844,7 +1326,9 @@ def run_qc_workflow(
         stats_csv=stats_csv,
         records_manifest=records_manifest,
     )
-    logger.info("Created %d QC records and %d per-slide grids", len(records), len(artifacts.per_slide_grids))
+    logger.info(
+        "Created %d QC records and %d per-slide grids", len(records), len(artifacts.per_slide_grids)
+    )
     return QCWorkflowResult(records=records, artifacts=artifacts)
 
 
@@ -855,6 +1339,7 @@ def build_qc_grids(
     padding: int = 1,
     columns: int | str = "auto",
     label_mode: str = "slice",
+    qc_display_mode: str = "auto",
     backend: str = "pil",
     create_master: bool = True,
 ) -> list[Path]:
@@ -892,6 +1377,7 @@ def build_qc_grids(
         padding=padding,
         columns=columns,
         label_mode=label_mode,
+        qc_display_mode=qc_display_mode,
         backend=backend,
         write_master=create_master,
         write_per_slide=True,
@@ -924,12 +1410,14 @@ class QCGridBuilder:
         padding: int = 1,
         columns: int | str = "auto",
         label_mode: str = "slice",
+        qc_display_mode: str = "auto",
         backend: str = "pil",
     ):
         self.thumb_size = thumb_size
         self.padding = padding
         self.columns = columns
         self.label_mode = label_mode
+        self.qc_display_mode = qc_display_mode
         self.backend = backend
 
     def build(
@@ -946,6 +1434,7 @@ class QCGridBuilder:
             padding=self.padding,
             columns=self.columns,
             label_mode=self.label_mode,
+            qc_display_mode=self.qc_display_mode,
             backend=self.backend,
             create_master=create_master,
         )

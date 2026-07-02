@@ -27,9 +27,9 @@ def restricted_delaunay(image, points, isoval, dx, verbose=True):
     image = np.asarray(image, dtype=np.float64)
     points = np.asarray(points, dtype=np.float64)
     dx = np.asarray(dx, dtype=np.float64)
-    N = 3 # The dimensions of our points
-    delaunay_options = 'Qt Qbb Qc' if N <= 3 else 'Qt Qbb Qc Qx' # Set the QHull options
-    voronoi_options = 'Qbb' if N <= 3 else 'Qbb Qx' # Set the QHull options
+    N = 3  # The dimensions of our points
+    delaunay_options = "Qt Qbb Qc" if N <= 3 else "Qt Qbb Qc Qx"  # Set the QHull options
+    voronoi_options = "Qbb" if N <= 3 else "Qbb Qx"  # Set the QHull options
 
     x_axis = np.arange(image.shape[2], dtype=np.float64) * dx[0]
     y_axis = np.arange(image.shape[1], dtype=np.float64) * dx[1]
@@ -135,8 +135,7 @@ def restricted_delaunay_from_image(image, OPT=None):
     points = grid_based_sampling_old(verts, min_distance)
     if points.shape[0] < 4:
         raise ValueError(
-            "Restricted Delaunay needs at least 4 sampled surface points; "
-            f"got {points.shape[0]}."
+            f"Restricted Delaunay needs at least 4 sampled surface points; got {points.shape[0]}."
         )
 
     faces_out, vertices_out = restricted_delaunay(image, points, isoval, dx, verbose=verbose)
@@ -149,13 +148,16 @@ def restricted_delaunay_from_image(image, OPT=None):
     else:
         faces_out = oriented
 
-    volume = np.sum(
+    volume = (
         np.sum(
-            vertices_out[faces_out[:, 0]]
-            * np.cross(vertices_out[faces_out[:, 1]], vertices_out[faces_out[:, 2]]),
-            axis=1,
+            np.sum(
+                vertices_out[faces_out[:, 0]]
+                * np.cross(vertices_out[faces_out[:, 1]], vertices_out[faces_out[:, 2]]),
+                axis=1,
+            )
         )
-    ) / 6
+        / 6
+    )
     if volume < 0:
         faces_out = faces_out[:, [0, 2, 1]]
 

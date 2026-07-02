@@ -90,8 +90,7 @@ def test_lineage_tracking():
         # Test 1: Basic run lifecycle
         print("  Testing run lifecycle...")
         run_id = tracker.start_run(
-            job_name="test_job",
-            inputs=[{"name": "input.zarr", "namespace": "test://data"}]
+            job_name="test_job", inputs=[{"name": "input.zarr", "namespace": "test://data"}]
         )
         print(f"    Started run: {run_id[:8]}...")
 
@@ -99,7 +98,7 @@ def test_lineage_tracking():
             run_id=run_id,
             job_name="test_job",
             outputs=[{"name": "output.zarr"}],
-            metrics={"n_tiles": 42, "processing_time": 123.4}
+            metrics={"n_tiles": 42, "processing_time": 123.4},
         )
         print("    Completed run")
 
@@ -152,10 +151,7 @@ def test_mlflow_config():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Test config creation
-        config = SciServerMLFlowConfig(
-            experiment_name="test-experiment",
-            local_fallback_dir=tmpdir
-        )
+        config = SciServerMLFlowConfig(experiment_name="test-experiment", local_fallback_dir=tmpdir)
 
         result = config.get_config()
         print(f"  Tracking URI: {result['tracking_uri']}")
@@ -186,10 +182,7 @@ def test_integration():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create pipeline with manual storage config
-        pipeline = SciServerPipeline(
-            experiment_name="integration-test",
-            auto_setup=False
-        )
+        pipeline = SciServerPipeline(experiment_name="integration-test", auto_setup=False)
 
         # Override storage for testing
         pipeline.storage = StorageConfig.for_local(tmpdir)
@@ -202,9 +195,7 @@ def test_integration():
         # Test tracked experiment
         print("  Testing tracked experiment...")
         with pipeline.tracked_experiment(
-            "test-specimen",
-            inputs=["input.vsi"],
-            tags={"test": "true"}
+            "test-specimen", inputs=["input.vsi"], tags={"test": "true"}
         ) as exp:
             exp.log_param("chunk_size", 512)
             exp.log_metric("n_tiles", 100)
@@ -244,6 +235,7 @@ def main():
         except Exception as e:
             print(f"\n  [ERROR] {e}")
             import traceback
+
             traceback.print_exc()
             results.append((name, False, str(e)))
 

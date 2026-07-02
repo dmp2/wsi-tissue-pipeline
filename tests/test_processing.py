@@ -218,6 +218,39 @@ class TestSegmentation:
 class TestTileExtraction:
     """Test tile extraction functions."""
 
+    def test_bounds_yx_half_open_helpers(self):
+        """Internal bounds helpers should use half-open YX coordinates."""
+        from wsi_pipeline.tiles.generator import BoundsYX
+
+        bounds = BoundsYX(y0=-2, x0=3, y1=7, x1=13)
+        clipped = bounds.clip((5, 10))
+
+        assert bounds.h == 9
+        assert bounds.w == 10
+        assert bounds.as_xyxy() == (3, -2, 13, 7)
+        assert clipped.as_yx() == (0, 3, 5, 10)
+        assert clipped.h == 5
+        assert clipped.w == 7
+        assert clipped.halo(1, (5, 10)).as_yx() == (0, 2, 5, 10)
+
+    def test_project_label_mask_matches_integer_repeat(self):
+        """Pixel-center projection should match nearest-neighbor repeat for exact 2x."""
+        from wsi_pipeline.tiles.generator import BoundsYX, project_label_mask_to_source_region
+
+        labels = np.zeros((4, 5), dtype=np.int32)
+        labels[1:3, 2:4] = 7
+        projected = project_label_mask_to_source_region(
+            labels,
+            label_id=7,
+            source_region_yx=BoundsYX(0, 0, 8, 10),
+            label_crop_seg_yx=BoundsYX(0, 0, 4, 5),
+            scale_y=2.0,
+            scale_x=2.0,
+        )
+
+        expected = np.repeat(np.repeat(labels == 7, 2, axis=0), 2, axis=1)
+        np.testing.assert_array_equal(projected, expected)
+
     def test_extract_tissue_tiles(self, sample_image: Path, temp_dir: Path):
         """Test extracting tissue tiles from segmented image."""
         from wsi_pipeline.wsi_processing import segment_tissue, extract_tissue_tiles
@@ -330,6 +363,87 @@ class TestTileExtraction:
         assert len(tiles) == 2
         assert shapes[0] == shapes[1]
         assert shapes[0][0] == shapes[0][1]
+
+    def test_generate_tissue_tile_records_include_parent_bounds(self):
+        """Tile records should preserve source and segmentation crop windows."""
+        from wsi_pipeline.tiles.generator import generate_tissue_tile_records
+
+        img = da.from_array(np.zeros((3, 80, 120), dtype=np.uint8), chunks=(3, 40, 40))
+        mask = np.zeros((8, 12), dtype=bool)
+        mask[2:5, 3:7] = True
+
+        records, tile_dim = generate_tissue_tile_records(
+            img,
+            mask,
+            tile_frame_level="source",
+            chunk=16,
+            pad_multiple=16,
+            extra_margin_px=0,
+        )
+
+        assert len(records) == 1
+        assert records[0].tissue_index == 0
+        assert records[0].crop_bounds_source_level == (26, 11, 74, 59)
+        assert records[0].crop_bounds_segmentation_level == (2, 1, 8, 6)
+        assert records[0].tile.shape == (48, 48, 3)
+        assert tile_dim == 48
+
+    def test_generate_tissue_tile_records_can_frame_at_segmentation_level(self):
+        """Cross-level notebook framing should size the frame before source mapping."""
+        from wsi_pipeline.tiles.generator import generate_tissue_tile_records
+
+        img = da.from_array(np.zeros((3, 80, 160), dtype=np.uint8), chunks=(3, 40, 40))
+        mask = np.zeros((40, 80), dtype=bool)
+        mask[12:32, 20:60] = True
+
+        source_records, source_dim = generate_tissue_tile_records(
+            img,
+            mask,
+            chunk=16,
+            pad_multiple=16,
+            extra_margin_px=0,
+            tile_frame_level="source",
+        )
+        segmentation_records, segmentation_source_dim = generate_tissue_tile_records(
+            img,
+            mask,
+            chunk=16,
+            pad_multiple=16,
+            extra_margin_px=0,
+            tile_frame_level="segmentation",
+        )
+
+        assert source_dim == 80
+        assert source_records[0].segmentation_tile_dim == 40
+        assert segmentation_records[0].segmentation_tile_dim == 48
+        assert segmentation_source_dim == 96
+        assert segmentation_records[0].tile.shape == (96, 96, 3)
+        assert segmentation_records[0].crop_bounds_segmentation_level == (16, 0, 64, 40)
+        assert segmentation_records[0].crop_bounds_source_level == (32, 0, 128, 80)
+
+    def test_generate_tissue_tile_records_uses_shape_ratio_mapping(self):
+        """Non-power-of-two level shapes should drive source crop mapping."""
+        from wsi_pipeline.tiles.generator import generate_tissue_tile_records
+
+        img = da.from_array(np.zeros((3, 81, 161), dtype=np.uint8), chunks=(3, 40, 40))
+        mask = np.zeros((40, 80), dtype=bool)
+        mask[12:32, 20:60] = True
+
+        records, tile_dim = generate_tissue_tile_records(
+            img,
+            mask,
+            chunk=16,
+            pad_multiple=16,
+            extra_margin_px=0,
+            tile_frame_level="segmentation",
+        )
+
+        assert tile_dim == 99
+        assert records[0].segmentation_tile_dim == 48
+        assert records[0].scale_y == 81 / 40
+        assert records[0].scale_x == 161 / 80
+        assert records[0].crop_bounds_segmentation_level == (16, 0, 64, 40)
+        assert records[0].crop_bounds_source_level == (31, 0, 130, 81)
 
 
 class TestProcessWSI:

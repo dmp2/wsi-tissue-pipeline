@@ -90,7 +90,9 @@ class LoadedInputs:
     atlas_inputs: AtlasInputs | None = None
     atlas_down: list[int] | None = None
     initial_affine: np.ndarray | None = None
-    orientation_resolution: OrientationResolution = field(default_factory=none_orientation_resolution)
+    orientation_resolution: OrientationResolution = field(
+        default_factory=none_orientation_resolution
+    )
     warnings: list[str] | None = None
     transformation_graph_script: Path | None = None
     transformation_graph_script_source: str | None = None
@@ -170,9 +172,7 @@ def _attach_registration_log_handler(
     handler = logging.FileHandler(log_path, encoding="utf-8")
     handler._registration_log_handler = True  # type: ignore[attr-defined]
     handler.setLevel(logging.DEBUG)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     package_logger.addHandler(handler)
     return log_path, package_logger, handler
 
@@ -270,9 +270,7 @@ def _compute_target_downsampling(
     locked_axes: set[int] | frozenset[int] = frozenset(),
 ) -> list[int]:
     if per_axis_resolution_um is not None and len(per_axis_resolution_um) != len(axes):
-        raise ValueError(
-            "per_axis_resolution_um must match the number of target axes"
-        )
+        raise ValueError("per_axis_resolution_um must match the number of target axes")
     down: list[int] = []
     locked = set(locked_axes)
     for axis_index, axis in enumerate(axes):
@@ -349,7 +347,12 @@ def _plan_pre_resampling(
             unchanged_axes = [
                 axis_index
                 for axis_index, (atlas_spacing, reference_spacing, factor) in enumerate(
-                    zip(atlas_native_spacing, atlas_reference_spacing, atlas_downsampling, strict=True)
+                    zip(
+                        atlas_native_spacing,
+                        atlas_reference_spacing,
+                        atlas_downsampling,
+                        strict=True,
+                    )
                 )
                 if axis_index not in atlas_locked_axes
                 and atlas_spacing >= reference_spacing
@@ -399,9 +402,7 @@ def _resolve_stage_controls(
             and config.stage_controls.atlas_registration_enabled
             and config.atlas_registration.enabled
         ),
-        "upsampling": bool(
-            config.stage_controls.upsampling_enabled and config.upsampling.enabled
-        ),
+        "upsampling": bool(config.stage_controls.upsampling_enabled and config.upsampling.enabled),
     }
     skip_reasons: dict[str, str] = {}
     if not stage_controls["self_alignment"]:
@@ -474,11 +475,15 @@ def _load_atlas_inputs(
     if config.atlas_path is None:
         return None
     xI, atlas_image, title, names = backend.read_data(str(config.atlas_path))
-    xI_scaled = _scale_axes([np.asarray(axis, dtype=np.float32) for axis in xI], config.units.atlas_unit_scale)
+    xI_scaled = _scale_axes(
+        [np.asarray(axis, dtype=np.float32) for axis in xI], config.units.atlas_unit_scale
+    )
     labels_axes = None
     labels_data = None
     if config.label_path is not None:
-        labels_axes_raw, labels_data_raw, _label_title, _label_names = backend.read_data(str(config.label_path))
+        labels_axes_raw, labels_data_raw, _label_title, _label_names = backend.read_data(
+            str(config.label_path)
+        )
         labels_axes = _scale_axes(
             [np.asarray(axis, dtype=np.float32) for axis in labels_axes_raw],
             config.units.atlas_unit_scale,
@@ -502,7 +507,9 @@ def _load_init_affine(
         return None, none_orientation_resolution()
     if config.init_affine_path is not None:
         if backend.read_matrix_data is not None:
-            affine = np.asarray(backend.read_matrix_data(str(config.init_affine_path)), dtype=np.float32)
+            affine = np.asarray(
+                backend.read_matrix_data(str(config.init_affine_path)), dtype=np.float32
+            )
         else:
             affine = np.loadtxt(config.init_affine_path, dtype=np.float32)
         return affine, matrix_orientation_resolution()
@@ -606,7 +613,9 @@ def _target_sample_ids(target: EmlddmmTarget) -> list[str]:
     manifest = target.manifest or {}
     entries = manifest.get("entries", [])
     if entries:
-        return [str(entry.get("sample_id", f"slice_{idx:04d}")) for idx, entry in enumerate(entries)]
+        return [
+            str(entry.get("sample_id", f"slice_{idx:04d}")) for idx, entry in enumerate(entries)
+        ]
     return [f"slice_{idx:04d}" for idx in range(target.J.shape[1])]
 
 
@@ -730,9 +739,15 @@ def _expected_stage_outputs(
     if include_atlas:
         expected["atlas_registration"] = [
             str(_stage_dir(registration_output, "atlas_registration") / "inputs.json"),
-            str(_stage_dir(registration_output, "atlas_registration") / "atlas_to_target_config.json"),
+            str(
+                _stage_dir(registration_output, "atlas_registration")
+                / "atlas_to_target_config.json"
+            ),
             str(_stage_dir(registration_output, "atlas_registration") / "effective_config.json"),
-            str(_stage_dir(registration_output, "atlas_registration") / "transformation_graph_config.json"),
+            str(
+                _stage_dir(registration_output, "atlas_registration")
+                / "transformation_graph_config.json"
+            ),
             str(
                 _stage_dir(registration_output, "atlas_registration")
                 / "transformation_graph_execution_config.json"
@@ -815,7 +830,9 @@ def _resolve_transformation_graph_script(
         candidates.append(Path(module_file).resolve().parent / "transformation_graph_v01.py")
     module_paths = getattr(backend.module, "__path__", None)
     if module_paths:
-        candidates.extend(Path(path).resolve() / "transformation_graph_v01.py" for path in module_paths)
+        candidates.extend(
+            Path(path).resolve() / "transformation_graph_v01.py" for path in module_paths
+        )
 
     for module_name in ("emlddmm.transformation_graph_v01", "transformation_graph_v01", "emlddmm"):
         try:
@@ -1093,7 +1110,10 @@ def _load_inputs_for_plan(
             backend,
         )
         warnings = _merge_warnings(warnings, graph_warnings)
-        if getattr(backend, "origin_type", None) == "vendored" and config.transformation_graph.execute:
+        if (
+            getattr(backend, "origin_type", None) == "vendored"
+            and config.transformation_graph.execute
+        ):
             warnings.append(
                 "Transformation-graph execution is using the vendored registration backend; install "
                 "the external emlddmm package for the canonical script location."
@@ -1385,7 +1405,11 @@ def plan_emlddmm_workflow(
         used_legacy_output_alias=used_legacy_output_alias,
     )
     backend_obj = backend or resolve_emlddmm_backend()
-    registration_output_path = Path(registration_output) if registration_output is not None else resolved_dataset_root / "emlddmm"
+    registration_output_path = (
+        Path(registration_output)
+        if registration_output is not None
+        else resolved_dataset_root / "emlddmm"
+    )
     loaded = _load_inputs_for_plan(
         resolved_dataset_root,
         registration_output_path.resolve(),
@@ -1490,7 +1514,9 @@ def run_emlddmm_workflow(
                 config,
                 backend_obj,
                 used_legacy_output_alias=resolved_used_legacy_output_alias,
-                config_override_path=Path(emlddmm_config).resolve() if emlddmm_config is not None else None,
+                config_override_path=Path(emlddmm_config).resolve()
+                if emlddmm_config is not None
+                else None,
                 original_cli_argv=original_cli_argv,
             )
             resolved_plan = _build_resolved_plan(loaded, dry_run)
@@ -1593,7 +1619,8 @@ def run_emlddmm_workflow(
                         stage_name,
                         enabled=stage_plan.enabled,
                         status=status,
-                        output_dir=stage_plan.output_dir or _stage_dir(registration_output_dir, stage_name),
+                        output_dir=stage_plan.output_dir
+                        or _stage_dir(registration_output_dir, stage_name),
                         reason=stage_plan.reason,
                     )
                 )
@@ -1979,7 +2006,9 @@ def run_emlddmm_workflow(
                 artifacts=artifacts,
             ),
         )
-        merged_warnings = _merge_warnings(summary_payload["warnings"], provisional_provenance.warnings)
+        merged_warnings = _merge_warnings(
+            summary_payload["warnings"], provisional_provenance.warnings
+        )
 
         if loaded.config.outputs.write_qc_report:
             logger.info("Building registration QC report")

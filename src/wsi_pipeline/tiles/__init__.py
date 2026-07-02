@@ -12,6 +12,7 @@ Naming convention: ``{PREFIX}_{SLIDE:02d}_{SLICE:02d}_{OVERALL:04d}.{ext}``
 
 Public API
 ----------
+generate_tissue_tile_records  Build Dask tile records with crop metadata
 generate_tissue_tiles   Build list of Dask tile arrays from a segmentation mask
 generate_tissue_images  Legacy function (saves tiles to disk directly)
 save_tile               Save a single numpy tile to disk
@@ -25,9 +26,11 @@ from __future__ import annotations
 
 # Generator functions
 from .generator import (
+    TissueTileRecord,
     center_crop_pad_dask,
     crop_and_pad,
     generate_tissue_images,
+    generate_tissue_tile_records,
     generate_tissue_tiles,
     sort_labels_left_to_right,
 )
@@ -51,6 +54,8 @@ from .naming import (
 
 __all__ = [
     # Generator
+    "TissueTileRecord",
+    "generate_tissue_tile_records",
     "generate_tissue_tiles",
     "center_crop_pad_dask",
     "crop_and_pad",

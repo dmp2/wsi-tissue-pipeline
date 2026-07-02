@@ -53,6 +53,18 @@ def _build_mock_vsi_tree(temp_dir: Path) -> tuple[Path, Path]:
     return vsi_file, ets_file
 
 
+def test_level_shape_uses_ceil_downsampling_for_odd_dimensions():
+    from wsi_pipeline.etsfile import ETSFile
+
+    ets = object.__new__(ETSFile)
+    ets.npix_x = 180149
+    ets.npix_y = 93340
+
+    assert ets.level_shape(0) == (93340, 180149)
+    assert ets.level_shape(1) == (46670, 90075)
+    assert ets.level_shape(7) == (730, 1408)
+
+
 def _mock_vendor_metadata(
     *,
     size_c: int = 3,
@@ -339,6 +351,27 @@ class TestVSIMetadata:
         assert metadata["metadata_sources"]["physical"] == "ets_only"
         assert any("Falling back to ETS-only metadata." in warning for warning in metadata["warnings"])
 
+    def test_get_vsi_metadata_auto_falls_back_when_jnius_import_raises_plain_exception(
+        self,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Auto mode should handle PyJNIus initialization failures that are not RuntimeError."""
+        from wsi_pipeline import vsi_converter
+
+        vsi_file, _ = _build_mock_vsi_tree(temp_dir)
+        monkeypatch.setattr(vsi_converter, "ETSFile", DummyETSFile)
+        monkeypatch.setattr(
+            vsi_converter,
+            "ensure_bioformats_jnius",
+            lambda: (_ for _ in ()).throw(Exception("Unable to find javac")),
+        )
+
+        metadata = vsi_converter.get_vsi_metadata(vsi_file, metadata_backend="auto")
+
+        assert metadata["metadata_sources"]["physical"] == "ets_only"
+        assert any("Falling back to ETS-only metadata." in warning for warning in metadata["warnings"])
+
     def test_get_vsi_metadata_bioformats_backend_is_strict(
         self,
         temp_dir: Path,
@@ -357,6 +390,95 @@ class TestVSIMetadata:
 
         with pytest.raises(RuntimeError, match="Bio-Formats unavailable"):
             vsi_converter.get_vsi_metadata(vsi_file, metadata_backend="bioformats")
+
+    def test_extract_vsi_physical_metadata_uses_bioformats_metadata_tools_class(
+        self,
+        temp_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Bio-Formats metadata extraction should load the current MetadataTools class."""
+        from wsi_pipeline import vsi_converter
+
+        vsi_file, _ = _build_mock_vsi_tree(temp_dir)
+        autoclass_names: list[str] = []
+
+        class _Store:
+            def getPixelsPhysicalSizeX(self, image_index):
+                return 0.25 if image_index == 1 else None
+
+            def getPixelsPhysicalSizeY(self, image_index):
+                return 0.5 if image_index == 1 else None
+
+            def getPixelsPhysicalSizeZ(self, image_index):
+                return None
+
+            def getChannelName(self, image_index, channel_index):
+                return f"s{image_index}c{channel_index}"
+
+        class _MetadataTools:
+            @staticmethod
+            def createOMEXMLMetadata():
+                return _Store()
+
+        class _Reader:
+            sizes = [(100, 100, 3), (1000, 500, 3)]
+
+            def __init__(self):
+                self.series = 0
+
+            def setFlattenedResolutions(self, value):
+                self.flattened = value
+
+            def setMetadataStore(self, store):
+                self.store = store
+
+            def setId(self, path):
+                self.path = path
+
+            def getSeriesCount(self):
+                return len(self.sizes)
+
+            def setSeries(self, series):
+                self.series = series
+
+            def getSizeX(self):
+                return self.sizes[self.series][0]
+
+            def getSizeY(self):
+                return self.sizes[self.series][1]
+
+            def getSizeZ(self):
+                return 1
+
+            def getSizeC(self):
+                return self.sizes[self.series][2]
+
+            def getSizeT(self):
+                return 1
+
+            def close(self):
+                pass
+
+        class _Jnius:
+            @staticmethod
+            def autoclass(name):
+                autoclass_names.append(name)
+                if name == "loci.formats.ImageReader":
+                    return _Reader
+                if name == "loci.formats.MetadataTools":
+                    return _MetadataTools
+                raise RuntimeError(name)
+
+        monkeypatch.setattr(vsi_converter, "ensure_bioformats_jnius", lambda: _Jnius)
+
+        metadata = vsi_converter._extract_vsi_physical_metadata(vsi_file)
+
+        assert "loci.formats.MetadataTools" in autoclass_names
+        assert "loci.formats.meta.MetadataTools" not in autoclass_names
+        assert metadata["series"] == 1
+        assert metadata["sizeX"] == 1000
+        assert metadata["physical_size_x"] == 0.25
+        assert metadata["channel_labels"] == ["s1c0", "s1c1", "s1c2"]
 
     def test_get_vsi_metadata_emits_latest_and_v04_projections(
         self,

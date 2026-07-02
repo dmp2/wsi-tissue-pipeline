@@ -84,7 +84,9 @@ def _image_caption(stage_name: str, path: Path) -> str:
     return path.stem.replace("_", " ")
 
 
-def _discover_stage_images(stage_name: str, stage_dir: Path, root: Path) -> tuple[dict[str, Any], list[str]]:
+def _discover_stage_images(
+    stage_name: str, stage_dir: Path, root: Path
+) -> tuple[dict[str, Any], list[str]]:
     warnings: list[str] = []
     if stage_name == "self_alignment":
         candidates = [path for path in _self_alignment_candidates(stage_dir) if path.exists()]
@@ -233,7 +235,7 @@ def _render_stage(stage: dict[str, Any]) -> str:
         caption = image["caption"]
         images_html += (
             "<figure>"
-            f"<img src=\"{escape(path)}\" alt=\"{escape(caption)}\" loading=\"lazy\">"
+            f'<img src="{escape(path)}" alt="{escape(caption)}" loading="lazy">'
             f"<figcaption>{escape(caption)}</figcaption>"
             "</figure>"
         )
@@ -243,13 +245,13 @@ def _render_stage(stage: dict[str, Any]) -> str:
     if stage.get("reason"):
         reason_html = f"<p><strong>Reason:</strong> {escape(str(stage['reason']))}</p>"
     return (
-        "<section class=\"stage\">"
+        '<section class="stage">'
         f"<h3>{escape(stage['name'])}</h3>"
         f"<p><strong>Status:</strong> {escape(str(stage['status']))}</p>"
         f"{reason_html}"
         f"<p><strong>Gallery:</strong> {gallery['selected_count']} shown"
         f" / {gallery['total_available_count']} available</p>"
-        f"<div class=\"gallery\">{images_html}</div>"
+        f'<div class="gallery">{images_html}</div>'
         "</section>"
     )
 
@@ -287,29 +289,29 @@ def render_registration_report_html(manifest: dict[str, Any]) -> str:
   <section>
     <h2>Overview</h2>
     <table>
-      <tr><th>Mode</th><td>{escape(str(overview['mode']))}</td></tr>
-      <tr><th>Backend</th><td>{escape(str(overview['backend_name']))}</td></tr>
-      <tr><th>Backend Origin</th><td>{escape(str(overview.get('backend_origin')))}</td></tr>
-      <tr><th>Target Source</th><td>{escape(str(overview['target_source']))}</td></tr>
-      <tr><th>Target Format</th><td>{escape(str(overview['target_source_format']))}</td></tr>
-      <tr><th>Pipeline Version</th><td>{escape(str(overview.get('pipeline_version')))}</td></tr>
-      <tr><th>Git SHA</th><td>{escape(str(overview.get('git_short_sha')))}</td></tr>
-      <tr><th>Working Resolution (um)</th><td>{escape(str(overview['working_resolution_um']))}</td></tr>
-      <tr><th>Atlas Unit Scale</th><td>{escape(str(overview['atlas_unit_scale']))}</td></tr>
-      <tr><th>Target Unit Scale</th><td>{escape(str(overview['target_unit_scale']))}</td></tr>
-      <tr><th>Atlas Init Mode</th><td>{escape(str(overview['atlas_init_mode']))}</td></tr>
-      <tr><th>Transformation Graph Script</th><td>{escape(str(overview['transformation_graph_script']))}</td></tr>
-      <tr><th>Transformation Graph Source</th><td>{escape(str(overview.get('transformation_graph_script_source')))}</td></tr>
-      <tr><th>Plan JSON</th><td><code>{escape(str(manifest['plan_path']))}</code></td></tr>
-      <tr><th>Summary JSON</th><td><code>{escape(str(manifest['summary_path']))}</code></td></tr>
-      <tr><th>Log File</th><td><code>{escape(str(manifest['log_path']))}</code></td></tr>
-      <tr><th>Provenance JSON</th><td><code>{escape(str(manifest.get('provenance_path')))}</code></td></tr>
-      <tr><th>Replay Command</th><td><code>{escape(str(manifest.get('reproduce_command_path')))}</code></td></tr>
+      <tr><th>Mode</th><td>{escape(str(overview["mode"]))}</td></tr>
+      <tr><th>Backend</th><td>{escape(str(overview["backend_name"]))}</td></tr>
+      <tr><th>Backend Origin</th><td>{escape(str(overview.get("backend_origin")))}</td></tr>
+      <tr><th>Target Source</th><td>{escape(str(overview["target_source"]))}</td></tr>
+      <tr><th>Target Format</th><td>{escape(str(overview["target_source_format"]))}</td></tr>
+      <tr><th>Pipeline Version</th><td>{escape(str(overview.get("pipeline_version")))}</td></tr>
+      <tr><th>Git SHA</th><td>{escape(str(overview.get("git_short_sha")))}</td></tr>
+      <tr><th>Working Resolution (um)</th><td>{escape(str(overview["working_resolution_um"]))}</td></tr>
+      <tr><th>Atlas Unit Scale</th><td>{escape(str(overview["atlas_unit_scale"]))}</td></tr>
+      <tr><th>Target Unit Scale</th><td>{escape(str(overview["target_unit_scale"]))}</td></tr>
+      <tr><th>Atlas Init Mode</th><td>{escape(str(overview["atlas_init_mode"]))}</td></tr>
+      <tr><th>Transformation Graph Script</th><td>{escape(str(overview["transformation_graph_script"]))}</td></tr>
+      <tr><th>Transformation Graph Source</th><td>{escape(str(overview.get("transformation_graph_script_source")))}</td></tr>
+      <tr><th>Plan JSON</th><td><code>{escape(str(manifest["plan_path"]))}</code></td></tr>
+      <tr><th>Summary JSON</th><td><code>{escape(str(manifest["summary_path"]))}</code></td></tr>
+      <tr><th>Log File</th><td><code>{escape(str(manifest["log_path"]))}</code></td></tr>
+      <tr><th>Provenance JSON</th><td><code>{escape(str(manifest.get("provenance_path")))}</code></td></tr>
+      <tr><th>Replay Command</th><td><code>{escape(str(manifest.get("reproduce_command_path")))}</code></td></tr>
     </table>
   </section>
   <section>
     <h2>Resolved Assumptions</h2>
-    <p><strong>Enabled Stages:</strong> {escape(', '.join(overview['enabled_stages']) or 'None')}</p>
+    <p><strong>Enabled Stages:</strong> {escape(", ".join(overview["enabled_stages"]) or "None")}</p>
     <p><strong>Skipped Stages:</strong></p>
     {_html_list(skipped)}
   </section>
@@ -321,7 +323,7 @@ def render_registration_report_html(manifest: dict[str, Any]) -> str:
     <h2>Stage Timeline</h2>
     <table>
       <tr><th>Stage</th><th>Status</th><th>Duration (s)</th><th>Reason</th></tr>
-      {''.join(f"<tr><td>{escape(str(item.get('name')))}</td><td>{escape(str(item.get('status')))}</td><td>{escape(str(item.get('duration_seconds')))}</td><td>{escape(str(item.get('reason')))}</td></tr>" for item in manifest.get('stage_timeline', []))}
+      {"".join(f"<tr><td>{escape(str(item.get('name')))}</td><td>{escape(str(item.get('status')))}</td><td>{escape(str(item.get('duration_seconds')))}</td><td>{escape(str(item.get('reason')))}</td></tr>" for item in manifest.get("stage_timeline", []))}
     </table>
   </section>
   <section>

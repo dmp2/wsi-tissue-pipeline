@@ -8,14 +8,493 @@ including ROI upsampling and masking.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import dask.array as da
 import numpy as np
-from dask_image.ndinterp import affine_transform
+from dask_image.ndinterp import affine_transform as dask_affine_transform
+from scipy.ndimage import affine_transform as scipy_affine_transform
 from scipy.ndimage import binary_fill_holes
 from skimage import measure
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BoundsYX:
+    """Half-open bounds in array order: y0, x0, y1, x1."""
+
+    y0: int
+    x0: int
+    y1: int
+    x1: int
+
+    @property
+    def h(self) -> int:
+        return int(self.y1 - self.y0)
+
+    @property
+    def w(self) -> int:
+        return int(self.x1 - self.x0)
+
+    @property
+    def area(self) -> int:
+        return max(0, self.h) * max(0, self.w)
+
+    def as_yx(self) -> tuple[int, int, int, int]:
+        return (int(self.y0), int(self.x0), int(self.y1), int(self.x1))
+
+    def as_xyxy(self) -> tuple[int, int, int, int]:
+        return (int(self.x0), int(self.y0), int(self.x1), int(self.y1))
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "y0": int(self.y0),
+            "x0": int(self.x0),
+            "y1": int(self.y1),
+            "x1": int(self.x1),
+            "h": int(self.h),
+            "w": int(self.w),
+        }
+
+    def clip(self, shape_yx: tuple[int, int]) -> BoundsYX:
+        h, w = map(int, shape_yx)
+        return BoundsYX(
+            y0=max(0, min(h, int(self.y0))),
+            x0=max(0, min(w, int(self.x0))),
+            y1=max(0, min(h, int(self.y1))),
+            x1=max(0, min(w, int(self.x1))),
+        )
+
+    def halo(self, pixels: int, shape_yx: tuple[int, int]) -> BoundsYX:
+        pixels = int(pixels)
+        return BoundsYX(
+            self.y0 - pixels,
+            self.x0 - pixels,
+            self.y1 + pixels,
+            self.x1 + pixels,
+        ).clip(shape_yx)
+
+
+@dataclass(frozen=True)
+class PaddingYX:
+    """Padding needed to place clipped source data in a logical source canvas."""
+
+    top: int
+    bottom: int
+    left: int
+    right: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "top": int(self.top),
+            "bottom": int(self.bottom),
+            "left": int(self.left),
+            "right": int(self.right),
+        }
+
+
+@dataclass(frozen=True)
+class TissueFrameSpec:
+    """Coordinate bookkeeping for one tissue tile."""
+
+    tissue_index: int
+    label_id: int
+    tile_frame_level: str
+    crop_shape_policy: str
+    component_bbox_seg_yx: BoundsYX
+    logical_frame_seg_yx: BoundsYX
+    clipped_frame_seg_yx: BoundsYX
+    mapped_source_frame_yx: BoundsYX
+    logical_canvas_source_yx: BoundsYX
+    clipped_source_yx: BoundsYX
+    label_crop_seg_yx: BoundsYX
+    padding_source_level: PaddingYX
+    segmentation_tile_dim: int
+    source_tile_dim: int
+    source_canvas_shape_yx: tuple[int, int]
+    scale_y: float
+    scale_x: float
+
+    @property
+    def mapped_source_h(self) -> int:
+        return int(self.mapped_source_frame_yx.h)
+
+    @property
+    def mapped_source_w(self) -> int:
+        return int(self.mapped_source_frame_yx.w)
+
+    @property
+    def source_canvas_dim(self) -> int:
+        return int(self.source_tile_dim)
+
+    @property
+    def source_canvas_h(self) -> int:
+        return int(self.source_canvas_shape_yx[0])
+
+    @property
+    def source_canvas_w(self) -> int:
+        return int(self.source_canvas_shape_yx[1])
+
+    def debug_dict(self) -> dict[str, Any]:
+        return {
+            "tissue_index": int(self.tissue_index),
+            "label_id": int(self.label_id),
+            "tile_frame_level": self.tile_frame_level,
+            "crop_shape_policy": self.crop_shape_policy,
+            "component_bbox_seg_yx": self.component_bbox_seg_yx.as_dict(),
+            "logical_frame_seg_yx": self.logical_frame_seg_yx.as_dict(),
+            "clipped_frame_seg_yx": self.clipped_frame_seg_yx.as_dict(),
+            "mapped_source_frame_yx": self.mapped_source_frame_yx.as_dict(),
+            "logical_canvas_source_yx": self.logical_canvas_source_yx.as_dict(),
+            "clipped_source_yx": self.clipped_source_yx.as_dict(),
+            "label_crop_seg_yx": self.label_crop_seg_yx.as_dict(),
+            "padding_source_level": self.padding_source_level.as_dict(),
+            "segmentation_tile_dim": int(self.segmentation_tile_dim),
+            "source_tile_dim": int(self.source_tile_dim),
+            "source_canvas_shape_yx": [int(self.source_canvas_h), int(self.source_canvas_w)],
+            "tile_shape_yx": [int(self.source_canvas_h), int(self.source_canvas_w)],
+            "mapped_source_h": int(self.mapped_source_h),
+            "mapped_source_w": int(self.mapped_source_w),
+            "source_canvas_dim": int(self.source_canvas_dim),
+            "scale_y": float(self.scale_y),
+            "scale_x": float(self.scale_x),
+        }
+
+
+@dataclass(frozen=True)
+class TissueTileRecord:
+    """Lazy tissue tile plus its parent-coordinate crop metadata."""
+
+    tile: da.Array
+    tissue_index: int
+    label_id: int
+    crop_bounds_source_level: tuple[int, int, int, int]
+    crop_bounds_segmentation_level: tuple[int, int, int, int]
+    tile_dim: int
+    tile_shape_yx: tuple[int, int] | None = None
+    mask: da.Array | None = None
+    tile_frame_level: str = "source"
+    crop_shape_policy: str = "notebook_square"
+    source_tile_dim: int | None = None
+    segmentation_tile_dim: int | None = None
+    scale_y: float | None = None
+    scale_x: float | None = None
+    frame_debug: dict[str, Any] | None = None
+
+
+TileFrameLevel = Literal["source", "segmentation"]
+CropShapePolicy = Literal["notebook_square", "compact_square", "compact_rectangle"]
+
+
+def _normalize_tile_frame_level(tile_frame_level: str) -> TileFrameLevel:
+    normalized = str(tile_frame_level).strip().lower().replace("_", "-")
+    if normalized not in {"source", "segmentation"}:
+        raise ValueError("tile_frame_level must be one of ['segmentation', 'source'].")
+    return normalized  # type: ignore[return-value]
+
+
+def _normalize_crop_shape_policy(crop_shape_policy: str | None) -> CropShapePolicy:
+    normalized = str(crop_shape_policy or "notebook_square").strip().lower().replace("-", "_")
+    aliases = {
+        "notebook": "notebook_square",
+        "notebook_square": "notebook_square",
+        "validation": "notebook_square",
+        "source": "notebook_square",
+        "square": "compact_square",
+        "compact_square": "compact_square",
+        "compact": "compact_rectangle",
+        "compact_rectangle": "compact_rectangle",
+        "rectangle": "compact_rectangle",
+        "rect": "compact_rectangle",
+        "production": "compact_rectangle",
+    }
+    if normalized not in aliases:
+        raise ValueError(
+            "crop_shape_policy must be one of "
+            "['notebook_square', 'compact_square', 'compact_rectangle']."
+        )
+    return aliases[normalized]  # type: ignore[return-value]
+
+
+def _round_up(v: int, m: int) -> int:
+    return ((int(v) + int(m) - 1) // int(m)) * int(m)
+
+
+def _centered_square_bounds(center_y: float, center_x: float, side: int) -> BoundsYX:
+    y0 = int(np.floor(center_y - side / 2.0))
+    x0 = int(np.floor(center_x - side / 2.0))
+    return BoundsYX(y0=y0, x0=x0, y1=y0 + int(side), x1=x0 + int(side))
+
+
+def _expand_bounds_to_square(bounds: BoundsYX, side: int) -> BoundsYX:
+    side = int(side)
+    extra_y = max(0, side - bounds.h)
+    extra_x = max(0, side - bounds.w)
+    top = extra_y // 2
+    left = extra_x // 2
+    return BoundsYX(
+        y0=bounds.y0 - top,
+        x0=bounds.x0 - left,
+        y1=bounds.y0 - top + side,
+        x1=bounds.x0 - left + side,
+    )
+
+
+def _expand_bounds_to_shape(bounds: BoundsYX, shape_yx: tuple[int, int]) -> BoundsYX:
+    target_h, target_w = map(int, shape_yx)
+    extra_y = max(0, target_h - bounds.h)
+    extra_x = max(0, target_w - bounds.w)
+    top = extra_y // 2
+    left = extra_x // 2
+    return BoundsYX(
+        y0=bounds.y0 - top,
+        x0=bounds.x0 - left,
+        y1=bounds.y0 - top + target_h,
+        x1=bounds.x0 - left + target_w,
+    )
+
+
+def _map_seg_bounds_to_source(bounds: BoundsYX, scale_y: float, scale_x: float) -> BoundsYX:
+    return BoundsYX(
+        y0=int(np.floor(bounds.y0 * scale_y)),
+        x0=int(np.floor(bounds.x0 * scale_x)),
+        y1=int(np.ceil(bounds.y1 * scale_y)),
+        x1=int(np.ceil(bounds.x1 * scale_x)),
+    )
+
+
+def _map_source_bounds_to_seg(bounds: BoundsYX, scale_y: float, scale_x: float) -> BoundsYX:
+    return BoundsYX(
+        y0=int(np.floor(bounds.y0 / scale_y)),
+        x0=int(np.floor(bounds.x0 / scale_x)),
+        y1=int(np.ceil(bounds.y1 / scale_y)),
+        x1=int(np.ceil(bounds.x1 / scale_x)),
+    )
+
+
+def _padding_for_canvas(canvas: BoundsYX, clipped: BoundsYX) -> PaddingYX:
+    return PaddingYX(
+        top=int(clipped.y0 - canvas.y0),
+        bottom=int(canvas.y1 - clipped.y1),
+        left=int(clipped.x0 - canvas.x0),
+        right=int(canvas.x1 - clipped.x1),
+    )
+
+
+def _build_tissue_frame_specs(
+    lr_labels: np.ndarray,
+    *,
+    source_shape_yx: tuple[int, int],
+    tile_frame_level: str,
+    pad_multiple: int,
+    extra_margin_px: int,
+    crop_shape_policy: str = "notebook_square",
+    label_halo_px: int = 1,
+) -> tuple[list[TissueFrameSpec], int]:
+    """Build explicit frame/canvas specs for each labeled tissue."""
+    tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+    crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
+    source_h, source_w = map(int, source_shape_yx)
+    seg_h, seg_w = map(int, lr_labels.shape)
+    scale_y = source_h / seg_h
+    scale_x = source_w / seg_w
+
+    component_specs: list[tuple[int, BoundsYX, BoundsYX]] = []
+    source_max_side = 0
+    segmentation_max_side = 0
+    for lid in sort_labels_left_to_right(lr_labels):
+        lr_mask = lr_labels == lid
+        rows, cols = np.any(lr_mask, axis=1), np.any(lr_mask, axis=0)
+        yi = np.where(rows)[0]
+        xi = np.where(cols)[0]
+        if yi.size == 0 or xi.size == 0:
+            continue
+
+        component_seg = BoundsYX(
+            y0=int(yi[0]),
+            x0=int(xi[0]),
+            y1=int(yi[-1] + 1),
+            x1=int(xi[-1] + 1),
+        )
+        mapped_component = _map_seg_bounds_to_source(component_seg, scale_y, scale_x).clip(
+            (source_h, source_w)
+        )
+        segmentation_max_side = max(
+            segmentation_max_side,
+            component_seg.h + (2 * extra_margin_px),
+            component_seg.w + (2 * extra_margin_px),
+        )
+        source_max_side = max(
+            source_max_side,
+            mapped_component.h + (2 * extra_margin_px),
+            mapped_component.w + (2 * extra_margin_px),
+        )
+        component_specs.append((int(lid), component_seg, mapped_component))
+
+    if not component_specs:
+        return [], 0
+
+    raw_specs: list[dict[str, Any]] = []
+    if crop_shape_policy == "notebook_square" and tile_frame_level == "source":
+        source_tile_dim = _round_up(source_max_side, pad_multiple)
+        segmentation_tile_dim = int(np.ceil(source_tile_dim / max(scale_y, scale_x)))
+        source_canvas_dim = int(source_tile_dim)
+        for lid, component_seg, mapped_component in component_specs:
+            source_center_y = (mapped_component.y0 + mapped_component.y1) / 2.0
+            source_center_x = (mapped_component.x0 + mapped_component.x1) / 2.0
+            canvas = _centered_square_bounds(source_center_y, source_center_x, source_canvas_dim)
+            logical_frame_seg = _map_source_bounds_to_seg(canvas, scale_y, scale_x)
+            mapped_source_frame = canvas
+            raw_specs.append(
+                {
+                    "lid": lid,
+                    "component_seg": component_seg,
+                    "logical_frame_seg": logical_frame_seg,
+                    "mapped_source_frame": mapped_source_frame,
+                    "canvas_shape_yx": (source_canvas_dim, source_canvas_dim),
+                }
+            )
+    elif crop_shape_policy == "notebook_square":
+        segmentation_tile_dim = _round_up(segmentation_max_side, pad_multiple)
+        mapped_source_frames: list[BoundsYX] = []
+        for lid, component_seg, _mapped_component in component_specs:
+            seg_center_y = (component_seg.y0 + component_seg.y1) / 2.0
+            seg_center_x = (component_seg.x0 + component_seg.x1) / 2.0
+            logical_frame_seg = _centered_square_bounds(
+                seg_center_y,
+                seg_center_x,
+                segmentation_tile_dim,
+            )
+            mapped_source_frame = _map_seg_bounds_to_source(logical_frame_seg, scale_y, scale_x)
+            mapped_source_frames.append(mapped_source_frame)
+            raw_specs.append(
+                {
+                    "lid": lid,
+                    "component_seg": component_seg,
+                    "logical_frame_seg": logical_frame_seg,
+                    "mapped_source_frame": mapped_source_frame,
+                    "canvas_shape_yx": None,
+                }
+            )
+        source_canvas_dim = max(max(frame.h, frame.w) for frame in mapped_source_frames)
+        for raw in raw_specs:
+            raw["canvas_shape_yx"] = (source_canvas_dim, source_canvas_dim)
+    else:
+        source_canvas_dim = 0
+        segmentation_tile_dim = 0
+        for lid, component_seg, mapped_component in component_specs:
+            if tile_frame_level == "source":
+                source_frame = BoundsYX(
+                    y0=mapped_component.y0 - extra_margin_px,
+                    x0=mapped_component.x0 - extra_margin_px,
+                    y1=mapped_component.y1 + extra_margin_px,
+                    x1=mapped_component.x1 + extra_margin_px,
+                )
+                logical_frame_seg = _map_source_bounds_to_seg(source_frame, scale_y, scale_x)
+                mapped_source_frame = source_frame
+            else:
+                logical_frame_seg = BoundsYX(
+                    y0=component_seg.y0 - extra_margin_px,
+                    x0=component_seg.x0 - extra_margin_px,
+                    y1=component_seg.y1 + extra_margin_px,
+                    x1=component_seg.x1 + extra_margin_px,
+                )
+                mapped_source_frame = _map_seg_bounds_to_source(logical_frame_seg, scale_y, scale_x)
+
+            if crop_shape_policy == "compact_square":
+                side = _round_up(max(mapped_source_frame.h, mapped_source_frame.w), pad_multiple)
+                canvas_shape_yx = (side, side)
+            else:
+                canvas_shape_yx = (
+                    _round_up(mapped_source_frame.h, pad_multiple),
+                    _round_up(mapped_source_frame.w, pad_multiple),
+                )
+            source_canvas_dim = max(source_canvas_dim, max(canvas_shape_yx))
+            segmentation_tile_dim = max(
+                segmentation_tile_dim,
+                int(np.ceil(max(logical_frame_seg.h, logical_frame_seg.w))),
+            )
+            raw_specs.append(
+                {
+                    "lid": lid,
+                    "component_seg": component_seg,
+                    "logical_frame_seg": logical_frame_seg,
+                    "mapped_source_frame": mapped_source_frame,
+                    "canvas_shape_yx": canvas_shape_yx,
+                }
+            )
+
+    specs: list[TissueFrameSpec] = []
+    for tissue_index, raw in enumerate(raw_specs):
+        component_seg = raw["component_seg"]
+        logical_frame_seg = raw["logical_frame_seg"]
+        mapped_source_frame = raw["mapped_source_frame"]
+        canvas_shape_yx = tuple(map(int, raw["canvas_shape_yx"]))
+        logical_canvas_source = _expand_bounds_to_shape(mapped_source_frame, canvas_shape_yx)
+        clipped_source = logical_canvas_source.clip((source_h, source_w))
+        clipped_frame_seg = logical_frame_seg.clip((seg_h, seg_w))
+        label_crop_seg = clipped_frame_seg.halo(label_halo_px, (seg_h, seg_w))
+        specs.append(
+            TissueFrameSpec(
+                tissue_index=int(tissue_index),
+                label_id=int(raw["lid"]),
+                tile_frame_level=tile_frame_level,
+                crop_shape_policy=crop_shape_policy,
+                component_bbox_seg_yx=component_seg,
+                logical_frame_seg_yx=logical_frame_seg,
+                clipped_frame_seg_yx=clipped_frame_seg,
+                mapped_source_frame_yx=mapped_source_frame,
+                logical_canvas_source_yx=logical_canvas_source,
+                clipped_source_yx=clipped_source,
+                label_crop_seg_yx=label_crop_seg,
+                padding_source_level=_padding_for_canvas(logical_canvas_source, clipped_source),
+                segmentation_tile_dim=int(segmentation_tile_dim),
+                source_tile_dim=int(source_canvas_dim),
+                source_canvas_shape_yx=(int(canvas_shape_yx[0]), int(canvas_shape_yx[1])),
+                scale_y=float(scale_y),
+                scale_x=float(scale_x),
+            )
+        )
+    return specs, int(source_canvas_dim)
+
+
+def project_label_mask_to_source_region(
+    lr_labels: np.ndarray,
+    *,
+    label_id: int,
+    source_region_yx: BoundsYX,
+    label_crop_seg_yx: BoundsYX,
+    scale_y: float,
+    scale_x: float,
+) -> np.ndarray:
+    """Project a segmentation label mask into a source-level region."""
+    label_crop = lr_labels[
+        label_crop_seg_yx.y0 : label_crop_seg_yx.y1,
+        label_crop_seg_yx.x0 : label_crop_seg_yx.x1,
+    ].astype(np.int32)
+    if label_crop.size == 0 or source_region_yx.h <= 0 or source_region_yx.w <= 0:
+        return np.zeros((max(0, source_region_yx.h), max(0, source_region_yx.w)), dtype=bool)
+
+    matrix = np.array([[1.0 / scale_y, 0.0], [0.0, 1.0 / scale_x]], dtype=float)
+    offset = np.array(
+        [
+            ((source_region_yx.y0 + 0.5) / scale_y) - 0.5 - label_crop_seg_yx.y0,
+            ((source_region_yx.x0 + 0.5) / scale_x) - 0.5 - label_crop_seg_yx.x0,
+        ],
+        dtype=float,
+    )
+    projected = scipy_affine_transform(
+        label_crop,
+        matrix=matrix,
+        offset=offset,
+        output_shape=(source_region_yx.h, source_region_yx.w),
+        order=0,
+        mode="constant",
+        cval=0,
+    )
+    return projected == int(label_id)
 
 
 def center_crop_pad_dask(yxc: da.Array, target_side: int) -> da.Array:
@@ -85,7 +564,7 @@ def crop_and_pad(
     xmin, xmax = np.where(cols)[0][[0, -1]]
 
     # Crop the image to the bounding box
-    cropped_image = image[ymin:ymax + 1, xmin:xmax + 1]
+    cropped_image = image[ymin : ymax + 1, xmin : xmax + 1]
 
     if isinstance(target_shape, int):
         # Calculate padding amounts for square image
@@ -167,6 +646,7 @@ def generate_tissue_images(
         if display_images:
             try:
                 import matplotlib.pyplot as plt
+
                 plt.figure()
                 plt.imshow(processed_image)
                 plt.title(f"Tissue Region {i}")
@@ -202,16 +682,20 @@ def sort_labels_left_to_right(filled_lr_lbl: np.ndarray) -> list[int]:
     return [p.label for p in sorted(props, key=lambda p: p.centroid[1])]
 
 
-def generate_tissue_tiles(
+def generate_tissue_tile_records(
     s0_cyx: da.Array,
     low_res_filled: np.ndarray,
     *,
+    tile_frame_level: TileFrameLevel,
+    crop_shape_policy: CropShapePolicy | str = "notebook_square",
+    materialize_masked_rgb: bool = True,
+    masked_rgb_fill_value: int = 0,
     chunk: int = 512,
     pad_multiple: int | None = None,
     extra_margin_px: int = 0,
-) -> tuple[list[da.Array], int]:
+) -> tuple[list[TissueTileRecord], int]:
     """
-    Build one high-res (Y,X,C) Dask tile per tissue with a common square side.
+    Build one high-res (Y,X,C) Dask tile record per tissue.
 
     ``low_res_filled`` is segmented at thumbnail/coarse scale, then labels are
     mapped back onto the high-resolution image only for each output window.  All
@@ -225,30 +709,35 @@ def generate_tissue_tiles(
         High-resolution image (C, Y, X).
     low_res_filled : np.ndarray
         Boolean mask at coarsest level.
+    tile_frame_level : {"source", "segmentation"}
+        Coordinate level where tile size, padding, and margin are defined.
+        ``"source"`` preserves the historical behavior. ``"segmentation"``
+        finalizes notebook-style crop frames at the segmentation mask level
+        before mapping them to source pixels.
     chunk : int
-        Chunk size for output tiles.
+        Writer chunk size for output tiles.
     pad_multiple : int, optional
         Round tile dimension to multiple of this value. Defaults to chunk.
     extra_margin_px : int
-        Extra margin around each tissue region.
-
+        Extra margin around each tissue region, in ``tile_frame_level`` pixels.
     Returns
     -------
-    tiles : list of da.Array
-        Per-tissue tiles (Y, X, C), rechunked to (chunk, chunk, C).
+    records : list of TissueTileRecord
+        Per-tissue tiles and source/segmentation crop bounds. Bounds are
+        ``(x0, y0, x1, y1)`` exclusive in their parent level.
     tile_dim : int
         The common square side length used for padding/cropping.
     """
     assert s0_cyx.ndim == 3
-    C, Yh, Xh = s0_cyx.shape
+    C, Yh, Xh = map(int, s0_cyx.shape)
+    tile_frame_level = _normalize_tile_frame_level(tile_frame_level)
+    crop_shape_policy = _normalize_crop_shape_policy(crop_shape_policy)
 
     if pad_multiple is None:
         pad_multiple = chunk
 
-    # -------- Pass 0: label & fill at low-res --------
+    # -------- Pass 0: label & fill at segmentation level --------
     lr_lbl, n_lr = measure.label(low_res_filled.astype(bool), connectivity=2, return_num=True)
-
-    # If there are no tissue sections return early
     if n_lr == 0:
         return [], 0
 
@@ -256,114 +745,127 @@ def generate_tissue_tiles(
     for lid in range(1, n_lr + 1):
         comp = lr_lbl == lid
         if comp.any():
-            comp_filled = binary_fill_holes(comp)
-            filled_lr_lbl[comp_filled] = lid
+            filled_lr_lbl[binary_fill_holes(comp)] = lid
     lr_lbl = filled_lr_lbl
 
-    # Ratios LR -> HR
-    Yr = Yh / low_res_filled.shape[0]
-    Xr = Xh / low_res_filled.shape[1]
+    frame_specs, source_tile_dim = _build_tissue_frame_specs(
+        lr_lbl,
+        source_shape_yx=(Yh, Xh),
+        tile_frame_level=tile_frame_level,
+        pad_multiple=pad_multiple,
+        extra_margin_px=extra_margin_px,
+        crop_shape_policy=crop_shape_policy,
+    )
 
-    # -------- Pass 1: compute HR bboxes & find common tile_dim --------
-    roi_specs = []
-    max_side = 0
-
-    for lid in sort_labels_left_to_right(lr_lbl):
-        lr_mask = lr_lbl == lid
-        rows, cols = np.any(lr_mask, 1), np.any(lr_mask, 0)
-        yi = np.where(rows)[0]
-        xi = np.where(cols)[0]
-        if yi.size == 0 or xi.size == 0:
-            continue
-
-        y0_lr, y1_lr = yi[[0, -1]]
-        x0_lr, x1_lr = xi[[0, -1]]
-
-        # Map LR bbox -> HR bbox (exclusive)
-        y0_hr = int(np.floor(y0_lr * Yr))
-        y1_hr = int(np.ceil((y1_lr + 1) * Yr))
-        x0_hr = int(np.floor(x0_lr * Xr))
-        x1_hr = int(np.ceil((x1_lr + 1) * Xr))
-
-        y0_hr = max(0, min(Yh, y0_hr))
-        y1_hr = max(0, min(Yh, y1_hr))
-        x0_hr = max(0, min(Xh, x0_hr))
-        x1_hr = max(0, min(Xh, x1_hr))
-
-        H_hr = y1_hr - y0_hr
-        W_hr = x1_hr - x0_hr
-        max_side = max(max_side, H_hr + (2 * extra_margin_px), W_hr + (2 * extra_margin_px))
-
-        roi_specs.append((lid, y0_lr, y1_lr, x0_lr, x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, H_hr, W_hr))
-
-    if not roi_specs:
-        return [], 0
-
-    # Round up to a friendly square dimension
-    def _round_up(v: int, m: int) -> int:
-        return ((v + m - 1) // m) * m
-
-    tile_dim = _round_up(max_side, pad_multiple)
-
-    # -------- Pass 2: build tiles lazily with common tile_dim --------
-    tiles: list[da.Array] = []
-
-    for (lid, _y0_lr, _y1_lr, _x0_lr, _x1_lr, y0_hr, y1_hr, x0_hr, x1_hr, _H_hr, _W_hr) in roi_specs:
-        center_y = (y0_hr + y1_hr) / 2.0
-        center_x = (x0_hr + x1_hr) / 2.0
-        tile_y0 = int(np.floor(center_y - tile_dim / 2.0))
-        tile_x0 = int(np.floor(center_x - tile_dim / 2.0))
-        tile_y1 = tile_y0 + tile_dim
-        tile_x1 = tile_x0 + tile_dim
-
-        src_y0 = max(0, tile_y0)
-        src_x0 = max(0, tile_x0)
-        src_y1 = min(Yh, tile_y1)
-        src_x1 = min(Xh, tile_x1)
-
-        src_h = src_y1 - src_y0
-        src_w = src_x1 - src_x0
+    records: list[TissueTileRecord] = []
+    for spec in frame_specs:
+        src = spec.clipped_source_yx
+        src_h = src.h
+        src_w = src.w
         if src_h <= 0 or src_w <= 0:
             continue
 
-        lr_crop_y0 = max(0, int(np.floor(src_y0 / Yr)))
-        lr_crop_x0 = max(0, int(np.floor(src_x0 / Xr)))
-        lr_crop_y1 = min(lr_lbl.shape[0], int(np.ceil(src_y1 / Yr)))
-        lr_crop_x1 = min(lr_lbl.shape[1], int(np.ceil(src_x1 / Xr)))
-        lr_crop_lbl = lr_lbl[lr_crop_y0:lr_crop_y1, lr_crop_x0:lr_crop_x1].astype(np.int32)
-
-        matrix = np.array([[1.0 / Yr, 0.0], [0.0, 1.0 / Xr]], dtype=float)
+        label_crop = spec.label_crop_seg_yx
+        lr_crop_lbl = lr_lbl[label_crop.y0 : label_crop.y1, label_crop.x0 : label_crop.x1].astype(
+            np.int32
+        )
+        matrix = np.array([[1.0 / spec.scale_y, 0.0], [0.0, 1.0 / spec.scale_x]], dtype=float)
         offset = np.array(
-            [(src_y0 / Yr) - lr_crop_y0, (src_x0 / Xr) - lr_crop_x0],
+            [
+                ((src.y0 + 0.5) / spec.scale_y) - 0.5 - label_crop.y0,
+                ((src.x0 + 0.5) / spec.scale_x) - 0.5 - label_crop.x0,
+            ],
             dtype=float,
         )
 
-        hr_roi_lbl = affine_transform(
+        hr_roi_lbl = dask_affine_transform(
             da.from_array(lr_crop_lbl, chunks=lr_crop_lbl.shape),
             matrix=matrix,
             offset=offset,
             output_shape=(src_h, src_w),
             order=0,
         ).astype(np.int32)
-        hr_roi_mask = hr_roi_lbl == lid
+        hr_roi_mask = hr_roi_lbl == spec.label_id
 
-        # Slice s0 in the centered tile window intersection lazily -> (Y,X,C)
-        s0_roi_cyx = s0_cyx[:, src_y0:src_y1, src_x0:src_x1]
+        s0_roi_cyx = s0_cyx[:, src.y0 : src.y1, src.x0 : src.x1]
         roi_yxc = da.moveaxis(s0_roi_cyx, 0, -1)
 
-        # Apply HR mask and pad source-edge intersections into the common square.
-        masked = da.where(hr_roi_mask[..., None], roi_yxc, 0)
-        pad_top = src_y0 - tile_y0
-        pad_left = src_x0 - tile_x0
-        pad_bottom = tile_y1 - src_y1
-        pad_right = tile_x1 - src_x1
+        rgb = roi_yxc
+        mask = hr_roi_mask.astype(np.uint8)
+        masked = da.where(hr_roi_mask[..., None], roi_yxc, int(masked_rgb_fill_value))
+        padding = spec.padding_source_level
+        pad_top = padding.top
+        pad_left = padding.left
+        pad_bottom = padding.bottom
+        pad_right = padding.right
         if pad_top or pad_bottom or pad_left or pad_right:
+            rgb = da.pad(
+                rgb,
+                ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
+                mode="constant",
+            )
+            mask = da.pad(
+                mask,
+                ((pad_top, pad_bottom), (pad_left, pad_right)),
+                mode="constant",
+            )
             masked = da.pad(
                 masked,
                 ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0)),
                 mode="constant",
             )
-        tile = masked[:tile_dim, :tile_dim, :].rechunk((chunk, chunk, C))
-        tiles.append(tile)
+        tile_h, tile_w = spec.source_canvas_shape_yx
+        rgb = rgb[:tile_h, :tile_w, :].rechunk((chunk, chunk, C))
+        mask = mask[:tile_h, :tile_w].rechunk((chunk, chunk))
+        masked = masked[:tile_h, :tile_w, :].rechunk((chunk, chunk, C))
+        tile = masked if materialize_masked_rgb else rgb
+        tile_dim = int(tile_h) if int(tile_h) == int(tile_w) else int(max(tile_h, tile_w))
+        records.append(
+            TissueTileRecord(
+                tile=tile,
+                tissue_index=spec.tissue_index,
+                label_id=spec.label_id,
+                crop_bounds_source_level=spec.clipped_source_yx.as_xyxy(),
+                crop_bounds_segmentation_level=spec.clipped_frame_seg_yx.as_xyxy(),
+                tile_dim=tile_dim,
+                tile_shape_yx=(int(tile_h), int(tile_w)),
+                mask=mask,
+                tile_frame_level=tile_frame_level,
+                crop_shape_policy=crop_shape_policy,
+                source_tile_dim=tile_dim,
+                segmentation_tile_dim=int(spec.segmentation_tile_dim),
+                scale_y=float(spec.scale_y),
+                scale_x=float(spec.scale_x),
+                frame_debug=spec.debug_dict(),
+            )
+        )
 
-    return tiles, tile_dim
+    return records, int(source_tile_dim)
+
+
+def generate_tissue_tiles(
+    s0_cyx: da.Array,
+    low_res_filled: np.ndarray,
+    *,
+    tile_frame_level: TileFrameLevel,
+    crop_shape_policy: CropShapePolicy | str = "notebook_square",
+    chunk: int = 512,
+    pad_multiple: int | None = None,
+    extra_margin_px: int = 0,
+) -> tuple[list[da.Array], int]:
+    """
+    Build one high-res (Y,X,C) Dask tile per tissue with a common square side.
+
+    This compatibility wrapper preserves the historical return value. New
+    provenance-aware callers should use :func:`generate_tissue_tile_records`.
+    """
+    records, tile_dim = generate_tissue_tile_records(
+        s0_cyx=s0_cyx,
+        low_res_filled=low_res_filled,
+        chunk=chunk,
+        pad_multiple=pad_multiple,
+        extra_margin_px=extra_margin_px,
+        tile_frame_level=tile_frame_level,
+        crop_shape_policy=crop_shape_policy,
+    )
+    return [record.tile for record in records], tile_dim

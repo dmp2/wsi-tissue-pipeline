@@ -61,7 +61,9 @@ def binary_closing(binary_image, structure):
     return closed_img
 
 
-def split_touching_components(mask_bool: np.ndarray, r_split: int = 3, min_area: int = 256) -> np.ndarray:
+def split_touching_components(
+    mask_bool: np.ndarray, r_split: int = 3, min_area: int = 256
+) -> np.ndarray:
     """
     Split thin bridges between touching tissue components using watershed.
 

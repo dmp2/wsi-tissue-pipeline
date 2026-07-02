@@ -133,15 +133,11 @@ def _detect_img_ext(fnames: list[str]) -> str:
         if sfx in known:
             counts[sfx] = counts.get(sfx, 0) + 1
     if not counts:
-        raise FileNotFoundError(
-            "Could not detect an image extension in the provided filenames."
-        )
+        raise FileNotFoundError("Could not detect an image extension in the provided filenames.")
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
-def _extract_frame_number(
-    name: str, sep: str = "_", fnumidx: int = -1
-) -> int:
+def _extract_frame_number(name: str, sep: str = "_", fnumidx: int = -1) -> int:
     """Extract trailing integer from a filename token.
 
     Splits *name* (stem only, extension stripped) by *sep* and parses the
@@ -168,14 +164,10 @@ def _extract_frame_number(
     try:
         token = tokens[fnumidx]
     except IndexError as err:
-        raise ValueError(
-            f"fnumidx={fnumidx} out of range for {name!r} split by {sep!r}"
-        ) from err
+        raise ValueError(f"fnumidx={fnumidx} out of range for {name!r} split by {sep!r}") from err
     m = re.search(r"(\d+)$", token)
     if not m:
-        raise ValueError(
-            f"No trailing digits in token {token!r} from {name!r}"
-        )
+        raise ValueError(f"No trailing digits in token {token!r} from {name!r}")
     return int(m.group(1))
 
 
@@ -414,6 +406,7 @@ def write_emlddmm_dataset_manifest(
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def make_samples_tsv(
     subject_dir: str | Path,
     species_name: str = "Homo Sapiens",
@@ -453,9 +446,7 @@ def make_samples_tsv(
     """
     subject_dir = Path(subject_dir)
     if not subject_dir.is_dir():
-        raise FileNotFoundError(
-            f"Subject directory does not exist: {subject_dir}"
-        )
+        raise FileNotFoundError(f"Subject directory does not exist: {subject_dir}")
 
     fnames = os.listdir(subject_dir)
     if not fnames:
@@ -469,9 +460,7 @@ def make_samples_tsv(
 
     fnames = [f for f in fnames if Path(f).suffix.lower() == ext.lower()]
     if not fnames:
-        raise FileNotFoundError(
-            f"No files with extension {ext} found in {subject_dir}"
-        )
+        raise FileNotFoundError(f"No files with extension {ext} found in {subject_dir}")
 
     # Sort by parsed slice number
     fnames = sorted(
@@ -479,9 +468,7 @@ def make_samples_tsv(
         key=lambda x: _extract_frame_number(x, sep=sep, fnumidx=fnumidx),
     )
 
-    img_nums = [
-        _extract_frame_number(x, sep=sep, fnumidx=fnumidx) for x in fnames
-    ]
+    img_nums = [_extract_frame_number(x, sep=sep, fnumidx=fnumidx) for x in fnames]
 
     if max_slice is None:
         max_slice = img_nums[-1] if img_nums else 0
@@ -490,8 +477,7 @@ def make_samples_tsv(
 
     # Missing = symmetric difference of expected vs present
     missing_imgs = sorted(
-        list(set(img_nums) - set(slice_range))
-        + list(set(slice_range) - set(img_nums))
+        list(set(img_nums) - set(slice_range)) + list(set(slice_range) - set(img_nums))
     )
 
     logger.debug("Missing images: %s", missing_imgs)
@@ -559,9 +545,7 @@ def remove_json_sidecars(
     if not p.is_dir():
         raise NotADirectoryError(f"Not a directory: {p}")
 
-    targets = [
-        e for e in p.iterdir() if e.is_file() and e.suffix.lower() == ".json"
-    ]
+    targets = [e for e in p.iterdir() if e.is_file() and e.suffix.lower() == ".json"]
     deleted: list[Path] = []
 
     for f in targets:
@@ -626,7 +610,7 @@ def set_up_hist_for_emlddmm(config: dict) -> None:
             '  python -m pip install -c constraints.txt "h5py>=3.10" "nibabel>=5.0"\n'
             "  python -m pip install --index-url https://download.pytorch.org/whl/cpu "
             '"torch==2.10.0+cpu"\n'
-            "  export PYTHONPATH=\"$(cd ../emlddmm && pwd):${PYTHONPATH}\"\n"
+            '  export PYTHONPATH="$(cd ../emlddmm && pwd):${PYTHONPATH}"\n'
             "Alternatively set EMLDDMM_HOME=/path/to/emlddmm before starting Jupyter, "
             "or add it to sys.path manually."
         ) from err
@@ -649,7 +633,13 @@ def set_up_hist_for_emlddmm(config: dict) -> None:
     logger.info(
         "subject directory: %s | output directory: %s | slice_down: %s | "
         "res_down: %s | max_slice: %s | dv (microns): %s | space: %s",
-        subject_dir, output_dir, slice_down, res_down, max_slice, dv, space,
+        subject_dir,
+        output_dir,
+        slice_down,
+        res_down,
+        max_slice,
+        dv,
+        space,
     )
 
     # 1) Optional downsampling / copy

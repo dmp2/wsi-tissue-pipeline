@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import glob
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -255,9 +256,7 @@ def ets_to_flat_image(
     try:
         with ETSFile(ets_fname) as ets:
             if level < 0 or level >= ets.nlevels:
-                raise ValueError(
-                    f"Level {level} out of range [0, {ets.nlevels - 1}]"
-                )
+                raise ValueError(f"Level {level} out of range [0, {ets.nlevels - 1}]")
 
             img = ets.read_level(level)
 
@@ -332,9 +331,7 @@ def ets_to_ome_tiff(
     vsi_metadata: dict[str, Any] | None = None
 
     if backend == "bioformats" and vsi_path is None:
-        raise RuntimeError(
-            "Bio-Formats metadata backend requires a VSI path; provide `vsi_fname`."
-        )
+        raise RuntimeError("Bio-Formats metadata backend requires a VSI path; provide `vsi_fname`.")
 
     if vsi_path is not None:
         try:
@@ -588,6 +585,35 @@ def _metadata_call(metadata_store: Any, method_name: str, *args: Any) -> Any:
         return None
 
 
+def _metadata_table_to_dict(metadata: Any) -> dict[str, str]:
+    """Convert a Java metadata table or Python mapping into a string dictionary."""
+    if metadata is None:
+        return {}
+    if isinstance(metadata, dict):
+        return {str(key): str(value) for key, value in metadata.items() if value is not None}
+    out: dict[str, str] = {}
+    try:
+        iterator = metadata.keySet().iterator()
+        while iterator.hasNext():
+            key = iterator.next()
+            value = metadata.get(key)
+            if value is not None:
+                out[str(key)] = str(value)
+    except Exception:
+        return out
+    return out
+
+
+def _parse_xy_metadata_pair(value: Any) -> tuple[float, float] | None:
+    """Parse Olympus-style ``(x, y)`` metadata values."""
+    if value is None:
+        return None
+    nums = re.findall(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", str(value))
+    if len(nums) < 2:
+        return None
+    return float(nums[0]), float(nums[1])
+
+
 def _extract_channel_labels(
     metadata_store: Any,
     image_index: int,
@@ -647,24 +673,56 @@ def _extract_vsi_physical_metadata(vsi_fname: str | Path) -> dict[str, Any]:
     ValueError
         If the VSI metadata describes an unsupported channel layout.
     """
-    jnius = ensure_bioformats_jnius()
+    try:
+        jnius = ensure_bioformats_jnius()
+    except Exception as exc:
+        raise RuntimeError("Bio-Formats/PyJNIus runtime could not be initialized.") from exc
 
     autoclass = getattr(jnius, "autoclass", None)
     if autoclass is None:
         raise RuntimeError("Bio-Formats metadata backend unavailable: 'jnius.autoclass' not found.")
 
     try:
+        try:
+            autoclass("loci.common.DebugTools").setRootLevel("WARN")
+        except Exception:
+            pass
         image_reader_cls = autoclass("loci.formats.ImageReader")
-        metadata_tools_cls = autoclass("loci.formats.meta.MetadataTools")
+        metadata_tools_cls = autoclass("loci.formats.MetadataTools")
     except Exception as exc:
         raise RuntimeError("Bio-Formats classes could not be loaded via Pyjnius.") from exc
 
     reader = image_reader_cls()
+    try:
+        reader.setFlattenedResolutions(False)
+    except Exception:
+        pass
     metadata_store = metadata_tools_cls.createOMEXMLMetadata()
     reader.setMetadataStore(metadata_store)
 
     try:
         reader.setId(str(vsi_fname))
+        global_metadata = _metadata_table_to_dict(
+            reader.getGlobalMetadata() if hasattr(reader, "getGlobalMetadata") else None
+        )
+
+        selected_series = 0
+        best_area = -1
+        series_count = _safe_int(reader.getSeriesCount()) or 1
+        for series_index in range(series_count):
+            try:
+                reader.setSeries(series_index)
+                sx = _safe_int(reader.getSizeX()) or 0
+                sy = _safe_int(reader.getSizeY()) or 0
+                sc = _safe_int(reader.getSizeC()) or 0
+            except Exception:
+                continue
+            area = sx * sy
+            if sc == 3 and area > best_area:
+                selected_series = series_index
+                best_area = area
+
+        reader.setSeries(selected_series)
 
         size_x = _safe_int(reader.getSizeX())
         size_y = _safe_int(reader.getSizeY())
@@ -677,14 +735,41 @@ def _extract_vsi_physical_metadata(vsi_fname: str | Path) -> dict[str, Any]:
                 f"Unsupported VSI channel count {size_c}; the ETS reader currently expects RGB data."
             )
 
-        physical_size_x = _safe_float(_metadata_call(metadata_store, "getPixelsPhysicalSizeX", 0))
-        physical_size_y = _safe_float(_metadata_call(metadata_store, "getPixelsPhysicalSizeY", 0))
-        physical_size_z = _safe_float(_metadata_call(metadata_store, "getPixelsPhysicalSizeZ", 0))
-        stage_origin_um = _extract_stage_origin_um(metadata_store, 0)
-        channel_labels = _extract_channel_labels(metadata_store, 0, size_c)
+        physical_size_x = _safe_float(
+            _metadata_call(metadata_store, "getPixelsPhysicalSizeX", selected_series)
+        )
+        physical_size_y = _safe_float(
+            _metadata_call(metadata_store, "getPixelsPhysicalSizeY", selected_series)
+        )
+        physical_size_z = _safe_float(
+            _metadata_call(metadata_store, "getPixelsPhysicalSizeZ", selected_series)
+        )
+        if selected_series != 0:
+            physical_size_x = physical_size_x or _safe_float(
+                _metadata_call(metadata_store, "getPixelsPhysicalSizeX", 0)
+            )
+            physical_size_y = physical_size_y or _safe_float(
+                _metadata_call(metadata_store, "getPixelsPhysicalSizeY", 0)
+            )
+            physical_size_z = physical_size_z or _safe_float(
+                _metadata_call(metadata_store, "getPixelsPhysicalSizeZ", 0)
+            )
+        global_pixel_size = _parse_xy_metadata_pair(global_metadata.get("Physical pixel size"))
+        if global_pixel_size is not None:
+            physical_size_x = physical_size_x or global_pixel_size[0]
+            physical_size_y = physical_size_y or global_pixel_size[1]
+        stage_origin_um = _extract_stage_origin_um(metadata_store, selected_series)
+        if stage_origin_um is None and selected_series != 0:
+            stage_origin_um = _extract_stage_origin_um(metadata_store, 0)
+        if stage_origin_um is None:
+            global_origin = _parse_xy_metadata_pair(global_metadata.get("Origin"))
+            if global_origin is not None:
+                stage_origin_um = {"x": global_origin[0], "y": global_origin[1]}
+        channel_labels = _extract_channel_labels(metadata_store, selected_series, size_c)
 
         return {
             "name": Path(vsi_fname).name,
+            "series": selected_series,
             "sizeX": size_x,
             "sizeY": size_y,
             "sizeZ": size_z,
@@ -695,6 +780,7 @@ def _extract_vsi_physical_metadata(vsi_fname: str | Path) -> dict[str, Any]:
             "physical_size_z": physical_size_z,
             "channel_labels": channel_labels,
             "stage_origin_um": stage_origin_um,
+            "global_metadata": global_metadata,
         }
     except ValueError:
         raise
@@ -780,7 +866,11 @@ def _build_canonical_vsi_metadata(
     dataset_paths = [f"s{level}" for level in range(ets.nlevels)]
     level_scales = {
         level: (
-            [1.0, physical_pixel_size_um["y"] * (2**level), physical_pixel_size_um["x"] * (2**level)]
+            [
+                1.0,
+                physical_pixel_size_um["y"] * (2**level),
+                physical_pixel_size_um["x"] * (2**level),
+            ]
             if physical_pixel_size_um["x"] is not None and physical_pixel_size_um["y"] is not None
             else None
         )
@@ -973,9 +1063,7 @@ def get_vsi_metadata(
         lossy_fields_for_v04: list[str] = []
 
         if canonical_metadata["stage_origin_um"]:
-            lossy_fields_for_v04.extend(
-                ["named_coordinate_systems", "absolute_origin_translation"]
-            )
+            lossy_fields_for_v04.extend(["named_coordinate_systems", "absolute_origin_translation"])
             compatibility_warnings.append(
                 "Stage-origin metadata is preserved only in the latest-NGFF projection."
             )
@@ -996,12 +1084,8 @@ def get_vsi_metadata(
             "compression": ets.compression_str,
             "is_bgr": ets.is_bgr,
             "file_size_bytes": ets.fsize,
-            "level_shapes": {
-                lvl: ets.level_shape(lvl) for lvl in range(ets.nlevels)
-            },
-            "level_tile_counts": {
-                lvl: ets.level_ntiles(lvl) for lvl in range(ets.nlevels)
-            },
+            "level_shapes": {lvl: ets.level_shape(lvl) for lvl in range(ets.nlevels)},
+            "level_tile_counts": {lvl: ets.level_ntiles(lvl) for lvl in range(ets.nlevels)},
             "metadata_sources": {
                 "ets": "ETSFile",
                 "physical": physical_source,

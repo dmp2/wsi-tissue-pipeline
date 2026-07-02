@@ -142,7 +142,13 @@ def build_reproduce_command(
 ) -> str:
     """Build a canonical replay command using --dataset-root terminology."""
 
-    command: list[str] = [sys.executable, "scripts/run_pipeline.py", "step5", "--dataset-root", str(plan.dataset_root)]
+    command: list[str] = [
+        sys.executable,
+        "scripts/run_pipeline.py",
+        "step5",
+        "--dataset-root",
+        str(plan.dataset_root),
+    ]
     if plan.target_source != plan.dataset_root:
         command.extend(["--target-source", str(plan.target_source)])
     if plan.target_source_format != "prepared-dir":
@@ -183,13 +189,19 @@ def build_reproduce_command(
     if plan.workflow_config.get("transformation_graph", {}).get("execute"):
         command.append("--run-transformation-graph")
     script_path = plan.transformation_graph_script
-    if script_path is not None and infer_script_source(
-        script_path,
-        explicit_path=Path(plan.workflow_config.get("transformation_graph", {}).get("script_path"))
-        if plan.workflow_config.get("transformation_graph", {}).get("script_path")
-        else None,
-        backend_origin=None,
-    ) == "explicit override path":
+    if (
+        script_path is not None
+        and infer_script_source(
+            script_path,
+            explicit_path=Path(
+                plan.workflow_config.get("transformation_graph", {}).get("script_path")
+            )
+            if plan.workflow_config.get("transformation_graph", {}).get("script_path")
+            else None,
+            backend_origin=None,
+        )
+        == "explicit override path"
+    ):
         command.extend(["--transformation-graph-script", str(script_path)])
     if plan.workflow_config.get("debug", {}).get("write_notebook_bundle"):
         command.append("--write-notebook-bundle")
@@ -291,7 +303,9 @@ def build_run_provenance(
     ]
     inputs = {
         "dataset_root": file_metadata(plan.dataset_root, repo_root=repo_root, hash_if_small=False),
-        "target_source": file_metadata(plan.target_source, repo_root=repo_root, hash_if_small=False),
+        "target_source": file_metadata(
+            plan.target_source, repo_root=repo_root, hash_if_small=False
+        ),
         "target_source_format": plan.target_source_format,
         "atlas_path": file_metadata(plan.atlas_path, repo_root=repo_root, hash_if_small=False),
         "label_path": file_metadata(plan.label_path, repo_root=repo_root, hash_if_small=False),
@@ -300,16 +314,32 @@ def build_run_provenance(
             repo_root=repo_root,
             hash_if_small=True,
         ),
-        "precomputed_manifest": file_metadata(plan.manifest_path, repo_root=repo_root, hash_if_small=True),
-        "config_override_path": file_metadata(config_override_path, repo_root=repo_root, hash_if_small=True),
+        "precomputed_manifest": file_metadata(
+            plan.manifest_path, repo_root=repo_root, hash_if_small=True
+        ),
+        "config_override_path": file_metadata(
+            config_override_path, repo_root=repo_root, hash_if_small=True
+        ),
     }
     artifacts = {
-        "plan_path": file_metadata(plan.registration_output / "resolved_run_plan.json", repo_root=repo_root, hash_if_small=True),
-        "summary_path": file_metadata(plan.registration_output / "registration_summary.json", repo_root=repo_root, hash_if_small=True),
+        "plan_path": file_metadata(
+            plan.registration_output / "resolved_run_plan.json",
+            repo_root=repo_root,
+            hash_if_small=True,
+        ),
+        "summary_path": file_metadata(
+            plan.registration_output / "registration_summary.json",
+            repo_root=repo_root,
+            hash_if_small=True,
+        ),
         "log_path": file_metadata(plan.log_path, repo_root=repo_root, hash_if_small=False),
-        "report_manifest_path": file_metadata(report_manifest_path, repo_root=repo_root, hash_if_small=True),
+        "report_manifest_path": file_metadata(
+            report_manifest_path, repo_root=repo_root, hash_if_small=True
+        ),
         "report_path": file_metadata(report_path, repo_root=repo_root, hash_if_small=False),
-        "reproduce_command_path": file_metadata(replay_command_path, repo_root=repo_root, hash_if_small=True),
+        "reproduce_command_path": file_metadata(
+            replay_command_path, repo_root=repo_root, hash_if_small=True
+        ),
         "generated_control_files": [item for item in generated_controls if item is not None],
     }
     replay_command = build_reproduce_command(
@@ -331,7 +361,9 @@ def build_run_provenance(
         runtime=build_runtime_metadata(),
         backend={
             "backend_name": getattr(backend, "name", None),
-            "module_path": str(Path(backend_module_file).resolve()) if backend_module_file else None,
+            "module_path": str(Path(backend_module_file).resolve())
+            if backend_module_file
+            else None,
             "origin_type": backend_origin,
             "emlddmm_package_version": backend_package_version,
             "transformation_graph_script": transformation_graph_metadata,

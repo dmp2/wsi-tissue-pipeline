@@ -12,6 +12,7 @@ Coordinate Convention:
 from __future__ import annotations
 
 import os
+import threading
 from collections import namedtuple
 from collections.abc import Callable, Generator
 from pathlib import Path
@@ -21,6 +22,7 @@ import numpy as np
 
 class ETSFileError(Exception):
     """Exception raised for ETS file format errors."""
+
     pass
 
 
@@ -89,6 +91,7 @@ class ETSFile:
 
         # Disable buffering for non-sequential tile reads
         self._fh = open(fname, "rb", buffering=0)
+        self._fh_lock = threading.RLock()
         self._fh.seek(0, os.SEEK_END)
         self.fsize = self._fh.tell()
         self._fname = fname
@@ -112,13 +115,15 @@ class ETSFile:
     def __getstate__(self):
         """Support pickling by excluding file handle."""
         state = self.__dict__.copy()
-        del state["_fh"]
+        state.pop("_fh", None)
+        state.pop("_fh_lock", None)
         return state
 
     def __setstate__(self, state):
         """Restore state and reopen file handle."""
         self.__dict__.update(state)
         self._fh = open(self._fname, "rb", buffering=0)
+        self._fh_lock = threading.RLock()
 
     def __enter__(self):
         return self
@@ -167,8 +172,7 @@ class ETSFile:
         tileidx_size = self._offset_endtiles - self._offset_tiles
         if tileidx_size != self.ntiles * 36:
             raise ETSFileError(
-                f"Tile count mismatch: ntiles={self.ntiles}, "
-                f"index size={tileidx_size / 36}"
+                f"Tile count mismatch: ntiles={self.ntiles}, index size={tileidx_size / 36}"
             )
 
         if self._offset_endtiles > self.fsize:
@@ -235,8 +239,7 @@ class ETSFile:
 
         # Build lookup dictionary
         self._tile_loc = {
-            (t.level, t.col, t.row): self.TileLoc(t.file_offset, t.nbytes)
-            for t in self._tiles
+            (t.level, t.col, t.row): self.TileLoc(t.file_offset, t.nbytes) for t in self._tiles
         }
 
         # Compute level info
@@ -266,8 +269,11 @@ class ETSFile:
         tuple
             (height, width) at the specified level.
         """
-        scale = 2 ** level
-        return (self.npix_y // scale, self.npix_x // scale)
+        scale = 2**level
+        return (
+            (self.npix_y + scale - 1) // scale,
+            (self.npix_x + scale - 1) // scale,
+        )
 
     def level_ntiles(self, level: int) -> tuple[int, int]:
         """
@@ -309,9 +315,17 @@ class ETSFile:
         if loc is None:
             raise KeyError(f"Tile not found: level={level}, col={col}, row={row}")
 
-        self._fh.seek(loc.fpos)
-        self._totalbytes += loc.nbytes
-        return self._fh.read(loc.nbytes)
+        with self._fh_lock:
+            self._fh.seek(loc.fpos)
+            self._totalbytes += loc.nbytes
+            data = self._fh.read(loc.nbytes)
+
+        if len(data) != loc.nbytes:
+            raise ETSFileError(
+                f"Short tile read at level={level}, col={col}, row={row}: "
+                f"expected {loc.nbytes} bytes, got {len(data)}"
+            )
+        return data
 
     def get_tile_np(self, level: int, col: int, row: int) -> np.ndarray:
         """
@@ -440,7 +454,7 @@ class ETSFile:
                 if tile_img is not None:
                     y0 = tile_row * ty
                     x0 = tile_col * tx
-                    img[y0:y0 + ty, x0:x0 + tx, :] = tile_img
+                    img[y0 : y0 + ty, x0 : x0 + tx, :] = tile_img
 
         # Crop to actual image size
         h, w = self.level_shape(level)

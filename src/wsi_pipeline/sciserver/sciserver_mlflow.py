@@ -18,11 +18,13 @@ from ..config import PipelineConfig
 _mlflow = None
 _sciserver_available = False
 
+
 def _ensure_mlflow():
     global _mlflow
     if _mlflow is None:
         try:
             import mlflow
+
             _mlflow = mlflow
         except ImportError as err:
             raise ImportError("MLFlow not installed. Install with: pip install mlflow") from err
@@ -34,6 +36,7 @@ def _check_sciserver():
     global _sciserver_available
     try:
         from SciServer import Config
+
         _sciserver_available = Config.isSciServerComputeEnvironment()
     except ImportError:
         _sciserver_available = False
@@ -46,6 +49,7 @@ def get_sciserver_username() -> str | None:
         return None
     try:
         from SciServer import Authentication
+
         user = Authentication.getKeystoneUserWithToken()
         return user.userName if user else None
     except Exception:
@@ -160,8 +164,7 @@ class SciServerMLFlowConfig:
         experiment = mlflow.get_experiment_by_name(self.experiment_name)
         if experiment is None:
             mlflow.create_experiment(
-                self.experiment_name,
-                artifact_location=self._artifact_location
+                self.experiment_name, artifact_location=self._artifact_location
             )
         mlflow.set_experiment(self.experiment_name)
 
@@ -199,10 +202,7 @@ class SciServerMLFlowConfig:
 _default_config: SciServerMLFlowConfig | None = None
 
 
-def setup_mlflow(
-    experiment_name: str = "wsi-tissue-pipeline",
-    **kwargs
-) -> dict[str, Any]:
+def setup_mlflow(experiment_name: str = "wsi-tissue-pipeline", **kwargs) -> dict[str, Any]:
     """
     Initialize MLFlow for SciServer or local environment.
 
@@ -241,9 +241,7 @@ def get_mlflow_config() -> dict[str, Any]:
 
 @contextmanager
 def mlflow_run(
-    run_name: str | None = None,
-    tags: dict[str, str] | None = None,
-    log_system_info: bool = True
+    run_name: str | None = None, tags: dict[str, str] | None = None, log_system_info: bool = True
 ):
     """
     Context manager for MLFlow runs with SciServer metadata.
@@ -292,15 +290,14 @@ def mlflow_run(
 
             # Log Python environment
             import sys
+
             mlflow.log_param("env.python_version", sys.version.split()[0])
 
         yield run
 
 
 def log_zarr_artifact(
-    zarr_path: str,
-    artifact_name: str | None = None,
-    log_metadata_only: bool = True
+    zarr_path: str, artifact_name: str | None = None, log_metadata_only: bool = True
 ):
     """
     Log a Zarr dataset as an MLFlow artifact.
@@ -364,9 +361,9 @@ def log_pipeline_config(config: PipelineConfig):
     mlflow = _ensure_mlflow()
 
     # Log as parameters (flattened)
-    config_dict = config.to_dict() if hasattr(config, 'to_dict') else vars(config)
+    config_dict = config.to_dict() if hasattr(config, "to_dict") else vars(config)
 
-    def flatten_dict(d, parent_key=''):
+    def flatten_dict(d, parent_key=""):
         items = []
         for k, v in d.items():
             new_key = f"{parent_key}.{k}" if parent_key else k
@@ -390,7 +387,8 @@ def log_pipeline_config(config: PipelineConfig):
 
     # Also log full config as artifact
     import tempfile
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config_dict, f, indent=2, default=str)
         f.flush()
         mlflow.log_artifact(f.name, "config")
