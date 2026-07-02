@@ -28,6 +28,7 @@ from .vsi_ets import (
     process_vsi_with_direct_plating,
     vsi_to_source_ome_zarr,
 )
+from .vsi_ometiff import run_vsi_ometiff_benchmark
 
 __all__ = [
     "process_slide_with_plating",
@@ -37,6 +38,7 @@ __all__ = [
     "diagnose_vsi_replating",
     "vsi_to_source_ome_zarr",
     "run_vsi_transcode_benchmark",
+    "run_vsi_ometiff_benchmark",
     # _is_big_tile and _safe_close_existing_client are internal helpers;
     # imported above for use within the package but not part of the public API.
 ]
