@@ -1,80 +1,102 @@
 # Submission Factory Workflow Contract
 
-## Goal
+This contract defines the submission-batch states, required records, provenance
+fields, and validation gates for the future Batch OME-TIFF Submission Factory.
+PR 1 implements schemas and structural loaders only; it does not execute the
+workflow.
 
-Convert large batches of multi-tissue-section VSI/ETS whole-slide images into
-database-ready, single-tissue-section OME-TIFF derivatives with QC, validation,
-and provenance.
+## High-Level Workflow
 
-## High-level workflow
+1. Create a `SubmissionBatch` from an input folder or manifest.
+2. Load a database profile that defines input, output, metadata, QC, naming, and
+   validation requirements.
+3. Run preflight checks on source slides.
+4. Mark the batch as ready, warning, or blocked for tissue detection.
+5. Detect tissue sections and write tissue-section records.
+6. Generate QC overlays for detected tissue sections.
+7. Collect operator or expert review decisions.
+8. Convert approved tissue sections to OME-TIFF derivatives.
+9. Validate OME-TIFFs, sidecars, checksums, and provenance records.
+10. Mark the batch upload-ready only when all required gates pass.
 
-1. Create submission batch.
-2. Inspect input directory.
-3. Match VSI files to ETS directories.
-4. Validate image readability and metadata.
-5. Estimate output size and required storage.
-6. Detect tissue sections.
-7. Generate tissue-section QC overlays.
-8. Require operator or expert approval.
-9. Export each approved tissue section as an OME-TIFF derivative.
-10. Validate OME-TIFF metadata and sidecars.
-11. Compute checksums.
-12. Emit upload manifest.
-13. Emit HTML and JSON validation reports.
-14. Mark batch as upload-ready only when all required gates pass.
+Steps 3 through 10 are planned future work.
 
-## Required batch-level outputs
+## Batch-Level Outputs
 
-- `upload_manifest.csv`
-- `upload_manifest.json`
-- `checksums.sha256`
-- `validation_report.html`
-- `validation_report.json`
-- `qc_gallery.html`
-- `review_decisions.csv`
-- `failed_cases.csv`
-- `rerun_config.yaml`
-- `batch_provenance.json`
+Future upload-ready batches should contain:
 
-## Required tissue-level outputs
+- upload manifest in CSV or JSON form
+- checksum file for required outputs
+- batch-level validation report
+- review-decision record
+- failed-case report when any records fail
+- batch provenance record
+- rerun or resume configuration
 
-For each approved tissue section:
+PR 1 models the records that make these outputs possible; it does not write an
+upload package.
 
-- one `.ome.tif`
-- one metadata sidecar, if required by the database profile
+## Tissue-Level Outputs
+
+Each approved tissue section should eventually produce:
+
+- one single-tissue-section `.ome.tif`
+- one metadata sidecar when required by the database profile
 - one QC thumbnail or overlay
-- one provenance record or one row in a tissue provenance table
+- one tissue-level provenance record
 
-## Required tissue provenance fields
+Single-tissue-section OME-TIFFs created by splitting a multi-tissue parent WSI
+are derivatives and must be treated as such.
 
-Each single-tissue-section OME-TIFF derivative must record:
+## Required Provenance
 
-- parent source image path or identifier
-- parent source checksum
-- parent VSI/ETS association
-- tissue section ID
+Each derivative record must preserve:
+
+- parent source path or parent source identifier
+- parent source checksum when required
+- specimen, slide, and tissue identifiers
 - crop bounds in parent pixel coordinates
-- crop bounds in parent physical coordinates, when available
-- output pixel size and units
-- output array-to-physical transform
-- any flip, rotation, or resampling applied
-- segmentation method and config hash
-- approval status
-- reviewer identity or reviewer note, if available
-- conversion software version
-- conversion timestamp
-- output checksum
+- crop bounds in physical coordinates when available
+- child array-to-physical transform
+- flags for resampling, flipping, and rotation
+- conversion profile name and version
+- conversion configuration hash when available
+- output checksum when available
 
-## Blocking conditions
+Raw VSI/ETS files are read-only and must not be modified by the submission
+workflow.
 
-Conversion must be blocked when:
+## Review States
 
-- source image cannot be read
-- matching ETS data are missing when required
-- physical pixel size is missing
-- tissue section has no parent-coordinate mapping
-- output storage is insufficient
+Batch records use `BatchStatus`. Tissue records use `TissueStatus` and optional
+`ReviewDecision` values. Operators may approve clear pass cases in a future
+workflow. Warning cases, missing metadata repairs, ambiguous tissue masks, and
+orientation uncertainty require expert review.
+
+## Blocking Conditions
+
+Future conversion must be blocked when:
+
+- source image readability fails
+- required ETS companion data are missing
+- physical pixel size or units are missing
+- parent-coordinate mapping is missing
 - database-required metadata are missing
-- OME-TIFF validation fails
-- sidecar metadata conflict with OME metadata
+- tissue detection fails for a required slide
 - tissue section has not been approved
+- required output validation fails
+- sidecar metadata conflict with OME metadata
+- required checksums are missing or invalid
+
+PR 1 only records these requirements in schemas, profile validation, and docs.
+
+## Upload-Ready Criteria
+
+A batch can be upload-ready only when:
+
+- every required source slide has passed preflight
+- every required tissue section has a final review decision
+- every approved tissue has a validated derivative output
+- all required sidecars, QC artifacts, manifests, and checksums are present
+- all database-profile validation gates pass
+- no blocking errors remain on the batch, slide, tissue, or derivative records

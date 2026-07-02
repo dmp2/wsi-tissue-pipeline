@@ -1,76 +1,87 @@
 # Batch OME-TIFF Submission Factory
 
-This module defines a novice-facing workflow for preparing large batches of proprietary
-VSI/ETS whole-slide images for national database upload as single-tissue-section OME-TIFF
-derivatives.
+The Batch OME-TIFF Submission Factory is the planned workflow layer for turning
+large Olympus VSI/ETS whole-slide image batches into database-ready,
+single-tissue-section OME-TIFF derivatives.
 
-The workflow is designed for operators who should not need to write code. It provides:
+This scaffold makes the submission batch the central object. A batch records the
+input manifest, database profile, source slides, detected tissue-section records,
+future derivative outputs, validation state, warnings, and blocking errors. The
+workflow is not centered on an opened viewer image because each source WSI may
+contain multiple tissue sections, and the database requires one image file per
+tissue section.
 
-1. dataset intake
-2. preflight inspection
-3. metadata validation
-4. tissue-section detection
-5. QC review
-6. provenance-preserving tissue crop export
-7. tiled OME-TIFF conversion
-8. output validation
-9. upload package generation
+## Why Not A QuPath-First Workflow
 
-The central object is a submission batch, not an individual image viewer session.
+Manual QuPath review can be useful for expert inspection, but it is not enough
+as the primary workflow for database upload. The future system must repeatedly:
 
-## Intended user roles
+- inspect many large VSI/ETS datasets
+- detect or segment tissue sections per parent slide
+- crop one approved derivative per tissue section
+- preserve parent-slide provenance and crop mappings
+- validate required metadata and upload-package contents
+- resume work after warnings, expert review, or failed conversion attempts
 
-### Operator
+Those are batch-submission responsibilities, not single-image viewer
+responsibilities.
 
-A student, technician, or clinician-facing user who can:
+## Intended Users
 
-- create a submission batch
-- choose input and output folders
-- run preflight checks
-- launch tissue detection
-- review obvious QC pass/fail states
-- run approved conversions
-- export upload-ready packages
+- Operator: chooses an input folder or manifest, runs preflight checks, reviews
+  clear pass/warning/blocked states, and asks for expert help when needed.
+- Expert reviewer: resolves ambiguous tissue masks, missing metadata, orientation
+  uncertainty, and warning-state tissue sections.
+- Admin: maintains database profiles, metadata requirements, sidecar policy,
+  naming templates, and validation gates.
 
-### Expert reviewer
+## PR 1 Scope
 
-A trained analyst who can:
+This PR establishes contracts only:
 
-- approve ambiguous tissue masks
-- approve metadata overrides
-- review orientation warnings
-- approve blocked or warning-state cases
-- finalize upload packages
+- submission status enums and lightweight schema models
+- database profile YAML and structural validation
+- example CSV submission manifest and manifest validation
+- documentation for the intended workflow and review roles
+- tests for the scaffold
 
-### Admin
+This PR does not implement VSI/ETS reading, tissue detection, OME-TIFF writing,
+batch conversion orchestration, upload packaging, a dashboard, QuPath
+integration, napari integration, Slicer integration, or Neuroglancer export.
 
-A maintainer who controls:
+## Expected Future Workflow
 
-- database profiles
-- naming templates
-- metadata requirements
-- compression and tiling defaults
-- validation requirements
-- server/storage paths
+1. Create or select a submission batch.
+2. Choose an input folder or submission manifest.
+3. Run preflight checks against a database profile.
+4. Review slide-level ready, warning, and blocked states.
+5. Detect tissue sections and generate QC overlays.
+6. Approve, reject, defer, or escalate tissue sections.
+7. Convert approved sections to single-tissue OME-TIFF derivatives.
+8. Validate OME-TIFFs, sidecars, checksums, and provenance.
+9. Package upload-ready outputs.
 
-## Submission states
+Planned CLI commands for a later PR include:
 
-Each batch and tissue section should be assigned one of:
+```bash
+wsi-pipeline submit preflight
+wsi-pipeline submit detect-tissues
+wsi-pipeline submit review
+wsi-pipeline submit convert
+wsi-pipeline submit validate
+wsi-pipeline submit package
+```
 
-- `READY`
-- `READY_WITH_WARNINGS`
-- `NEEDS_EXPERT_REVIEW`
-- `BLOCKED`
-- `FAILED`
-- `COMPLETE`
+These commands are not implemented in PR 1.
 
-## Non-negotiable design principles
+## Design Principles
 
 - Raw VSI/ETS files are read-only.
-- Single-tissue OME-TIFFs created by splitting a WSI are derivatives.
-- Every derivative must preserve parent-slide provenance.
-- Missing physical pixel size blocks conversion unless explicitly repaired by an expert.
-- OME-TIFF outputs must contain valid OME metadata.
-- Sidecar metadata, if emitted, must be consistent with OME metadata.
-- Every output must be traceable to source file, checksum, crop bounds, and processing config.
-- Novices should interact with profiles and QC decisions, not low-level conversion parameters.
+- Single-tissue OME-TIFFs split from a multi-tissue WSI are derivatives.
+- Every derivative preserves parent-slide provenance.
+- Missing physical pixel size blocks conversion unless explicitly repaired by an
+  expert in a future workflow.
+- Database profiles define required metadata, sidecar policy, naming templates,
+  QC gates, and validation gates.
+- Operators should make review decisions from profile-driven states, not from
+  low-level conversion settings.
