@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 NGFF_THUMBNAIL_FULL_RES_MAX_PIXELS = 25_000_000
 NGFF_STATS_FULL_RES_MAX_PIXELS = 50_000_000
+OMETIFF_QC_MAX_PIXELS = 4_000_000
+OMETIFF_QC_WINDOW_SIZE = 512
+OMETIFF_QC_WINDOW_GRID = 3
 
 # Try to import torch for faster grid generation
 try:
@@ -130,6 +133,16 @@ class NGFFLevelSelection:
     axes: tuple[str, ...] | None
     raw_shape: tuple[int, ...]
     array_yxc: np.ndarray
+
+
+@dataclass(frozen=True)
+class OmeTiffQCSelection:
+    array_yxc: np.ndarray
+    method: str
+    level_index: int
+    level_shape_yx: tuple[int, int]
+    raw_shape: tuple[int, ...]
+    windows: list[dict[str, int]]
 
 
 def find_images(
@@ -249,6 +262,7 @@ def load_thumbnail(
     size: int = 256,
     mode: str = "RGB",
     qc_display_mode: str = "auto",
+    qc_masked_background: str = "black",
 ) -> Image.Image:
     """
     Load and resize image to thumbnail.
@@ -268,7 +282,21 @@ def load_thumbnail(
         Thumbnail image.
     """
     if _is_ome_zarr_path(path):
-        return _load_ngff_thumbnail(path, size=size, mode=mode, qc_display_mode=qc_display_mode)
+        return _load_ngff_thumbnail(
+            path,
+            size=size,
+            mode=mode,
+            qc_display_mode=qc_display_mode,
+            qc_masked_background=qc_masked_background,
+        )
+    if _is_ome_tiff_path(path):
+        return _load_ometiff_thumbnail(
+            path,
+            size=size,
+            mode=mode,
+            qc_display_mode=qc_display_mode,
+            qc_masked_background=qc_masked_background,
+        )
 
     with Image.open(path) as img:
         if img.mode != mode:
@@ -279,6 +307,11 @@ def load_thumbnail(
 
 def _is_ome_zarr_path(path: Path) -> bool:
     return path.is_dir() and path.name.endswith(".ome.zarr")
+
+
+def _is_ome_tiff_path(path: Path) -> bool:
+    name = path.name.lower()
+    return path.is_file() and (name.endswith(".ome.tif") or name.endswith(".ome.tiff"))
 
 
 def _ngff_dataset_paths(path: Path) -> list[str]:
@@ -384,6 +417,14 @@ def _normalize_qc_display_mode(qc_display_mode: str | None) -> str:
     return aliases[normalized]
 
 
+def _normalize_qc_masked_background(qc_masked_background: str | None) -> str:
+    normalized = str(qc_masked_background or "black").strip().lower().replace("-", "_")
+    aliases = {"black": "black", "zero": "black", "0": "black", "white": "white", "255": "white"}
+    if normalized not in aliases:
+        raise ValueError("qc_masked_background must be one of 'black' or 'white'.")
+    return aliases[normalized]
+
+
 def _ngff_primary_rgb_mode(path: Path) -> str | None:
     try:
         root = zarr.open_group(str(path), mode="r")
@@ -420,12 +461,18 @@ def _load_ngff_mask_for_dataset(path: Path, dataset_path: str) -> np.ndarray | N
     return mask.astype(bool)
 
 
-def _mask_rgb_for_display(rgb: np.ndarray, mask: np.ndarray | None) -> np.ndarray:
+def _mask_rgb_for_display(
+    rgb: np.ndarray,
+    mask: np.ndarray | None,
+    *,
+    qc_masked_background: str = "black",
+) -> np.ndarray:
     if mask is None:
         return rgb
+    background = 255 if _normalize_qc_masked_background(qc_masked_background) == "white" else 0
     if rgb.ndim == 2:
-        return np.where(mask, rgb, 0).astype(rgb.dtype)
-    return np.where(mask[..., None], rgb, 0).astype(rgb.dtype)
+        return np.where(mask, rgb, background).astype(rgb.dtype)
+    return np.where(mask[..., None], rgb, background).astype(rgb.dtype)
 
 
 def _thumbnail_array(arr: np.ndarray, *, size: int, mode: str) -> Image.Image:
@@ -436,18 +483,259 @@ def _thumbnail_array(arr: np.ndarray, *, size: int, mode: str) -> Image.Image:
     return img.copy()
 
 
+
+def _import_tifffile_for_qc():
+    import importlib
+
+    return importlib.import_module("tifffile")
+
+
+def _ome_tiff_levels(path: Path):
+    tifffile_mod = _import_tifffile_for_qc()
+    tif = tifffile_mod.TiffFile(str(path))
+    series = tif.series[0]
+    levels = list(getattr(series, "levels", [series]))
+    return tif, levels
+
+
+def _ome_tiff_yx_from_shape(shape: tuple[int, ...]) -> tuple[int, int]:
+    if len(shape) == 2:
+        return int(shape[0]), int(shape[1])
+    if len(shape) == 3 and shape[0] in (1, 3, 4) and shape[-1] not in (1, 3, 4):
+        return int(shape[1]), int(shape[2])
+    if len(shape) == 3:
+        return int(shape[0]), int(shape[1])
+    raise ValueError(f"Unsupported OME-TIFF shape {shape}.")
+
+
+def _ome_tiff_yx_shape(path: Path) -> tuple[int, int]:
+    tif, levels = _ome_tiff_levels(path)
+    try:
+        return _ome_tiff_yx_from_shape(tuple(levels[0].shape))
+    finally:
+        tif.close()
+
+
+def _ome_tiff_window_key(
+    shape: tuple[int, ...],
+    *,
+    y0: int,
+    y1: int,
+    x0: int,
+    x1: int,
+) -> tuple[Any, ...]:
+    if len(shape) == 2:
+        return (slice(y0, y1), slice(x0, x1))
+    if len(shape) == 3 and shape[0] in (1, 3, 4) and shape[-1] not in (1, 3, 4):
+        return (slice(None), slice(y0, y1), slice(x0, x1))
+    if len(shape) == 3:
+        return (slice(y0, y1), slice(x0, x1), slice(None))
+    raise ValueError(f"Unsupported OME-TIFF shape {shape}.")
+
+
+def _stratified_windows(
+    y: int,
+    x: int,
+    *,
+    window_size: int = OMETIFF_QC_WINDOW_SIZE,
+    grid: int = OMETIFF_QC_WINDOW_GRID,
+) -> list[dict[str, int]]:
+    y = int(y)
+    x = int(x)
+    win_y = min(int(window_size), y)
+    win_x = min(int(window_size), x)
+    if y <= 0 or x <= 0:
+        return []
+    ys = np.linspace(0, max(0, y - win_y), num=max(1, int(grid)), dtype=int)
+    xs = np.linspace(0, max(0, x - win_x), num=max(1, int(grid)), dtype=int)
+    windows: list[dict[str, int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for y0 in ys:
+        for x0 in xs:
+            window = (int(y0), int(y0 + win_y), int(x0), int(x0 + win_x))
+            if window in seen:
+                continue
+            seen.add(window)
+            windows.append({"y0": window[0], "y1": window[1], "x0": window[2], "x1": window[3]})
+    return windows
+
+
+def _mosaic_arrays(arrays: list[np.ndarray]) -> np.ndarray:
+    if not arrays:
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+    arrays = [_to_yxc_array(np.asarray(arr)) for arr in arrays]
+    max_h = max(int(arr.shape[0]) for arr in arrays)
+    max_w = max(int(arr.shape[1]) for arr in arrays)
+    channels = max((int(arr.shape[2]) if arr.ndim == 3 else 1) for arr in arrays)
+    cols = int(math.ceil(math.sqrt(len(arrays))))
+    rows = int(math.ceil(len(arrays) / cols))
+    if channels == 1:
+        out = np.zeros((rows * max_h, cols * max_w), dtype=arrays[0].dtype)
+    else:
+        out = np.zeros((rows * max_h, cols * max_w, channels), dtype=arrays[0].dtype)
+    for idx, arr in enumerate(arrays):
+        row = idx // cols
+        col = idx % cols
+        y0 = row * max_h
+        x0 = col * max_w
+        if channels == 1 and arr.ndim == 3:
+            arr = arr[..., 0]
+        if channels > 1 and arr.ndim == 2:
+            arr = np.repeat(arr[..., None], channels, axis=2)
+        out[y0 : y0 + arr.shape[0], x0 : x0 + arr.shape[1], ...] = arr
+    return out
+
+
+def _read_ome_tiff_windows(
+    path: Path,
+    *,
+    level_index: int,
+    windows: list[dict[str, int]],
+) -> list[np.ndarray]:
+    tifffile_mod = _import_tifffile_for_qc()
+    arrays: list[np.ndarray] = []
+    with tifffile_mod.TiffFile(str(path)) as tif:
+        series = tif.series[0]
+        store = series.aszarr(level=int(level_index))
+        try:
+            arr = zarr.open(store, mode="r")
+            shape = tuple(map(int, arr.shape))
+            for window in windows:
+                key = _ome_tiff_window_key(
+                    shape,
+                    y0=int(window["y0"]),
+                    y1=int(window["y1"]),
+                    x0=int(window["x0"]),
+                    x1=int(window["x1"]),
+                )
+                arrays.append(np.asarray(arr[key]))
+        finally:
+            store.close()
+    return arrays
+
+
+def _load_ome_tiff_qc_selection(
+    path: Path,
+    *,
+    preferred_size: int = 512,
+    max_pixels: int = OMETIFF_QC_MAX_PIXELS,
+) -> OmeTiffQCSelection:
+    tif, levels = _ome_tiff_levels(path)
+    try:
+        chosen_index: int | None = None
+        for idx, level in enumerate(levels):
+            y, x = _ome_tiff_yx_from_shape(tuple(level.shape))
+            if y * x <= int(max_pixels):
+                chosen_index = idx
+                break
+        if chosen_index is not None:
+            level = levels[chosen_index]
+            arr = _to_yxc_array(np.asarray(level.asarray()))
+            level_yx = _ome_tiff_yx_from_shape(tuple(level.shape))
+            return OmeTiffQCSelection(
+                array_yxc=arr,
+                method="pyramid_level_under_pixel_cap",
+                level_index=int(chosen_index),
+                level_shape_yx=level_yx,
+                raw_shape=tuple(map(int, level.shape)),
+                windows=[],
+            )
+        level_shape_yx = _ome_tiff_yx_from_shape(tuple(levels[0].shape))
+    finally:
+        tif.close()
+
+    windows = _stratified_windows(
+        level_shape_yx[0],
+        level_shape_yx[1],
+        window_size=max(int(preferred_size), OMETIFF_QC_WINDOW_SIZE),
+        grid=OMETIFF_QC_WINDOW_GRID,
+    )
+    arrays = _read_ome_tiff_windows(path, level_index=0, windows=windows)
+    mosaic = _mosaic_arrays(arrays)
+    return OmeTiffQCSelection(
+        array_yxc=mosaic,
+        method="stratified_windows",
+        level_index=0,
+        level_shape_yx=level_shape_yx,
+        raw_shape=tuple(map(int, mosaic.shape)),
+        windows=windows,
+    )
+
+
+def _companion_mask_path_for_ome_tiff(path: Path) -> Path | None:
+    name = path.name
+    for suffix in ("_rgb.ome.tif", "_rgb.ome.tiff"):
+        if name.lower().endswith(suffix):
+            candidate = path.with_name(name[: -len(suffix)] + suffix.replace("_rgb", "_mask"))
+            return candidate if candidate.exists() else None
+    return None
+
+
+def _load_ome_tiff_level_array(path: Path, *, preferred_size: int = 512) -> np.ndarray:
+    return _load_ome_tiff_qc_selection(path, preferred_size=preferred_size).array_yxc
+
+
+def _load_ometiff_thumbnail(
+    path: Path,
+    *,
+    size: int,
+    mode: str,
+    qc_display_mode: str = "auto",
+    qc_masked_background: str = "black",
+) -> Image.Image:
+    display_mode = _normalize_qc_display_mode(qc_display_mode)
+    background = _normalize_qc_masked_background(qc_masked_background)
+    raw = _to_display_uint8(_load_ome_tiff_qc_selection(path, preferred_size=size).array_yxc)
+    mask_path = _companion_mask_path_for_ome_tiff(path)
+    mask = None
+    if mask_path is not None and mask_path.exists():
+        mask_arr = _load_ome_tiff_qc_selection(mask_path, preferred_size=size).array_yxc
+        if mask_arr.ndim == 3:
+            mask_arr = mask_arr[..., 0]
+        mask = mask_arr.astype(bool)
+
+    if display_mode == "auto":
+        display_mode = "masked_rgb"
+    if display_mode == "mask":
+        if mask is None:
+            raise ValueError("QC mask display requested, but companion OME-TIFF mask is not present.")
+        return _thumbnail_array(mask.astype(np.uint8) * 255, size=size, mode=mode)
+    if display_mode == "triptych":
+        if mask is None:
+            raise ValueError("Triptych QC requires a companion OME-TIFF mask.")
+        return _triptych_thumbnail(
+            raw=raw,
+            mask=mask,
+            size=size,
+            mode=mode,
+            qc_masked_background=background,
+        )
+    if display_mode == "raw_rgb":
+        return _thumbnail_array(raw, size=size, mode=mode)
+    return _thumbnail_array(
+        _mask_rgb_for_display(raw, mask, qc_masked_background=background),
+        size=size,
+        mode=mode,
+    )
+
+
 def _triptych_thumbnail(
     *,
     raw: np.ndarray,
     mask: np.ndarray | None,
     size: int,
     mode: str,
+    qc_masked_background: str = "black",
 ) -> Image.Image:
     if mask is None:
         raise ValueError("triptych QC requires labels/tissue_mask.")
     raw_img = _thumbnail_array(raw, size=size, mode=mode)
     mask_img = _thumbnail_array((mask.astype(np.uint8) * 255), size=size, mode=mode)
-    masked_img = _thumbnail_array(_mask_rgb_for_display(raw, mask), size=size, mode=mode)
+    masked_img = _thumbnail_array(
+        _mask_rgb_for_display(raw, mask, qc_masked_background=qc_masked_background),
+        size=size,
+        mode=mode,
+    )
     w = max(raw_img.width, mask_img.width, masked_img.width)
     h = max(raw_img.height, mask_img.height, masked_img.height)
     panels = [ImageOps.pad(img, (w, h), color=(255, 255, 255)) for img in (raw_img, mask_img, masked_img)]
@@ -517,6 +805,7 @@ def _load_ngff_thumbnail(
     size: int,
     mode: str,
     qc_display_mode: str = "auto",
+    qc_masked_background: str = "black",
 ) -> Image.Image:
     selection = _load_ngff_level(
         path,
@@ -554,11 +843,27 @@ def _load_ngff_thumbnail(
                 "Triptych QC requires raw RGB, but this artifact stores masked RGB as primary. "
                 "Use a debug/unmasked profile or regenerate from the source VSI/ETS."
             )
-        return _triptych_thumbnail(raw=raw, mask=mask, size=size, mode=mode)
+        return _triptych_thumbnail(
+            raw=raw,
+            mask=mask,
+            size=size,
+            mode=mode,
+            qc_masked_background=qc_masked_background,
+        )
 
     if primary_rgb_mode == "masked_rgb":
+        if _normalize_qc_masked_background(qc_masked_background) == "white" and mask is not None:
+            return _thumbnail_array(
+                _mask_rgb_for_display(raw, mask, qc_masked_background=qc_masked_background),
+                size=size,
+                mode=mode,
+            )
         return _thumbnail_array(raw, size=size, mode=mode)
-    return _thumbnail_array(_mask_rgb_for_display(raw, mask), size=size, mode=mode)
+    return _thumbnail_array(
+        _mask_rgb_for_display(raw, mask, qc_masked_background=qc_masked_background),
+        size=size,
+        mode=mode,
+    )
 
 
 def _channel_stats(arr: np.ndarray) -> dict[str, float | bool]:
@@ -787,6 +1092,9 @@ def _image_size(path: Path) -> tuple[int, int]:
         dataset_path = _ngff_dataset_paths(path)[0]
         arr = zarr.open_array(str(path / dataset_path), mode="r")
         y, x = _array_yx_shape(tuple(arr.shape), axes)
+        return x, y
+    if _is_ome_tiff_path(path):
+        y, x = _ome_tiff_yx_shape(path)
         return x, y
     with Image.open(path) as img:
         return img.width, img.height
@@ -1077,7 +1385,12 @@ def _sorted_groups(records: list[QCRecord]) -> list[tuple[int, str, list[QCRecor
     return ordered_groups
 
 
-def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataFrame:
+def compute_qc_stats(
+    records: list[QCRecord],
+    input_dir: str | Path,
+    *,
+    qc_masked_background: str = "black",
+) -> pd.DataFrame:
     input_dir = Path(input_dir)
     rows: list[dict[str, Any]] = []
     for record in records:
@@ -1105,6 +1418,36 @@ def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataF
                 "ngff_dataset_path": selection.dataset_path,
                 "ngff_axes": ",".join(selection.axes) if selection.axes is not None else "",
                 "ngff_raw_shape": "x".join(str(dim) for dim in selection.raw_shape),
+                "artifact_likely": _record_artifact_likely(record),
+                "artifact_reason": _record_artifact_reason(record),
+            }
+            row.update(_channel_stats(arr))
+            rows.append(row)
+            continue
+
+        if _is_ome_tiff_path(path):
+            selection = _load_ome_tiff_qc_selection(path, preferred_size=512)
+            arr = _to_display_uint8(selection.array_yxc)
+            background = _normalize_qc_masked_background(qc_masked_background)
+            row = {
+                "relative_path": record.relative_path,
+                "filename": record.filename,
+                "source_image": record.source_image,
+                "tile_index_on_source": record.tile_index_on_source,
+                "overall_index": record.overall_index,
+                "overall_label": record.overall_label,
+                "width": record.width,
+                "height": record.height,
+                "area_px": record.width * record.height,
+                "image_mean_intensity": float(arr.mean()),
+                "image_std_intensity": float(arr.std()),
+                "ometiff_stats_level_shape": "x".join(str(dim) for dim in arr.shape),
+                "ometiff_qc_method": selection.method,
+                "ometiff_qc_level_index": selection.level_index,
+                "ometiff_qc_level_shape_yx": "x".join(str(dim) for dim in selection.level_shape_yx),
+                "ometiff_qc_raw_shape": "x".join(str(dim) for dim in selection.raw_shape),
+                "ometiff_qc_windows": json.dumps(selection.windows, sort_keys=True),
+                "qc_masked_background": background,
                 "artifact_likely": _record_artifact_likely(record),
                 "artifact_reason": _record_artifact_reason(record),
             }
@@ -1141,7 +1484,6 @@ def compute_qc_stats(records: list[QCRecord], input_dir: str | Path) -> pd.DataF
                     }
                 )
     return pd.DataFrame(rows)
-
 
 def _calculate_columns(count: int, columns: int | str) -> int:
     if columns == "auto":
@@ -1196,6 +1538,7 @@ def render_qc_grids(
     columns: int | str = "auto",
     label_mode: str = "slice",
     qc_display_mode: str = "auto",
+    qc_masked_background: str = "black",
     backend: str = "pil",
     write_master: bool = True,
     write_per_slide: bool = True,
@@ -1216,6 +1559,7 @@ def render_qc_grids(
                     record.path(input_dir),
                     thumb_size,
                     qc_display_mode=qc_display_mode,
+                    qc_masked_background=qc_masked_background,
                 )
                 label = _build_label(record, label_mode)
                 if label:
@@ -1243,6 +1587,7 @@ def render_qc_grids(
                     record.path(input_dir),
                     thumb_size,
                     qc_display_mode=qc_display_mode,
+                    qc_masked_background=qc_masked_background,
                 )
                 label = _build_label(record, label_mode, group_ordinal=group_ordinal, master=True)
                 if label:
@@ -1277,6 +1622,7 @@ def run_qc_workflow(
     columns: int | str = "auto",
     label_mode: str = "both",
     qc_display_mode: str = "auto",
+    qc_masked_background: str = "black",
     backend: str = "pil",
     write_master: bool = True,
     write_per_slide: bool = True,
@@ -1309,6 +1655,7 @@ def run_qc_workflow(
         columns=columns,
         label_mode=label_mode,
         qc_display_mode=qc_display_mode,
+        qc_masked_background=qc_masked_background,
         backend=backend,
         write_master=write_master,
         write_per_slide=write_per_slide,
@@ -1316,7 +1663,11 @@ def run_qc_workflow(
 
     stats_csv: Path | None = None
     if write_stats:
-        stats_df = compute_qc_stats(records, input_dir)
+        stats_df = compute_qc_stats(
+            records,
+            input_dir,
+            qc_masked_background=qc_masked_background,
+        )
         stats_csv = output_dir / "image_statistics.csv"
         stats_df.to_csv(stats_csv, index=False)
 
@@ -1340,6 +1691,7 @@ def build_qc_grids(
     columns: int | str = "auto",
     label_mode: str = "slice",
     qc_display_mode: str = "auto",
+    qc_masked_background: str = "black",
     backend: str = "pil",
     create_master: bool = True,
 ) -> list[Path]:
@@ -1378,6 +1730,7 @@ def build_qc_grids(
         columns=columns,
         label_mode=label_mode,
         qc_display_mode=qc_display_mode,
+        qc_masked_background=qc_masked_background,
         backend=backend,
         write_master=create_master,
         write_per_slide=True,
@@ -1411,6 +1764,7 @@ class QCGridBuilder:
         columns: int | str = "auto",
         label_mode: str = "slice",
         qc_display_mode: str = "auto",
+        qc_masked_background: str = "black",
         backend: str = "pil",
     ):
         self.thumb_size = thumb_size
@@ -1418,6 +1772,7 @@ class QCGridBuilder:
         self.columns = columns
         self.label_mode = label_mode
         self.qc_display_mode = qc_display_mode
+        self.qc_masked_background = qc_masked_background
         self.backend = backend
 
     def build(
@@ -1435,6 +1790,7 @@ class QCGridBuilder:
             columns=self.columns,
             label_mode=self.label_mode,
             qc_display_mode=self.qc_display_mode,
+            qc_masked_background=self.qc_masked_background,
             backend=self.backend,
             create_master=create_master,
         )

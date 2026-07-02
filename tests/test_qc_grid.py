@@ -621,3 +621,94 @@ def test_ome_zarr_qc_raw_rgb_fails_for_masked_primary(temp_dir: Path):
             qc_grid.load_thumbnail(tissue_dir, size=8, qc_display_mode="raw_rgb")
     finally:
         monkeypatch.undo()
+
+
+
+def test_ometiff_qc_stats_record_safe_selection_metadata(monkeypatch, temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    input_dir = temp_dir / "ometiff"
+    input_dir.mkdir()
+    rgb_path = input_dir / "sample_rgb.ome.tif"
+    rgb_path.touch()
+    record = qc_grid.QCRecord(
+        relative_path=rgb_path.name,
+        filename=rgb_path.name,
+        source_image="sample.vsi",
+        tile_index_on_source=0,
+        overall_index=1,
+        overall_label="0001",
+        width=1024,
+        height=2048,
+    )
+
+    def _fake_selection(path, *, preferred_size=512, max_pixels=qc_grid.OMETIFF_QC_MAX_PIXELS):
+        return qc_grid.OmeTiffQCSelection(
+            array_yxc=np.full((8, 6, 3), 10, dtype=np.uint8),
+            method="pyramid_level_under_pixel_cap",
+            level_index=5,
+            level_shape_yx=(8, 6),
+            raw_shape=(8, 6, 3),
+            windows=[],
+        )
+
+    def _unexpected_open(*args, **kwargs):
+        raise AssertionError("OME-TIFF QC stats must not use PIL Image.open")
+
+    monkeypatch.setattr(qc_grid, "_load_ome_tiff_qc_selection", _fake_selection)
+    monkeypatch.setattr(qc_grid.Image, "open", _unexpected_open)
+
+    stats = qc_grid.compute_qc_stats([record], input_dir, qc_masked_background="white")
+    row = stats.iloc[0]
+    assert row["ometiff_qc_method"] == "pyramid_level_under_pixel_cap"
+    assert row["ometiff_qc_level_index"] == 5
+    assert row["ometiff_qc_level_shape_yx"] == "8x6"
+    assert row["qc_masked_background"] == "white"
+
+
+def test_ometiff_white_background_is_display_only(monkeypatch, temp_dir: Path):
+    import wsi_pipeline.qc_grid as qc_grid
+
+    input_dir = temp_dir / "ometiff"
+    input_dir.mkdir()
+    rgb_path = input_dir / "sample_rgb.ome.tif"
+    mask_path = input_dir / "sample_mask.ome.tif"
+    rgb_path.touch()
+    mask_path.touch()
+
+    raw = np.zeros((2, 2, 3), dtype=np.uint8)
+    raw[0, 0] = [100, 80, 60]
+    mask = np.array([[1, 0], [0, 0]], dtype=np.uint8)
+
+    def _fake_selection(path, *, preferred_size=512, max_pixels=qc_grid.OMETIFF_QC_MAX_PIXELS):
+        arr = mask if Path(path).name.endswith("_mask.ome.tif") else raw
+        return qc_grid.OmeTiffQCSelection(
+            array_yxc=arr,
+            method="pyramid_level_under_pixel_cap",
+            level_index=0,
+            level_shape_yx=arr.shape[:2],
+            raw_shape=arr.shape,
+            windows=[],
+        )
+
+    monkeypatch.setattr(qc_grid, "_load_ome_tiff_qc_selection", _fake_selection)
+
+    black = np.asarray(
+        qc_grid.load_thumbnail(
+            rgb_path,
+            size=16,
+            qc_display_mode="masked_rgb",
+            qc_masked_background="black",
+        )
+    )
+    white = np.asarray(
+        qc_grid.load_thumbnail(
+            rgb_path,
+            size=16,
+            qc_display_mode="masked_rgb",
+            qc_masked_background="white",
+        )
+    )
+    assert black[-1, -1].tolist() == [0, 0, 0]
+    assert white[-1, -1].tolist() == [255, 255, 255]
+    assert raw[1, 1].tolist() == [0, 0, 0]

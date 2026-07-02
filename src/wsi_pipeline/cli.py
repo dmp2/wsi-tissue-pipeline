@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -923,6 +925,221 @@ def benchmark_vsi_transcode_cmd(
     console.print(
         "[bold blue]Top bottleneck:[/] "
         f"{decision.get('top_bottleneck_category', 'inconclusive')}"
+    )
+
+
+@main.command("benchmark-vsi-ometiff")
+@click.option(
+    "--vsi",
+    "vsi_path",
+    required=True,
+    type=click.Path(exists=True, path_type=Path),
+    help="Input VSI path for native per-tissue OME-TIFF benchmarking.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Directory for per_tissue_ometiff, benchmark.json, benchmark.csv, and QC outputs.",
+)
+@click.option("--source-level", default="2", show_default=True, help="ETS source level to export.")
+@click.option(
+    "--segmentation-level",
+    default="7",
+    show_default=True,
+    help="ETS level used for segmentation and native mip stop.",
+)
+@click.option(
+    "--output-profile",
+    default="production",
+    show_default=True,
+    type=click.Choice(["validation", "production", "upload_staging"]),
+    help="Output profile whose geometry defaults should be used.",
+)
+@click.option(
+    "--tile-frame-level",
+    default="segmentation",
+    show_default=True,
+    type=click.Choice(["segmentation", "source"]),
+    help="Coordinate level where crop size, padding, and margin are defined.",
+)
+@click.option(
+    "--crop-shape-policy",
+    default=None,
+    type=click.Choice(["notebook_square", "compact_square", "compact_rectangle"]),
+    help="Optional crop shape policy override.",
+)
+@click.option(
+    "--metadata-backend",
+    default="bioformats",
+    show_default=True,
+    type=click.Choice(["auto", "bioformats", "ets_only"]),
+    help="Metadata backend used for geometry setup.",
+)
+@click.option(
+    "--metadata-schema",
+    default="v0.4",
+    show_default=True,
+    help="Metadata schema label recorded in benchmark outputs.",
+)
+@click.option(
+    "--compression",
+    default="deflate",
+    show_default=True,
+    help="TIFF compression: deflate, lzw, jpeg, or none.",
+)
+@click.option("--max-tissues", type=int, default=None, help="Limit benchmark to first N tissues.")
+@click.option("--tissue-index", type=int, default=None, help="Export only this tissue index.")
+@click.option(
+    "--tissue-selection",
+    default="first",
+    show_default=True,
+    type=click.Choice(["first", "heaviest-tiles", "largest-area"]),
+    help="Tissue ordering strategy when --tissue-index is not provided.",
+)
+@click.option(
+    "--no-synthetic-benchmarks",
+    is_flag=True,
+    help="Skip optional synthetic/replay benchmark TIFF payloads while keeping native export and validation.",
+)
+@click.option(
+    "--qc-masked-background",
+    default="black",
+    show_default=True,
+    type=click.Choice(["black", "white"]),
+    help="Visualization-only background for masked RGB QC thumbnails.",
+)
+@click.option(
+    "--max-tiles",
+    type=int,
+    default=None,
+    help="Sample at most N tiles per tissue for benchmark-only partial payloads.",
+)
+@click.option(
+    "--max-blocks",
+    type=int,
+    default=None,
+    help="Alias for --max-tiles for parity with transcode benchmarks.",
+)
+@click.option(
+    "--tile-sampling",
+    default="first",
+    show_default=True,
+    type=click.Choice(["first", "random", "stratified"]),
+    help="Tile sampling strategy when --max-tiles/--max-blocks is set.",
+)
+@click.option(
+    "--tile-random-seed",
+    type=int,
+    default=0,
+    show_default=True,
+    help="Seed for random and stratified tile sampling.",
+)
+@click.option("--estimate-only", is_flag=True, help="Estimate source-level output without writing TIFFs.")
+@click.option(
+    "--config",
+    "-c",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    help="Pipeline YAML config whose segmentation/tile/output settings should be used.",
+)
+def benchmark_vsi_ometiff_cmd(
+    vsi_path: Path,
+    output_dir: Path,
+    source_level: str,
+    segmentation_level: str,
+    output_profile: str,
+    tile_frame_level: str,
+    crop_shape_policy: str | None,
+    metadata_backend: str,
+    metadata_schema: str,
+    compression: str,
+    max_tissues: int | None,
+    tissue_index: int | None,
+    tissue_selection: str,
+    no_synthetic_benchmarks: bool,
+    qc_masked_background: str,
+    max_tiles: int | None,
+    max_blocks: int | None,
+    tile_sampling: str,
+    tile_random_seed: int,
+    estimate_only: bool,
+    config_path: Path | None,
+):
+    """Run native per-tissue VSI/ETS to OME-TIFF diagnostics."""
+    from .pipeline import run_vsi_ometiff_benchmark
+
+    config = load_config(config_path) if config_path else PipelineConfig()
+    output_overrides: dict[str, object] = {}
+    if config_path is not None:
+        import yaml
+
+        raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if isinstance(raw_config, dict) and isinstance(raw_config.get("output"), dict):
+            output_overrides = dict(raw_config["output"])
+
+    def _output_override(name: str):
+        return getattr(config.output, name) if name in output_overrides else None
+
+    effective_max_tiles = max_tiles if max_tiles is not None else max_blocks
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        git_commit = "nogit"
+    command_used = shlex.join([sys.executable, "-m", "wsi_pipeline.cli", *sys.argv[1:]])
+    result = run_vsi_ometiff_benchmark(
+        vsi_path,
+        output_dir,
+        source_level=source_level,
+        segmentation_level=segmentation_level,
+        output_profile=output_profile,
+        tile_frame_level=tile_frame_level,
+        crop_shape_policy=crop_shape_policy,
+        pipeline_config=config,
+        segmentation_config=config.segmentation,
+        tile_config=config.tiles,
+        metadata_backend=metadata_backend,
+        metadata_schema=metadata_schema,
+        compression=compression,
+        max_tissues=max_tissues,
+        max_tiles=effective_max_tiles,
+        tile_sampling=tile_sampling,
+        tile_random_seed=tile_random_seed,
+        estimate_only=estimate_only,
+        tissue_index=tissue_index,
+        tissue_selection=tissue_selection,
+        no_synthetic_benchmarks=no_synthetic_benchmarks,
+        qc_masked_background=qc_masked_background,
+        command_used=command_used,
+        git_commit=git_commit,
+        primary_rgb_mode=_output_override("primary_rgb_mode"),
+        masked_rgb_fill_value=_output_override("masked_rgb_fill_value"),
+        store_unmasked_rgb=_output_override("store_unmasked_rgb"),
+        materialize_masked_rgb=_output_override("materialize_masked_rgb"),
+        source_tile_aligned_canvas=_output_override("source_tile_aligned_canvas"),
+        native_mip_stop_policy=_output_override("native_mip_stop_policy"),
+        native_mip_stop_level=_output_override("native_mip_stop_level"),
+        config_source=str(config_path) if config_path else "default PipelineConfig",
+    )
+    summary = result["summary"]
+    totals = result["totals"]
+    decision = result["decision_rules"]
+    console.print(f"[bold green]Wrote benchmark:[/] {output_dir / 'benchmark.json'}")
+    console.print(f"[bold blue]ETS:[/] {summary['ets_path']}")
+    console.print(
+        "[bold blue]OME-TIFF tiles:[/] "
+        f"positive={totals.get('positive_rgb_tiles_written', 0)} "
+        f"zero={totals.get('zero_rgb_tiles_written', 0)} "
+        f"skipped_decode={totals.get('rgb_tiles_skipped_before_decode', 0)}"
+    )
+    console.print(
+        "[bold blue]Decision:[/] "
+        f"interchange={decision.get('interchange_export')} "
+        f"production={decision.get('production_database_staging')}"
     )
 
 
