@@ -16,7 +16,9 @@ def test_database_profile_yaml_loads_successfully():
     assert profile.profile_version == "0.1.0"
     assert profile.input.accepted_extensions == [".vsi"]
     assert profile.output.extension == ".ome.tif"
-    assert profile.naming.template == "sub-{specimen_id}_slide-{slide_id}_tissue-{tissue_id}.ome.tif"
+    assert (
+        profile.naming.template == "sub-{specimen_id}_slide-{slide_id}_tissue-{tissue_id}.ome.tif"
+    )
 
 
 def test_profile_loader_fails_clearly_when_required_sections_are_missing(tmp_path):

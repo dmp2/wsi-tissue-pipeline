@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import csv
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 from pydantic import Field, ValidationError
 
@@ -130,7 +130,9 @@ def _validate_row(
             )
 
     if check_paths:
-        path_to_check = source_path if source_path.is_absolute() else manifest_path.parent / source_path
+        path_to_check = (
+            source_path if source_path.is_absolute() else manifest_path.parent / source_path
+        )
         if not path_to_check.exists():
             errors.append(f"row {row_number}: source_path does not exist: {source_path}")
 
