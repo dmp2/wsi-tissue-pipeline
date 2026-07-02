@@ -1,0 +1,54 @@
+profile_name: national_database_ometiff
+profile_version: 0.1.0
+description: >
+  Default database-upload profile for converting multi-tissue-section VSI/ETS
+  whole-slide images into single-tissue-section OME-TIFF derivatives.
+
+input:
+  accepted_extensions:
+    - .vsi
+  require_ets_companion: true
+  raw_files_read_only: true
+
+output:
+  mode: single_tissue_section_ome_tiff
+  extension: .ome.tif
+  emit_sidecar_json: true
+  emit_qc_png: true
+  emit_per_tissue_provenance: true
+  emit_batch_manifest: true
+  emit_checksums: true
+
+ometiff:
+  tiled: true
+  pyramidal: true
+  bigtiff: true
+  preserve_source_resolution: true
+  compression: default
+  tile_size: default
+  require_ome_xml: true
+
+metadata:
+  require_physical_pixel_size: true
+  require_units: true
+  require_channel_metadata: false
+  require_parent_source_checksum: true
+  require_crop_bounds_parent_pixels: true
+  require_child_array_to_physical_transform: true
+
+qc:
+  require_tissue_detection_qc: true
+  require_operator_approval: true
+  require_expert_review_for_warnings: true
+  block_on_failed_segmentation: true
+  block_on_missing_parent_mapping: true
+
+naming:
+  template: "sub-{specimen_id}_slide-{slide_id}_tissue-{tissue_id}.ome.tif"
+  require_unique_output_names: true
+
+validation:
+  validate_ometiff: true
+  validate_sidecar_consistency: true
+  validate_checksums: true
+  fail_batch_if_any_required_output_fails: true
