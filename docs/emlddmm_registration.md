@@ -197,6 +197,6 @@ Atlas-registration runs also write notebook-parity artifacts:
 
 ## Related Docs
 
-- [`emlddmm_notebook_parity.md`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/docs/emlddmm_notebook_parity.md)
-- [`configuration.md`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/docs/configuration.md)
-- [`installation.md`](/C:/Users/dpado/Documents/git/temporal_bone_mapping/wsi-tissue-pipeline/wsi-tissue-pipeline/docs/installation.md)
+- [`emlddmm_notebook_parity.md`](emlddmm_notebook_parity.md)
+- [`configuration.md`](configuration.md)
+- [`installation.md`](installation.md)

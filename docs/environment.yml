@@ -1,0 +1,38 @@
+# Conda environment for local documentation development.
+#
+#   conda env create -f docs/environment.yml
+#   conda activate wsi-pipeline-docs
+#   pip install --no-deps -e .        # install the package without its runtime stack
+#   sphinx-build -b html docs docs/_build/html -W --keep-going
+#
+# pandoc is included here so nbsphinx can render the notebooks locally.
+name: wsi-pipeline-docs
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10
+  # --- Sphinx doc-build stack ---
+  - sphinx>=7.0
+  - sphinx_rtd_theme>=2.0
+  - myst-parser>=2.0
+  - linkify-it-py>=2.0
+  - nbsphinx>=0.9
+  - ipython>=8.0
+  - sphinx-copybutton>=0.5
+  - pandoc
+  # --- Lightweight core package deps (for autodoc fidelity) ---
+  - numpy>=1.24
+  - pydantic>=2.0
+  - pyyaml>=6.0
+  - click>=8.1
+  - rich>=13.0
+  - packaging>=23.0
+  - platformdirs>=4.2
+  - filelock>=3.16
+  - python-dotenv>=1.0
+  - tqdm>=4.65
+  # --- Not reliably on conda-forge: install via pip ---
+  - pip>=23.0
+  - pip:
+      - nbsphinx-link>=1.3
+      - pydantic-settings>=2.0
