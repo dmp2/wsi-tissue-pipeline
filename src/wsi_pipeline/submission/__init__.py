@@ -16,11 +16,31 @@ from .preflight import (
     PreflightRowResult,
     PreflightRunResult,
     PreflightState,
+    PreflightStateIssue,
     PreflightStateRow,
     run_preflight,
 )
 from .profiles import DatabaseProfile, RequirementPhase, load_database_profile
-from .statuses import BatchStatus, ReviewDecision, TissueStatus
+from .statuses import (
+    BatchStatus,
+    ReviewDecision,
+    TissuePlanRowCategory,
+    TissuePlanStatus,
+    TissueStatus,
+)
+from .tissue_plan import (
+    TISSUE_PLAN_VERSION,
+    TissueDetectionPlan,
+    TissuePlanError,
+    TissuePlanJob,
+    TissuePlanJobInputs,
+    TissuePlanJobOutputs,
+    TissuePlanRowSummary,
+    TissuePlanRunResult,
+    build_tissue_detection_plan,
+    load_preflight_state,
+    plan_tissues_from_state,
+)
 from .validation import ManifestValidationError, ProfileValidationError, SubmissionValidationError
 
 __all__ = [
@@ -36,6 +56,7 @@ __all__ = [
     "PreflightReport",
     "PreflightRunResult",
     "PreflightState",
+    "PreflightStateIssue",
     "PreflightStateRow",
     "PreflightRowResult",
     "ProfileValidationError",
@@ -45,8 +66,21 @@ __all__ = [
     "SubmissionBatch",
     "SubmissionManifest",
     "SubmissionValidationError",
+    "TissuePlanRowCategory",
+    "TissuePlanStatus",
+    "TISSUE_PLAN_VERSION",
+    "TissueDetectionPlan",
+    "TissuePlanError",
+    "TissuePlanJob",
+    "TissuePlanJobInputs",
+    "TissuePlanJobOutputs",
+    "TissuePlanRowSummary",
+    "TissuePlanRunResult",
     "TissueStatus",
     "load_database_profile",
     "load_submission_manifest",
+    "build_tissue_detection_plan",
+    "load_preflight_state",
+    "plan_tissues_from_state",
     "run_preflight",
 ]

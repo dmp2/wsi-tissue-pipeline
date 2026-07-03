@@ -10,6 +10,8 @@ from wsi_pipeline.submission import (
     ReviewDecision,
     SourceSlide,
     SubmissionBatch,
+    TissuePlanRowCategory,
+    TissuePlanStatus,
     TissueStatus,
 )
 
@@ -17,6 +19,10 @@ from wsi_pipeline.submission import (
 def test_status_enum_values_serialize_as_expected():
     assert BatchStatus.DRAFT.value == "DRAFT"
     assert TissueStatus.NEEDS_EXPERT_REVIEW.value == "NEEDS_EXPERT_REVIEW"
+    assert TissuePlanStatus.TISSUE_PLAN_READY.value == "TISSUE_PLAN_READY"
+    assert (
+        TissuePlanRowCategory.ELIGIBLE_FOR_TISSUE_DETECTION.value == "ELIGIBLE_FOR_TISSUE_DETECTION"
+    )
     assert ReviewDecision.DEFER.value == "DEFER"
 
     batch = SubmissionBatch(

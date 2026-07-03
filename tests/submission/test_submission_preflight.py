@@ -293,10 +293,12 @@ def test_state_output_is_written(tmp_path):
     payload = json.loads(state_path.read_text(encoding="utf-8"))
 
     assert result.state_out_path == state_path
-    assert payload["preflight_state_version"] == "1.0"
+    assert payload["preflight_state_version"] == "1.1"
     assert payload["preflight_status"] == "PREFLIGHT_PASSED"
     assert payload["json_report_path"] == str(report_path)
     assert payload["row_statuses"][0]["valid"] is True
+    assert payload["row_statuses"][0]["source_image_id"] == "S1/Slide1"
+    assert payload["row_statuses"][0]["issues"] == []
 
 
 def test_strict_mode_returns_nonzero_without_relabeling_deferred(tmp_path):

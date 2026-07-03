@@ -42,6 +42,25 @@ class TissueStatus(str, Enum):
     FAILED = "FAILED"
 
 
+class TissuePlanStatus(str, Enum):
+    """Status values for dry-run tissue-detection planning."""
+
+    TISSUE_PLAN_READY = "TISSUE_PLAN_READY"
+    TISSUE_PLAN_READY_WITH_DEFERRED_REQUIREMENTS = "TISSUE_PLAN_READY_WITH_DEFERRED_REQUIREMENTS"
+    TISSUE_PLAN_BLOCKED = "TISSUE_PLAN_BLOCKED"
+    TISSUE_PLAN_EMPTY = "TISSUE_PLAN_EMPTY"
+
+
+class TissuePlanRowCategory(str, Enum):
+    """Row categories for local tissue-detection planning."""
+
+    ELIGIBLE_FOR_TISSUE_DETECTION = "ELIGIBLE_FOR_TISSUE_DETECTION"
+    BLOCKED_BY_PREFLIGHT_ERROR = "BLOCKED_BY_PREFLIGHT_ERROR"
+    DEFERRED_SOURCE_METADATA = "DEFERRED_SOURCE_METADATA"
+    SKIPPED_NONLOCAL_SOURCE = "SKIPPED_NONLOCAL_SOURCE"
+    SKIPPED_UNSUPPORTED_OR_UNKNOWN = "SKIPPED_UNSUPPORTED_OR_UNKNOWN"
+
+
 class ReviewDecision(str, Enum):
     """Operator or expert review decisions for tissue sections."""
 
@@ -51,4 +70,10 @@ class ReviewDecision(str, Enum):
     DEFER = "DEFER"
 
 
-__all__ = ["BatchStatus", "TissueStatus", "ReviewDecision"]
+__all__ = [
+    "BatchStatus",
+    "ReviewDecision",
+    "TissuePlanRowCategory",
+    "TissuePlanStatus",
+    "TissueStatus",
+]

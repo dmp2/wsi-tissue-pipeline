@@ -11,7 +11,7 @@ workflow.
 2. Load a database profile that defines input, output, metadata, QC, naming, and
    validation requirements.
 3. Run preflight checks on source slides.
-4. Mark the batch as ready, warning, or blocked for tissue detection.
+4. Plan local tissue-detection jobs from preflight state.
 5. Detect tissue sections and write tissue-section records.
 6. Generate QC overlays for detected tissue sections.
 7. Collect operator or expert review decisions.
@@ -19,7 +19,17 @@ workflow.
 9. Validate OME-TIFFs, sidecars, checksums, and provenance records.
 10. Mark the batch upload-ready only when all required gates pass.
 
-Steps 3 through 10 are planned future work.
+Steps 3 and 4 now have executable planning commands. Steps 5 through 10 remain
+planned future work.
+
+## Tissue-Detection Plan Output
+
+The `plan-tissues` dry run consumes a preflight state file and emits a JSON plan
+that records which rows would become future local `tissue_detection` jobs, which
+rows are blocked by preflight errors, and which non-local rows are skipped for
+this local planning pass. Deferred row requirements remain attached to planned
+jobs, but the plan does not assert tissue locations, tissue counts, mask quality,
+crop validity, OME-TIFF readiness, or upload readiness.
 
 ## Batch-Level Outputs
 

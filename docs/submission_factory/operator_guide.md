@@ -70,6 +70,32 @@ preserved in the JSON report. The JSON report is the detailed machine-readable
 record; the state file is a draft preflight state for later workflow stages and
 does not imply conversion or upload readiness.
 
+## Tissue-Detection Planning
+
+`wsi-pipeline submit plan-tissues` consumes the preflight state JSON and writes a
+deterministic dry-run plan for future local tissue detection jobs. It classifies
+rows independently, so an eligible local row can still be planned even when a
+different row has a preflight error.
+
+Example command:
+
+```bash
+wsi-pipeline submit plan-tissues \
+  --state preflight_state.json \
+  --plan-out tissue_detection_plan.json
+```
+
+The plan lists future `tissue_detection` jobs for local or `file://` source rows
+with no error-severity preflight issues. Rows blocked by preflight errors appear
+in `blocked_rows`. Non-local URI rows are skipped for this local planning pass,
+not treated as missing local files. Deferred metadata requirements remain
+attached to otherwise eligible planned jobs.
+
+This command does not read image pixels, inspect masks, count tissue sections,
+crop images, convert OME-TIFFs, validate OME-XML from image files, compute image
+checksums, or prepare upload packages. The expected next stage is a future tissue
+detection command that consumes planned jobs and creates real detection outputs.
+
 ## Status Meanings
 
 - `PASS`: the record satisfies the current gate.
@@ -96,6 +122,7 @@ Available now:
 
 ```bash
 wsi-pipeline submit preflight
+wsi-pipeline submit plan-tissues
 ```
 
 Planned for later workflow stages:

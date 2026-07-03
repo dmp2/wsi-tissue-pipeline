@@ -30,7 +30,7 @@ from .profiles import DatabaseProfile, RequirementPhase, load_database_profile
 from .statuses import BatchStatus
 
 PREFLIGHT_REPORT_VERSION = "1.0"
-PREFLIGHT_STATE_VERSION = "1.0"
+PREFLIGHT_STATE_VERSION = "1.1"
 
 
 class IssueSeverity(str, Enum):
@@ -67,6 +67,16 @@ class PreflightRowResult(SubmissionBaseModel):
     issues: list[PreflightIssue] = Field(default_factory=list)
 
 
+class PreflightStateIssue(SubmissionBaseModel):
+    """Compact issue summary stored with preflight state rows."""
+
+    code: str
+    severity: IssueSeverity
+    message: str
+    field: str | None = None
+    requirement_phase: RequirementPhase | None = None
+
+
 class PreflightReport(SubmissionBaseModel):
     """Machine-readable preflight report."""
 
@@ -98,9 +108,11 @@ class PreflightStateRow(SubmissionBaseModel):
     row_number: int
     row_identifier: str | None = None
     source_path: str | None = None
+    source_image_id: str | None = None
     preflight_status: BatchStatus
     valid: bool
     issue_codes: list[str] = Field(default_factory=list)
+    issues: list[PreflightStateIssue] = Field(default_factory=list)
 
 
 class PreflightState(SubmissionBaseModel):
@@ -710,9 +722,20 @@ def _build_state(report: PreflightReport, json_report_path: Path | None) -> Pref
                 row_number=row.row_number,
                 row_identifier=row.row_identifier,
                 source_path=row.source_path,
+                source_image_id=row.source_image_id,
                 preflight_status=row.preflight_status,
                 valid=row.valid,
                 issue_codes=[issue.code for issue in row.issues],
+                issues=[
+                    PreflightStateIssue(
+                        code=issue.code,
+                        severity=issue.severity,
+                        message=issue.message,
+                        field=issue.field,
+                        requirement_phase=issue.requirement_phase,
+                    )
+                    for issue in row.issues
+                ],
             )
             for row in report.row_results
         ],
@@ -833,6 +856,7 @@ __all__ = [
     "PreflightReport",
     "PreflightRunResult",
     "PreflightState",
+    "PreflightStateIssue",
     "PreflightStateRow",
     "PreflightRowResult",
     "run_preflight",

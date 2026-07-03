@@ -43,13 +43,14 @@ The submission-factory scaffold provides:
 - database profile YAML and structural validation
 - example CSV submission manifest and manifest validation
 - `wsi-pipeline submit preflight` for manifest/profile/path checks
+- `wsi-pipeline submit plan-tissues` for state-only tissue-detection dry runs
 - documentation for the intended workflow and review roles
-- tests for the scaffold and preflight layer
+- tests for the scaffold, preflight layer, and tissue-planning layer
 
-The current preflight command does not implement VSI/ETS reading, tissue
-detection, OME-TIFF writing, batch conversion orchestration, upload packaging, a
-dashboard, QuPath integration, napari integration, Slicer integration, or
-Neuroglancer export.
+The current submission commands do not implement VSI/ETS reading, pixel
+inspection, tissue detection, OME-TIFF writing, batch conversion orchestration,
+upload packaging, a dashboard, QuPath integration, napari integration, Slicer
+integration, or Neuroglancer export.
 
 ## Expected Future Workflow
 
@@ -57,16 +58,18 @@ Neuroglancer export.
 2. Choose an input folder or submission manifest.
 3. Run preflight checks against a database profile.
 4. Review slide-level ready, warning, and blocked states.
-5. Detect tissue sections and generate QC overlays.
-6. Approve, reject, defer, or escalate tissue sections.
-7. Convert approved sections to single-tissue OME-TIFF derivatives.
-8. Validate OME-TIFFs, sidecars, checksums, and provenance.
-9. Package upload-ready outputs.
+5. Plan local tissue-detection jobs from preflight state.
+6. Detect tissue sections and generate QC overlays.
+7. Approve, reject, defer, or escalate tissue sections.
+8. Convert approved sections to single-tissue OME-TIFF derivatives.
+9. Validate OME-TIFFs, sidecars, checksums, and provenance.
+10. Package upload-ready outputs.
 
-Implemented first command:
+Implemented commands:
 
 ```bash
 wsi-pipeline submit preflight --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv
+wsi-pipeline submit plan-tissues --state preflight_state.json --plan-out tissue_detection_plan.json
 ```
 
 Later commands remain planned:

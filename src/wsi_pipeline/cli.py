@@ -114,6 +114,72 @@ def submit_preflight(
         sys.exit(exit_code)
 
 
+@submit.command("plan-tissues")
+@click.option(
+    "--state",
+    "state_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to preflight state JSON from submit preflight.",
+)
+@click.option(
+    "--plan-out",
+    "plan_out_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to write the tissue-detection dry-run plan JSON.",
+)
+def submit_plan_tissues(state_path: Path, plan_out_path: Path):
+    """Create a dry-run plan for future tissue detection from preflight state."""
+    from .submission import TissuePlanError, plan_tissues_from_state
+
+    try:
+        result = plan_tissues_from_state(state_path, plan_out_path=plan_out_path)
+    except (FileNotFoundError, TissuePlanError) as exc:
+        console.print(f"[bold red]Tissue planning failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_tissue_plan_summary(result)
+
+
+def _print_tissue_plan_summary(result):
+    plan = result.plan
+    if plan.plan_status.value == "TISSUE_PLAN_BLOCKED":
+        status_style = "red"
+    elif plan.plan_status.value == "TISSUE_PLAN_READY":
+        status_style = "green"
+    else:
+        status_style = "yellow"
+
+    table = Table(title="Tissue Detection Plan")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("State", str(plan.source_state_path))
+    table.add_row("Batch", plan.batch_id)
+    table.add_row("Profile", plan.profile_identifier)
+    table.add_row("Rows inspected", str(plan.total_rows))
+    table.add_row("Planned jobs", str(plan.eligible_job_count))
+    table.add_row("Blocked rows", str(plan.blocked_row_count))
+    table.add_row("Deferred rows", str(plan.deferred_row_count))
+    table.add_row("Skipped rows", str(plan.skipped_row_count))
+    table.add_row("Plan status", f"[{status_style}]{plan.plan_status.value}[/]")
+
+    if result.plan_out_path is not None:
+        table.add_row("Plan JSON", str(result.plan_out_path))
+
+    console.print(table)
+
+    if plan.plan_status.value == "TISSUE_PLAN_BLOCKED":
+        console.print("[bold red]No local tissue-detection jobs can be planned yet.[/]")
+    elif plan.plan_status.value == "TISSUE_PLAN_READY_WITH_DEFERRED_REQUIREMENTS":
+        console.print("[bold yellow]Tissue plan includes deferred or skipped row requirements.[/]")
+    elif plan.plan_status.value == "TISSUE_PLAN_EMPTY":
+        console.print("[bold yellow]Tissue plan has no eligible local jobs.[/]")
+    else:
+        console.print("[bold green]Tissue plan ready.[/]")
+
+
 def _print_preflight_summary(result):
     report = result.report
     status_style = "red" if report.error_count else "green"
