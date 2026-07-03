@@ -1,7 +1,7 @@
 # WSI Tissue Pipeline
 
 [![CI](https://github.com/dmp2/wsi-tissue-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/dmp2/wsi-tissue-pipeline/actions/workflows/ci.yml)
-[![Docs](https://github.com/dmp2/wsi-tissue-pipeline/actions/workflows/docs.yml/badge.svg)](https://dmp2.github.io/wsi-tissue-pipeline/)
+[![Docs](https://github.com/dmp2/wsi-tissue-pipeline/actions/workflows/docs.yml/badge.svg)](https://github.com/dmp2/wsi-tissue-pipeline/actions/workflows/docs.yml)
 
 A reproducible whole-slide image (WSI) pipeline for VSI/ETS ingest, tissue extraction, OME-Zarr and Neuroglancer-precomputed export, and notebook-aligned EM-LDDMM registration/reconstruction.
 
