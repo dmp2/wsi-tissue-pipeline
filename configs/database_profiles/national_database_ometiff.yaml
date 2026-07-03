@@ -36,6 +36,18 @@ metadata:
   require_crop_bounds_parent_pixels: true
   require_child_array_to_physical_transform: true
 
+requirement_phases:
+  physical_pixel_size: source_metadata_validation
+  physical_units: source_metadata_validation
+  channel_metadata: source_metadata_validation
+  parent_source_checksum: source_metadata_validation
+  crop_bounds_parent_pixels: derivative_export
+  child_array_to_physical_transform: derivative_export
+  ome_metadata_validation: upload_validation
+  sidecar_consistency: upload_validation
+  output_checksums: upload_validation
+  tissue_detection_qc: derivative_export
+
 qc:
   require_tissue_detection_qc: true
   require_operator_approval: true

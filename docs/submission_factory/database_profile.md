@@ -18,8 +18,24 @@ The profile defines:
 - output naming template
 - validation gates
 
-PR 1 validates this structure only. It does not validate real OME-TIFF files,
-read VSI/ETS metadata, or write outputs.
+The profile loader validates this structure. Preflight uses the profile for
+manifest/path checks, but it does not validate real OME-TIFF files, read VSI/ETS
+metadata, or write outputs.
+
+
+## Requirement Phases
+
+Profiles may optionally include a `requirement_phases` mapping that classifies
+when each database requirement can be validated:
+
+- `preflight_manifest`: must be present in the manifest now.
+- `source_file_preflight`: can be checked from source path/URI information.
+- `source_metadata_validation`: deferred until source metadata inspection.
+- `derivative_export`: deferred until tissue detection, cropping, or conversion.
+- `upload_validation`: deferred until final validation/package preparation.
+
+Profiles without this mapping remain valid. Unknown phase names fail profile
+validation with a clear error.
 
 ## Required Metadata
 
@@ -59,8 +75,8 @@ The default profile asks future workflows to validate:
 - checksums
 - required output success for all approved tissues
 
-PR 1 stores and structurally validates these gate settings. Operational
-validation belongs to later implementation PRs.
+The profile stores and structurally validates these gate settings. Operational
+validation beyond manifest/profile preflight belongs to later implementation PRs.
 
 ## Creating A New Profile
 

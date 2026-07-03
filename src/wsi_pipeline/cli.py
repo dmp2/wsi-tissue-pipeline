@@ -48,6 +48,114 @@ def main(ctx: click.Context, verbose: bool):
     ctx.obj["verbose"] = verbose
 
 
+@main.group()
+def submit():
+    """Submission factory commands for database-ready batches."""
+
+
+@submit.command("preflight")
+@click.option(
+    "--profile",
+    "profile_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to database profile YAML.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to submission manifest CSV.",
+)
+@click.option(
+    "--json-report",
+    "json_report_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a machine-readable preflight report JSON.",
+)
+@click.option(
+    "--state-out",
+    "state_out_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a draft preflight batch state JSON.",
+)
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="In strict mode, warnings or deferred requirements also return non-zero.",
+)
+def submit_preflight(
+    profile_path: Path,
+    manifest_path: Path,
+    json_report_path: Path | None,
+    state_out_path: Path | None,
+    strict: bool,
+):
+    """Validate a database profile and submission manifest before image processing."""
+    from .submission import ProfileValidationError, run_preflight
+
+    try:
+        result = run_preflight(
+            profile_path,
+            manifest_path,
+            json_report_path=json_report_path,
+            state_out_path=state_out_path,
+            strict=strict,
+        )
+    except (FileNotFoundError, ProfileValidationError) as exc:
+        console.print(f"[bold red]Preflight failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_preflight_summary(result)
+    exit_code = result.exit_code()
+    if exit_code:
+        sys.exit(exit_code)
+
+
+def _print_preflight_summary(result):
+    report = result.report
+    status_style = "red" if report.error_count else "green"
+
+    table = Table(title="Submission Preflight")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Profile", report.profile_identifier)
+    table.add_row("Database target", report.profile_name)
+    table.add_row("Manifest", str(report.manifest_path))
+    table.add_row("Rows inspected", str(report.total_row_count))
+    table.add_row("Valid rows", str(report.valid_row_count))
+    table.add_row("Rows with warnings", str(report.rows_with_warnings))
+    table.add_row("Rows with deferred requirements", str(report.rows_with_deferred_requirements))
+    table.add_row("Rows with errors", str(report.rows_with_errors))
+    table.add_row("Warnings", str(report.warning_count))
+    table.add_row("Deferred requirements", str(report.deferred_count))
+    table.add_row("Errors", str(report.error_count))
+    table.add_row("Batch status", f"[{status_style}]{report.batch_status.value}[/]")
+    table.add_row("Ready for next stage", "yes" if report.ready_for_next_stage else "no")
+
+    if result.json_report_path is not None:
+        table.add_row("JSON report", str(result.json_report_path))
+    if result.state_out_path is not None:
+        table.add_row("State file", str(result.state_out_path))
+
+    console.print(table)
+
+    if report.error_count:
+        console.print("[bold red]Preflight found blocking errors.[/]")
+    elif report.deferred_count:
+        console.print("[bold yellow]Preflight passed with deferred requirements.[/]")
+    elif report.warning_count:
+        console.print("[bold yellow]Preflight passed with warnings.[/]")
+    else:
+        console.print("[bold green]Preflight passed.[/]")
+
+    if report.strict and (report.warning_count or report.deferred_count) and not report.error_count:
+        console.print("[bold yellow]Strict mode returns non-zero for these findings.[/]")
+
+
 @main.command()
 @click.option(
     "--input",
@@ -1035,7 +1143,9 @@ def benchmark_vsi_transcode_cmd(
     show_default=True,
     help="Seed for random and stratified tile sampling.",
 )
-@click.option("--estimate-only", is_flag=True, help="Estimate source-level output without writing TIFFs.")
+@click.option(
+    "--estimate-only", is_flag=True, help="Estimate source-level output without writing TIFFs."
+)
 @click.option(
     "--config",
     "-c",

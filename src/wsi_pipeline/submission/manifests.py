@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import csv
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from pydantic import Field, ValidationError
 
@@ -13,7 +14,20 @@ from .profiles import DatabaseProfile
 from .validation import ManifestValidationError
 
 REQUIRED_MANIFEST_COLUMNS = {"specimen_id", "slide_id", "source_path"}
-OPTIONAL_MANIFEST_COLUMNS = {"stain", "block_id", "section_number", "notes"}
+OPTIONAL_MANIFEST_COLUMNS = {
+    "stain",
+    "block_id",
+    "section_number",
+    "notes",
+    "ets_path",
+    "checksum",
+    "width_px",
+    "height_px",
+    "physical_pixel_size_x",
+    "physical_pixel_size_y",
+    "physical_pixel_size_unit",
+    "metadata_status",
+}
 SUPPORTED_MANIFEST_COLUMNS = REQUIRED_MANIFEST_COLUMNS | OPTIONAL_MANIFEST_COLUMNS
 
 
@@ -119,10 +133,9 @@ def _validate_row(
 
     source_path = Path(source_value)
     if profile is not None:
-        accepted = {extension.lower() for extension in profile.input.accepted_extensions}
-        suffix = source_path.suffix.lower()
-        if suffix not in accepted:
-            accepted_text = ", ".join(sorted(accepted))
+        if not source_extension_is_accepted(source_value, profile.input.accepted_extensions):
+            accepted_text = ", ".join(sorted(profile.input.accepted_extensions))
+            suffix = source_extension_for_message(source_value)
             errors.append(
                 f"row {row_number}: source_path extension '{suffix or '<none>'}' "
                 f"is not accepted by profile {profile.profile_name}; expected one of: "
@@ -139,6 +152,28 @@ def _validate_row(
     return errors
 
 
+def source_extension_is_accepted(
+    source_value: str,
+    accepted_extensions: Iterable[str],
+) -> bool:
+    """Return whether a local path or URI ends with an accepted extension."""
+    source_target = _source_target_for_extension(source_value).lower()
+    return any(source_target.endswith(extension.lower()) for extension in accepted_extensions)
+
+
+def source_extension_for_message(source_value: str) -> str:
+    """Return the best suffix to include in validation messages."""
+    suffix = Path(_source_target_for_extension(source_value)).suffix.lower()
+    return suffix or "<none>"
+
+
+def _source_target_for_extension(source_value: str) -> str:
+    parsed = urlparse(source_value)
+    if parsed.scheme and parsed.path:
+        return unquote(parsed.path)
+    return source_value
+
+
 def _blank_to_none(value: str | None) -> str | None:
     if value is None:
         return None
@@ -152,4 +187,6 @@ __all__ = [
     "SUPPORTED_MANIFEST_COLUMNS",
     "SubmissionManifest",
     "load_submission_manifest",
+    "source_extension_for_message",
+    "source_extension_is_accepted",
 ]

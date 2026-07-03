@@ -1,8 +1,8 @@
 # Operator Guide
 
-This guide describes the planned operator workflow for the Batch OME-TIFF
-Submission Factory. PR 1 provides contracts and validation helpers only; the
-commands below are planned for a later PR and are not implemented yet.
+This guide describes the operator workflow for the Batch OME-TIFF Submission
+Factory. The first executable command is `wsi-pipeline submit preflight`, which
+checks a database profile and submission manifest before image processing.
 
 ## Starting Files
 
@@ -28,27 +28,47 @@ columns:
 - `section_number`
 - `notes`
 
-Only `specimen_id`, `slide_id`, and `source_path` are required. Paths do not
-need to exist during planning or tests unless path checking is explicitly
-enabled.
+Only `specimen_id`, `slide_id`, and `source_path` are required. Preflight also
+recognizes optional source metadata columns such as `checksum`,
+`physical_pixel_size_x`, `physical_pixel_size_y`, and
+`physical_pixel_size_unit` when profiles explicitly require them at manifest
+time.
 
 ## Preflight
 
-Preflight is the planned first check before tissue detection or conversion. It
-will compare the manifest and source metadata against the selected database
-profile.
+Preflight is the first check before tissue detection or conversion. It answers:
 
-Planned command:
+> Is this manifest/profile structurally valid enough to proceed to later
+> inspection stages?
+
+Example command:
 
 ```bash
-wsi-pipeline submit preflight
+wsi-pipeline submit preflight \
+  --profile configs/database_profiles/national_database_ometiff.yaml \
+  --manifest examples/submission_factory/example_submission_manifest.csv \
+  --json-report preflight_report.json \
+  --state-out preflight_state.json
 ```
 
-Preflight should eventually identify:
+Preflight checks profile loading, manifest loading, required manifest fields,
+row model validation, source extension policy, and local source path existence.
+Non-local source paths are not existence-checked in this PR; they are reported
+as deferred source-file checks. Missing source metadata such as pixel size,
+units, OME metadata, or source checksum may be reported as deferred unless the
+profile explicitly marks that requirement as `preflight_manifest`.
 
-- ready slides that can proceed
-- warning slides that need attention but may be repairable
-- blocked slides that cannot proceed without expert or admin action
+Preflight does not answer whether images are scientifically valid, whether
+tissue crops are correct, or whether OME-TIFF derivatives are ready for upload.
+It does not read image pixels, parse OME-XML from image files, compute image
+checksums, run tissue detection, crop sections, convert images, or create upload
+packages.
+
+Exit code is zero when there are no error-severity findings. With `--strict`,
+warnings or deferred requirements also return nonzero, but their severity is
+preserved in the JSON report. The JSON report is the detailed machine-readable
+record; the state file is a draft preflight state for later workflow stages and
+does not imply conversion or upload readiness.
 
 ## Status Meanings
 
@@ -72,16 +92,18 @@ complete metadata. Operators should ask an expert reviewer when:
 
 ## Planned Commands
 
-The submission CLI is planned for a later PR:
+Available now:
 
 ```bash
 wsi-pipeline submit preflight
+```
+
+Planned for later workflow stages:
+
+```bash
 wsi-pipeline submit detect-tissues
 wsi-pipeline submit review
 wsi-pipeline submit convert
 wsi-pipeline submit validate
 wsi-pipeline submit package
 ```
-
-These commands are listed here to document the intended workflow. They are not
-available in PR 1.

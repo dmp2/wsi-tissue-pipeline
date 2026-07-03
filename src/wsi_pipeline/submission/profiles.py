@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
 from string import Formatter
 from typing import Any
@@ -24,6 +25,16 @@ REQUIRED_TOP_LEVEL_KEYS = {
     "validation",
 }
 REQUIRED_NAMING_PLACEHOLDERS = {"specimen_id", "slide_id", "tissue_id"}
+
+
+class RequirementPhase(str, Enum):
+    """Workflow phase where a database requirement can be validated."""
+
+    PREFLIGHT_MANIFEST = "preflight_manifest"
+    SOURCE_FILE_PREFLIGHT = "source_file_preflight"
+    SOURCE_METADATA_VALIDATION = "source_metadata_validation"
+    DERIVATIVE_EXPORT = "derivative_export"
+    UPLOAD_VALIDATION = "upload_validation"
 
 
 class ProfileSection(BaseModel):
@@ -125,6 +136,30 @@ class DatabaseProfile(BaseModel):
     qc: QCProfile
     naming: NamingProfile
     validation: ValidationProfile
+    requirement_phases: dict[str, RequirementPhase] = Field(default_factory=dict)
+
+    @field_validator("requirement_phases", mode="before")
+    @classmethod
+    def validate_requirement_phases(cls, value: Any) -> dict[str, str]:
+        if value is None:
+            return {}
+        if not isinstance(value, Mapping):
+            raise ValueError("requirement_phases must be a mapping of requirement name to phase")
+
+        allowed = {phase.value for phase in RequirementPhase}
+        normalized: dict[str, str] = {}
+        for requirement, phase in value.items():
+            if not isinstance(requirement, str) or not requirement.strip():
+                raise ValueError("requirement_phases keys must be non-empty strings")
+            phase_value = phase.value if isinstance(phase, RequirementPhase) else str(phase).strip()
+            if phase_value not in allowed:
+                expected = ", ".join(sorted(allowed))
+                raise ValueError(
+                    f"requirement_phases.{requirement} has unknown phase "
+                    f"{phase_value!r}; expected one of: {expected}"
+                )
+            normalized[requirement.strip()] = phase_value
+        return normalized
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dictionary representation."""
@@ -190,6 +225,7 @@ __all__ = [
     "QCProfile",
     "REQUIRED_NAMING_PLACEHOLDERS",
     "REQUIRED_TOP_LEVEL_KEYS",
+    "RequirementPhase",
     "ValidationProfile",
     "load_database_profile",
 ]

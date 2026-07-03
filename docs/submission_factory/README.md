@@ -35,19 +35,21 @@ responsibilities.
 - Admin: maintains database profiles, metadata requirements, sidecar policy,
   naming templates, and validation gates.
 
-## PR 1 Scope
+## Current Scope
 
-This PR establishes contracts only:
+The submission-factory scaffold provides:
 
 - submission status enums and lightweight schema models
 - database profile YAML and structural validation
 - example CSV submission manifest and manifest validation
+- `wsi-pipeline submit preflight` for manifest/profile/path checks
 - documentation for the intended workflow and review roles
-- tests for the scaffold
+- tests for the scaffold and preflight layer
 
-This PR does not implement VSI/ETS reading, tissue detection, OME-TIFF writing,
-batch conversion orchestration, upload packaging, a dashboard, QuPath
-integration, napari integration, Slicer integration, or Neuroglancer export.
+The current preflight command does not implement VSI/ETS reading, tissue
+detection, OME-TIFF writing, batch conversion orchestration, upload packaging, a
+dashboard, QuPath integration, napari integration, Slicer integration, or
+Neuroglancer export.
 
 ## Expected Future Workflow
 
@@ -61,18 +63,21 @@ integration, napari integration, Slicer integration, or Neuroglancer export.
 8. Validate OME-TIFFs, sidecars, checksums, and provenance.
 9. Package upload-ready outputs.
 
-Planned CLI commands for a later PR include:
+Implemented first command:
 
 ```bash
-wsi-pipeline submit preflight
+wsi-pipeline submit preflight --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv
+```
+
+Later commands remain planned:
+
+```bash
 wsi-pipeline submit detect-tissues
 wsi-pipeline submit review
 wsi-pipeline submit convert
 wsi-pipeline submit validate
 wsi-pipeline submit package
 ```
-
-These commands are not implemented in PR 1.
 
 ## Design Principles
 
