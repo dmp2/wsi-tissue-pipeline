@@ -42,23 +42,25 @@ The submission-factory scaffold provides:
 - submission status enums and lightweight schema models
 - database profile YAML and structural validation
 - example CSV submission manifest and manifest validation
+- `wsi-pipeline submit setup` for novice-facing batch summaries, mode checks, and rough estimates
 - `wsi-pipeline submit preflight` for manifest/profile/path checks
-- `wsi-pipeline submit plan-tissues` for state-only tissue-detection dry runs
+- `wsi-pipeline submit plan-tissues` for lower-level state-only tissue-detection dry runs
 - documentation for the intended workflow and review roles
-- tests for the scaffold, preflight layer, and tissue-planning layer
+- tests for the scaffold, preflight, setup, and tissue-planning layers
 
 The current submission commands do not implement VSI/ETS reading, pixel
-inspection, tissue detection, OME-TIFF writing, batch conversion orchestration,
-upload packaging, a dashboard, QuPath integration, napari integration, Slicer
+inspection, tissue detection, thresholding, connected components, cropping,
+OME-TIFF writing, batch conversion orchestration, upload packaging, a
+dashboard, notebooks, QuPath integration, napari integration, Slicer
 integration, or Neuroglancer export.
 
 ## Expected Future Workflow
 
 1. Create or select a submission batch.
 2. Choose an input folder or submission manifest.
-3. Run preflight checks against a database profile.
-4. Review slide-level ready, warning, and blocked states.
-5. Plan local tissue-detection jobs from preflight state.
+3. Run `submit setup` against a database profile, manifest, and explicit workflow mode.
+4. Review setup ready, warning, deferred, and blocked states.
+5. Use lower-level tissue-detection planning only when needed for future extraction work.
 6. Detect tissue sections and generate QC overlays.
 7. Approve, reject, defer, or escalate tissue sections.
 8. Convert approved sections to single-tissue OME-TIFF derivatives.
@@ -68,9 +70,19 @@ integration, or Neuroglancer export.
 Implemented commands:
 
 ```bash
+wsi-pipeline submit setup --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv --mode extract-convert-upload --setup-report setup_report.json
 wsi-pipeline submit preflight --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv
 wsi-pipeline submit plan-tissues --state preflight_state.json --plan-out tissue_detection_plan.json
 ```
+
+`submit setup` is the usual operator entry point. It runs preflight in
+memory, checks whether the selected mode matches input extensions, sums
+known local file sizes, and estimates output size, processing time, and
+upload time from simple workflow constants. Supported setup modes are
+`existing-ometiff-upload`, `convert-single-tissue`, and
+`extract-convert-upload`. Non-local or missing sizes keep known local bytes
+visible but make full-batch estimates unavailable. `plan-tissues` remains a
+lower-level dry run for future tissue detection internals.
 
 Later commands remain planned:
 

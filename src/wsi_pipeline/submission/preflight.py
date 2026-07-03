@@ -743,6 +743,15 @@ def _build_state(report: PreflightReport, json_report_path: Path | None) -> Pref
     )
 
 
+def build_preflight_state(
+    report: PreflightReport,
+    json_report_path: str | Path | None = None,
+) -> PreflightState:
+    """Build an in-memory preflight state from a report without writing files."""
+    json_path = Path(json_report_path) if json_report_path is not None else None
+    return _build_state(report, json_path)
+
+
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -859,5 +868,6 @@ __all__ = [
     "PreflightStateIssue",
     "PreflightStateRow",
     "PreflightRowResult",
+    "build_preflight_state",
     "run_preflight",
 ]

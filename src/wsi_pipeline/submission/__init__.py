@@ -18,9 +18,19 @@ from .preflight import (
     PreflightState,
     PreflightStateIssue,
     PreflightStateRow,
+    build_preflight_state,
     run_preflight,
 )
 from .profiles import DatabaseProfile, RequirementPhase, load_database_profile
+from .setup import (
+    SETUP_REPORT_VERSION,
+    SetupIssue,
+    SetupReport,
+    SetupRowSummary,
+    SetupRunResult,
+    WorkflowMode,
+    run_setup,
+)
 from .statuses import (
     BatchStatus,
     ReviewDecision,
@@ -62,6 +72,12 @@ __all__ = [
     "ProfileValidationError",
     "RequirementPhase",
     "ReviewDecision",
+    "SETUP_REPORT_VERSION",
+    "SetupIssue",
+    "SetupReport",
+    "SetupRowSummary",
+    "SetupRunResult",
+    "WorkflowMode",
     "SourceSlide",
     "SubmissionBatch",
     "SubmissionManifest",
@@ -77,6 +93,8 @@ __all__ = [
     "TissuePlanRowSummary",
     "TissuePlanRunResult",
     "TissueStatus",
+    "build_preflight_state",
+    "run_setup",
     "load_database_profile",
     "load_submission_manifest",
     "build_tissue_detection_plan",

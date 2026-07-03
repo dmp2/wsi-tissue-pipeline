@@ -10,8 +10,8 @@ workflow.
 1. Create a `SubmissionBatch` from an input folder or manifest.
 2. Load a database profile that defines input, output, metadata, QC, naming, and
    validation requirements.
-3. Run preflight checks on source slides.
-4. Plan local tissue-detection jobs from preflight state.
+3. Run setup checks on the manifest, profile, selected mode, and local file sizes.
+4. Run lower-level local tissue-detection planning when future extraction work needs it.
 5. Detect tissue sections and write tissue-section records.
 6. Generate QC overlays for detected tissue sections.
 7. Collect operator or expert review decisions.
@@ -22,9 +22,30 @@ workflow.
 Steps 3 and 4 now have executable planning commands. Steps 5 through 10 remain
 planned future work.
 
+## Setup Report Output
+
+The `setup` command is the novice-facing summary for a batch. It runs
+preflight in memory, checks whether the explicit workflow mode matches input
+extensions, records blocking and deferred findings, sums known local file
+sizes, and estimates output size, processing time, upload time, and total
+time from fixed workflow constants. The durable artifact is the optional
+setup JSON report. Setup does not write preflight state files.
+
+Mode compatibility is extension-only in this PR: existing OME-TIFF upload
+expects OME-TIFF or profile-allowed generic TIFF inputs; conversion and
+extract workflows expect profile-allowed source microscopy or parent WSI
+inputs. Wrong-mode findings are error-severity setup issues. Non-local or
+unknown source sizes keep known local bytes visible but make full-batch
+estimates unavailable.
+
+Setup does not read image pixels, parse VSI/ETS, inspect OME-XML from image
+files, compute checksums, detect tissue, threshold, find connected
+components, crop, convert OME-TIFFs, package uploads, or integrate with
+notebooks, QuPath, napari, Neuroglancer, or other viewers.
+
 ## Tissue-Detection Plan Output
 
-The `plan-tissues` dry run consumes a preflight state file and emits a JSON plan
+The lower-level `plan-tissues` dry run consumes a preflight state file and emits a JSON plan
 that records which rows would become future local `tissue_detection` jobs, which
 rows are blocked by preflight errors, and which non-local rows are skipped for
 this local planning pass. Deferred row requirements remain attached to planned

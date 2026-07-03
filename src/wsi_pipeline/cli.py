@@ -22,6 +22,18 @@ from .config import PipelineConfig, create_default_config, load_config
 
 console = Console()
 
+SETUP_WORKFLOW_MODE_CHOICES = (
+    "existing-ometiff-upload",
+    "convert-single-tissue",
+    "extract-convert-upload",
+)
+
+
+def _positive_float(ctx: click.Context, param: click.Parameter, value: float) -> float:
+    if value <= 0:
+        raise click.BadParameter("must be greater than 0", ctx=ctx, param=param)
+    return value
+
 
 @click.group()
 @click.version_option(version=__version__, prog_name="wsi-pipeline")
@@ -114,6 +126,88 @@ def submit_preflight(
         sys.exit(exit_code)
 
 
+@submit.command("setup")
+@click.option(
+    "--profile",
+    "profile_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to database profile YAML.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to submission manifest CSV.",
+)
+@click.option(
+    "--mode",
+    "workflow_mode",
+    required=True,
+    type=click.Choice(SETUP_WORKFLOW_MODE_CHOICES),
+    help="Workflow mode selected for this batch.",
+)
+@click.option(
+    "--setup-report",
+    "setup_report_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a deterministic setup summary JSON.",
+)
+@click.option(
+    "--upload-mbps",
+    type=float,
+    default=100.0,
+    show_default=True,
+    callback=_positive_float,
+    help="Estimated upload bandwidth in megabits per second.",
+)
+@click.option(
+    "--upload-overhead",
+    type=float,
+    default=1.25,
+    show_default=True,
+    callback=_positive_float,
+    help="Upload time multiplier for protocol/retry overhead.",
+)
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="In strict mode, warnings or deferred requirements also return non-zero.",
+)
+def submit_setup(
+    profile_path: Path,
+    manifest_path: Path,
+    workflow_mode: str,
+    setup_report_path: Path | None,
+    upload_mbps: float,
+    upload_overhead: float,
+    strict: bool,
+):
+    """Summarize batch setup, blockers, and rough processing/upload estimates."""
+    from .submission import ProfileValidationError, run_setup
+
+    try:
+        result = run_setup(
+            profile_path,
+            manifest_path,
+            workflow_mode,
+            setup_report_path=setup_report_path,
+            upload_mbps=upload_mbps,
+            upload_overhead=upload_overhead,
+            strict=strict,
+        )
+    except (FileNotFoundError, ProfileValidationError, ValueError) as exc:
+        console.print(f"[bold red]Setup failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_setup_summary(result)
+    exit_code = result.exit_code()
+    if exit_code:
+        sys.exit(exit_code)
+
+
 @submit.command("plan-tissues")
 @click.option(
     "--state",
@@ -140,6 +234,114 @@ def submit_plan_tissues(state_path: Path, plan_out_path: Path):
         sys.exit(1)
 
     _print_tissue_plan_summary(result)
+
+
+def _print_setup_summary(result):
+    report = result.report
+    status_style = "green" if report.ready_for_next_action else "red"
+    if report.ready_for_next_action and (report.warning_count or report.deferred_count):
+        status_style = "yellow"
+
+    table = Table(title="Submission Setup")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Workflow mode", report.workflow_mode.value)
+    table.add_row("Profile/database target", report.profile_name)
+    table.add_row("Profile identifier", report.profile_identifier)
+    table.add_row("Manifest", str(report.manifest_path))
+    table.add_row("Rows/files inspected", str(report.row_count))
+    table.add_row("Valid rows", str(report.valid_row_count))
+    table.add_row("Blocked rows", str(report.blocked_row_count))
+    table.add_row("Deferred rows", str(report.deferred_row_count))
+    table.add_row("Warnings", str(report.warning_count))
+    table.add_row("Errors", str(report.error_count))
+    table.add_row("Known input size", _format_bytes(report.known_input_bytes))
+    table.add_row("Unknown size rows", str(report.unknown_size_row_count))
+    table.add_row(
+        "Estimated output size",
+        _format_byte_range(report.estimated_output_bytes_low, report.estimated_output_bytes_high),
+    )
+    table.add_row(
+        "Estimated processing time",
+        _format_seconds_range(
+            report.estimated_processing_seconds_low,
+            report.estimated_processing_seconds_high,
+        ),
+    )
+    table.add_row(
+        "Estimated upload time",
+        _format_seconds_range(
+            report.estimated_upload_seconds_low, report.estimated_upload_seconds_high
+        ),
+    )
+    table.add_row(
+        "Estimated total time",
+        _format_seconds_range(
+            report.estimated_total_seconds_low, report.estimated_total_seconds_high
+        ),
+    )
+    table.add_row(
+        "Ready for next action",
+        f"[{status_style}]{'yes' if report.ready_for_next_action else 'no'}[/]",
+    )
+    table.add_row("Next action", report.next_action)
+    table.add_row("Recommended next action", report.recommended_next_action)
+
+    if result.setup_report_path is not None:
+        table.add_row("Setup JSON", str(result.setup_report_path))
+
+    console.print(table)
+
+    if report.error_count:
+        console.print("[bold red]Setup found blocking errors.[/]")
+    elif report.strict and (report.warning_count or report.deferred_count):
+        console.print(
+            "[bold yellow]Strict mode returns non-zero for warnings/deferred findings.[/]"
+        )
+    elif report.warning_count or report.deferred_count:
+        console.print("[bold yellow]Setup is ready with warnings or deferred requirements.[/]")
+    else:
+        console.print("[bold green]Setup is ready for the next action.[/]")
+
+
+def _format_byte_range(low: int | None, high: int | None) -> str:
+    if low is None or high is None:
+        return "unavailable"
+    if low == high:
+        return _format_bytes(low)
+    return f"{_format_bytes(low)} to {_format_bytes(high)}"
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return "unavailable"
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(value)
+    unit = units[0]
+    for unit in units:
+        if abs(size) < 1000 or unit == units[-1]:
+            break
+        size /= 1000
+    if unit == "B":
+        return f"{int(size)} {unit}"
+    return f"{size:.2f} {unit}"
+
+
+def _format_seconds_range(low: float | None, high: float | None) -> str:
+    if low is None or high is None:
+        return "unavailable"
+    if low == high:
+        return _format_seconds(low)
+    return f"{_format_seconds(low)} to {_format_seconds(high)}"
+
+
+def _format_seconds(value: float) -> str:
+    if value < 60:
+        return f"{value:.1f}s"
+    if value < 3600:
+        return f"{value / 60:.1f}m"
+    return f"{value / 3600:.1f}h"
 
 
 def _print_tissue_plan_summary(result):

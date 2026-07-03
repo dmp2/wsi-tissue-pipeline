@@ -1,8 +1,9 @@
 # Operator Guide
 
 This guide describes the operator workflow for the Batch OME-TIFF Submission
-Factory. The first executable command is `wsi-pipeline submit preflight`, which
-checks a database profile and submission manifest before image processing.
+Factory. The usual first operator command is `wsi-pipeline submit setup`,
+which checks a database profile, submission manifest, selected workflow mode,
+and rough size/runtime/upload estimates before image processing.
 
 ## Starting Files
 
@@ -33,6 +34,45 @@ recognizes optional source metadata columns such as `checksum`,
 `physical_pixel_size_x`, `physical_pixel_size_y`, and
 `physical_pixel_size_unit` when profiles explicitly require them at manifest
 time.
+
+## Setup Summary
+
+`wsi-pipeline submit setup` is the novice-facing batch check. It answers:
+
+> Did I point the tool at the right batch, what workflow mode is this, what is
+> blocked or deferred, how large is it, and roughly how long will processing or
+> upload take?
+
+Example command:
+
+```bash
+wsi-pipeline submit setup \
+  --profile configs/database_profiles/national_database_ometiff.yaml \
+  --manifest examples/submission_factory/example_submission_manifest.csv \
+  --mode extract-convert-upload \
+  --setup-report setup_report.json \
+  --upload-mbps 100
+```
+
+Supported modes are:
+
+- `existing-ometiff-upload`: existing OME-TIFF inputs, with generic TIFF allowed
+  only when the profile explicitly accepts it.
+- `convert-single-tissue`: source microscopy files intended for conversion.
+- `extract-convert-upload`: parent source WSI files intended for future tissue
+  detection and extraction.
+
+Setup reuses preflight checks, adds mode-specific input-extension compatibility
+checks, sums local `Path.stat().st_size` values, and computes rough output-size,
+processing-time, upload-time, and total-time ranges from fixed workflow
+constants. If any row has a non-local or unknown size, the report still shows
+known local bytes, but full-batch estimates are `null`. Extract-mode estimates
+are coarse until tissue detection exists.
+
+Setup writes only the optional setup report. It does not write a preflight state,
+read image pixels, parse VSI/ETS, inspect OME-XML from image files, compute
+checksums, detect tissue, threshold, find connected components, crop, convert,
+upload, or launch GUI/viewer tools.
 
 ## Preflight
 
@@ -72,8 +112,9 @@ does not imply conversion or upload readiness.
 
 ## Tissue-Detection Planning
 
-`wsi-pipeline submit plan-tissues` consumes the preflight state JSON and writes a
-deterministic dry-run plan for future local tissue detection jobs. It classifies
+`wsi-pipeline submit plan-tissues` is a lower-level/internal dry-run command.
+It consumes the preflight state JSON and writes a deterministic dry-run plan
+for future local tissue detection jobs. It classifies
 rows independently, so an eligible local row can still be planned even when a
 different row has a preflight error.
 
@@ -121,6 +162,7 @@ complete metadata. Operators should ask an expert reviewer when:
 Available now:
 
 ```bash
+wsi-pipeline submit setup
 wsi-pipeline submit preflight
 wsi-pipeline submit plan-tissues
 ```
