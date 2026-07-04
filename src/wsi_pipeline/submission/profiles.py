@@ -45,6 +45,7 @@ class ProfileSection(BaseModel):
 
 class InputProfile(ProfileSection):
     accepted_extensions: list[str] = Field(min_length=1)
+    workflow_mode_extensions: dict[str, list[str]] = Field(default_factory=dict)
     require_ets_companion: bool
     raw_files_read_only: bool
 
@@ -54,6 +55,24 @@ class InputProfile(ProfileSection):
         for extension in value:
             _validate_extension(extension, "input.accepted_extensions")
         return value
+
+    @field_validator("workflow_mode_extensions")
+    @classmethod
+    def validate_workflow_mode_extensions(cls, value: dict[str, list[str]]) -> dict[str, list[str]]:
+        normalized: dict[str, list[str]] = {}
+        for mode, extensions in value.items():
+            if not isinstance(mode, str) or not mode.strip():
+                raise ValueError("input.workflow_mode_extensions keys must be non-empty strings")
+            if not extensions:
+                raise ValueError(
+                    f"input.workflow_mode_extensions.{mode} must include at least one extension"
+                )
+            normalized_extensions = []
+            for extension in extensions:
+                _validate_extension(extension, f"input.workflow_mode_extensions.{mode}")
+                normalized_extensions.append(extension)
+            normalized[mode.strip()] = normalized_extensions
+        return normalized
 
 
 class OutputProfile(ProfileSection):
@@ -169,6 +188,12 @@ class DatabaseProfile(BaseModel):
     def from_dict(cls, data: Mapping[str, Any]) -> DatabaseProfile:
         """Create a profile from a dictionary produced by ``to_dict``."""
         return cls.model_validate(data)
+
+    def accepted_extensions_for_workflow_mode(self, workflow_mode: str) -> list[str]:
+        """Return mode-specific input extensions, falling back to legacy policy."""
+        return self.input.workflow_mode_extensions.get(
+            workflow_mode, self.input.accepted_extensions
+        )
 
 
 def load_database_profile(path: str | Path) -> DatabaseProfile:

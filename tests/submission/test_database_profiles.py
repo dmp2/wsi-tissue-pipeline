@@ -15,6 +15,14 @@ def test_database_profile_yaml_loads_successfully():
     assert profile.profile_name == "national_database_ometiff"
     assert profile.profile_version == "0.1.0"
     assert profile.input.accepted_extensions == [".vsi"]
+    assert profile.accepted_extensions_for_workflow_mode("existing-ometiff-upload") == [
+        ".ome.tif",
+        ".ome.tiff",
+    ]
+    assert profile.accepted_extensions_for_workflow_mode("convert-single-tissue") == [
+        ".vsi",
+        ".ets",
+    ]
     assert profile.output.extension == ".ome.tif"
     assert (
         profile.naming.template == "sub-{specimen_id}_slide-{slide_id}_tissue-{tissue_id}.ome.tif"

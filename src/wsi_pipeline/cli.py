@@ -208,6 +208,59 @@ def submit_setup(
         sys.exit(exit_code)
 
 
+@submit.command("validate-ometiff")
+@click.option(
+    "--profile",
+    "profile_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to database profile YAML.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to submission manifest CSV.",
+)
+@click.option(
+    "--validation-report",
+    "validation_report_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a deterministic structural validation JSON report.",
+)
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="In strict mode, warnings or deferred requirements also return non-zero.",
+)
+def submit_validate_ometiff(
+    profile_path: Path,
+    manifest_path: Path,
+    validation_report_path: Path | None,
+    strict: bool,
+):
+    """Run filesystem/manifest-only checks for existing OME-TIFF-like batches."""
+    from .submission import ProfileValidationError, run_validate_ometiff
+
+    try:
+        result = run_validate_ometiff(
+            profile_path,
+            manifest_path,
+            validation_report_path=validation_report_path,
+            strict=strict,
+        )
+    except (FileNotFoundError, ProfileValidationError, ValueError) as exc:
+        console.print(f"[bold red]Existing OME-TIFF structural check failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_ometiff_validation_summary(result)
+    exit_code = result.exit_code()
+    if exit_code:
+        sys.exit(exit_code)
+
+
 @submit.command("plan-tissues")
 @click.option(
     "--state",
@@ -303,6 +356,53 @@ def _print_setup_summary(result):
         console.print("[bold yellow]Setup is ready with warnings or deferred requirements.[/]")
     else:
         console.print("[bold green]Setup is ready for the next action.[/]")
+
+
+def _print_ometiff_validation_summary(result):
+    report = result.report
+    status_style = "green" if report.ready_for_next_action else "red"
+    if report.ready_for_next_action and (report.warning_count or report.deferred_count):
+        status_style = "yellow"
+
+    table = Table(title="Existing OME-TIFF Structural Batch Check")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Validation scope", report.validation_scope)
+    table.add_row("Profile", report.profile_identifier)
+    table.add_row("Manifest", str(report.manifest_path))
+    table.add_row("Rows inspected", str(report.row_count))
+    table.add_row("Valid files", str(report.valid_row_count))
+    table.add_row("Blocked files", str(report.blocked_row_count))
+    table.add_row("Deferred rows", str(report.deferred_row_count))
+    table.add_row("Deferred checks", str(report.deferred_count))
+    table.add_row("Warnings", str(report.warning_count))
+    table.add_row("Errors", str(report.error_count))
+    table.add_row("Total known upload size", _format_bytes(report.known_input_bytes))
+    table.add_row(
+        "Ready for next action",
+        f"[{status_style}]{'yes' if report.ready_for_next_action else 'no'}[/]",
+    )
+    table.add_row("Next action", report.next_action)
+    table.add_row("Recommended next action", report.recommended_next_action)
+
+    if result.validation_report_path is not None:
+        table.add_row("Validation JSON", str(result.validation_report_path))
+
+    console.print(table)
+
+    if report.error_count:
+        console.print("[bold red]Structural check found blocking errors.[/]")
+    elif report.strict and (report.warning_count or report.deferred_count):
+        console.print(
+            "[bold yellow]Strict mode returns non-zero for warnings/deferred findings.[/]"
+        )
+    elif report.deferred_count:
+        console.print("[bold yellow]Structural check passed with deferred checks.[/]")
+    elif report.warning_count:
+        console.print("[bold yellow]Structural check passed with warnings.[/]")
+    else:
+        console.print("[bold green]Structural check passed.[/]")
 
 
 def _format_byte_range(low: int | None, high: int | None) -> str:

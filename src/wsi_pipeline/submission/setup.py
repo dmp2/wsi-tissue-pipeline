@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
 
 from pydantic import Field
 
@@ -23,6 +22,8 @@ from .preflight import (
     run_preflight,
 )
 from .profiles import RequirementPhase, load_database_profile
+from .source_paths import source_location as _source_location
+from .source_paths import source_target_for_extension as _source_target_for_extension
 from .tissue_plan import build_tissue_detection_plan
 
 SETUP_REPORT_VERSION = "1.0"
@@ -160,8 +161,14 @@ def run_setup(
     if upload_overhead <= 0:
         raise ValueError("upload_overhead must be greater than 0")
 
-    preflight = run_preflight(profile_path, manifest_path, strict=strict)
     profile = load_database_profile(profile_path)
+    accepted_extensions = profile.accepted_extensions_for_workflow_mode(mode.value)
+    preflight = run_preflight(
+        profile_path,
+        manifest_path,
+        strict=strict,
+        accepted_extensions=accepted_extensions,
+    )
     state = build_preflight_state(preflight.report)
     tissue_rows = _tissue_plan_rows(state) if mode is WorkflowMode.EXTRACT_CONVERT_UPLOAD else {}
 
@@ -174,7 +181,7 @@ def run_setup(
 
     for row in preflight.report.row_results:
         row_issues = [_setup_issue_from_preflight(issue) for issue in row.issues]
-        row_issues.extend(_mode_compatibility_issues(row, mode, profile.input.accepted_extensions))
+        row_issues.extend(_mode_compatibility_issues(row, mode, accepted_extensions))
         size_result = _local_input_size(row.source_path, manifest_path)
         if size_result.known_input_bytes is None:
             unknown_size_row_count += 1
@@ -388,13 +395,6 @@ def _extension_is_profile_accepted(source_target: str, accepted_extensions: set[
     return any(lower_target.endswith(extension) for extension in accepted_extensions)
 
 
-def _source_target_for_extension(source_value: str) -> str:
-    parsed = urlparse(source_value)
-    if parsed.scheme and parsed.path:
-        return unquote(parsed.path)
-    return source_value
-
-
 def _local_input_size(source_path: str | None, manifest_path: Path) -> _SizeResult:
     if not source_path:
         return _SizeResult(known_input_bytes=None, input_size_status="unknown_missing_source_path")
@@ -408,22 +408,6 @@ def _local_input_size(source_path: str | None, manifest_path: Path) -> _SizeResu
         known_input_bytes=location.path_to_check.stat().st_size,
         input_size_status="known",
     )
-
-
-def _source_location(source_value: str, manifest_path: Path) -> _SourceLocation:
-    parsed = urlparse(source_value)
-    if parsed.scheme and parsed.scheme != "file":
-        return _SourceLocation(is_local=False)
-
-    if parsed.scheme == "file":
-        path_text = unquote(parsed.path)
-        if parsed.netloc and parsed.netloc != "localhost":
-            path_text = f"//{parsed.netloc}{path_text}"
-        return _SourceLocation(is_local=True, path_to_check=Path(path_text))
-
-    path = Path(source_value)
-    path_to_check = path if path.is_absolute() else manifest_path.parent / path
-    return _SourceLocation(is_local=True, path_to_check=path_to_check)
 
 
 def _estimate_batch(

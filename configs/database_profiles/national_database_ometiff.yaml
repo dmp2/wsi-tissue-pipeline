@@ -7,6 +7,16 @@ description: >
 input:
   accepted_extensions:
     - .vsi
+  workflow_mode_extensions:
+    existing-ometiff-upload:
+      - .ome.tif
+      - .ome.tiff
+    convert-single-tissue:
+      - .vsi
+      - .ets
+    extract-convert-upload:
+      - .vsi
+      - .ets
   require_ets_companion: true
   raw_files_read_only: true
 

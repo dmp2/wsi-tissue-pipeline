@@ -8,7 +8,7 @@ requires from a submission batch. PR 1 includes a default profile at
 
 The profile defines:
 
-- accepted input extensions
+- accepted input extensions and optional mode-specific extension policy
 - whether ETS companion data are required
 - whether raw files must be read-only
 - output mode and extension
@@ -22,6 +22,18 @@ The profile loader validates this structure. Preflight uses the profile for
 manifest/path checks, but it does not validate real OME-TIFF files, read VSI/ETS
 metadata, or write outputs.
 
+
+## Mode-Specific Input Extensions
+
+Profiles may include `input.workflow_mode_extensions` to define input-extension
+policy by submission workflow mode. The default profile uses this to allow
+existing OME-TIFF upload rows to point at `.ome.tif` or `.ome.tiff` files while
+conversion and extraction modes continue to use `.vsi` or `.ets` source files.
+
+`input.accepted_extensions` remains the backward-compatible fallback for older
+profiles and for commands that do not select a workflow mode. Generic `.tif` or
+`.tiff` files are accepted for `existing-ometiff-upload` only when the profile
+explicitly lists those generic TIFF suffixes for that mode.
 
 ## Requirement Phases
 

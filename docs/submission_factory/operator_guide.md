@@ -74,6 +74,43 @@ read image pixels, parse VSI/ETS, inspect OME-XML from image files, compute
 checksums, detect tissue, threshold, find connected components, crop, convert,
 upload, or launch GUI/viewer tools.
 
+## Existing OME-TIFF Structural Check
+
+`wsi-pipeline submit validate-ometiff` is for batches that already contain one
+OME-TIFF-like file per tissue section and do not need tissue detection or
+conversion first. It answers:
+
+> Are the existing OME-TIFF-like files structurally ready for the next workflow
+> action?
+
+Example command:
+
+```bash
+wsi-pipeline submit validate-ometiff \
+  --profile configs/database_profiles/national_database_ometiff.yaml \
+  --manifest existing_ometiff_manifest.csv \
+  --validation-report ometiff_structural_report.json
+```
+
+This is a filesystem and manifest structural check only. Its JSON report records
+`validation_scope: "filesystem_and_manifest_only"`. It reuses setup/preflight
+for profile loading, manifest loading, source extension policy, local path
+existence, and deferred requirement reporting. It then checks only whether local
+paths are regular files, whether file sizes are nonzero, and whether suffixes
+match existing OME-TIFF upload mode. Generic `.tif` or `.tiff` inputs are
+accepted only when the profile explicitly allows generic TIFF for
+`existing-ometiff-upload`.
+
+This command does not open TIFF files, parse TIFF headers, parse OME-XML, inspect
+image pixels, validate OME metadata, compute checksums, create upload packages,
+or upload to a database. When a profile requires OME-TIFF metadata validation,
+that requirement is reported as deferred in this PR; the recommended next action
+is future OME-TIFF metadata validation before packaging or upload.
+
+Tests and smoke examples may use tiny nonzero fake `.ome.tiff` files as
+OME-TIFF-like filesystem fixtures. Those fixtures validate command behavior only
+and are not scientifically valid OME-TIFF images.
+
 ## Preflight
 
 Preflight is the first check before tissue detection or conversion. It answers:
@@ -164,6 +201,7 @@ Available now:
 ```bash
 wsi-pipeline submit setup
 wsi-pipeline submit preflight
+wsi-pipeline submit validate-ometiff
 wsi-pipeline submit plan-tissues
 ```
 

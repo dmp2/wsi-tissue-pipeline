@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
@@ -323,11 +323,13 @@ def run_preflight(
     json_report_path: str | Path | None = None,
     state_out_path: str | Path | None = None,
     strict: bool = False,
+    accepted_extensions: Iterable[str] | None = None,
 ) -> PreflightRunResult:
     """Validate a submission profile and manifest before image processing."""
     profile_path = Path(profile_path)
     manifest_path = Path(manifest_path)
     profile = load_database_profile(profile_path)
+    source_extensions = tuple(accepted_extensions or profile.input.accepted_extensions)
 
     if not manifest_path.exists():
         raise FileNotFoundError(f"Submission manifest not found: {manifest_path}")
@@ -373,6 +375,7 @@ def run_preflight(
                             column_lookup=column_lookup,
                             manifest_path=manifest_path,
                             profile=profile,
+                            accepted_extensions=source_extensions,
                             seen_identifiers=seen_identifiers,
                         )
                     )
@@ -413,6 +416,7 @@ def _preflight_row(
     column_lookup: Mapping[str, str],
     manifest_path: Path,
     profile: DatabaseProfile,
+    accepted_extensions: Iterable[str],
     seen_identifiers: dict[tuple[str, str], int],
 ) -> PreflightRowResult:
     specimen_id = _row_value(row, column_lookup, "specimen_id")
@@ -463,8 +467,8 @@ def _preflight_row(
             )
 
     if source_value is not None:
-        if not source_extension_is_accepted(source_value, profile.input.accepted_extensions):
-            accepted_text = ", ".join(sorted(profile.input.accepted_extensions))
+        if not source_extension_is_accepted(source_value, accepted_extensions):
+            accepted_text = ", ".join(sorted(accepted_extensions))
             issues.append(
                 _row_issue(
                     row_number=row_number,

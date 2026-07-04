@@ -44,6 +44,7 @@ The submission-factory scaffold provides:
 - example CSV submission manifest and manifest validation
 - `wsi-pipeline submit setup` for novice-facing batch summaries, mode checks, and rough estimates
 - `wsi-pipeline submit preflight` for manifest/profile/path checks
+- `wsi-pipeline submit validate-ometiff` for structural-only existing OME-TIFF batch checks
 - `wsi-pipeline submit plan-tissues` for lower-level state-only tissue-detection dry runs
 - documentation for the intended workflow and review roles
 - tests for the scaffold, preflight, setup, and tissue-planning layers
@@ -72,6 +73,7 @@ Implemented commands:
 ```bash
 wsi-pipeline submit setup --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv --mode extract-convert-upload --setup-report setup_report.json
 wsi-pipeline submit preflight --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv
+wsi-pipeline submit validate-ometiff --profile configs/database_profiles/national_database_ometiff.yaml --manifest existing_ometiff_manifest.csv --validation-report ometiff_structural_report.json
 wsi-pipeline submit plan-tissues --state preflight_state.json --plan-out tissue_detection_plan.json
 ```
 
@@ -81,8 +83,11 @@ known local file sizes, and estimates output size, processing time, and
 upload time from simple workflow constants. Supported setup modes are
 `existing-ometiff-upload`, `convert-single-tissue`, and
 `extract-convert-upload`. Non-local or missing sizes keep known local bytes
-visible but make full-batch estimates unavailable. `plan-tissues` remains a
-lower-level dry run for future tissue detection internals.
+visible but make full-batch estimates unavailable. `validate-ometiff` is a
+filesystem/manifest-only structural check for existing OME-TIFF-like files; it
+does not open TIFF files, parse OME-XML, inspect pixels, compute checksums,
+package uploads, or upload to a database. `plan-tissues` remains a lower-level
+dry run for future tissue detection internals.
 
 Later commands remain planned:
 

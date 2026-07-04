@@ -9,6 +9,15 @@ from .models import (
     SourceSlide,
     SubmissionBatch,
 )
+from .ometiff_validation import (
+    OMETIFF_VALIDATION_REPORT_VERSION,
+    OMETIFF_VALIDATION_SCOPE,
+    OmetiffValidationIssue,
+    OmetiffValidationReport,
+    OmetiffValidationRowSummary,
+    OmetiffValidationRunResult,
+    run_validate_ometiff,
+)
 from .preflight import (
     IssueSeverity,
     PreflightIssue,
@@ -59,6 +68,13 @@ __all__ = [
     "DetectedTissueSection",
     "IssueSeverity",
     "ManifestValidationError",
+    "OMETIFF_VALIDATION_REPORT_VERSION",
+    "OMETIFF_VALIDATION_SCOPE",
+    "OmetiffValidationIssue",
+    "OmetiffValidationReport",
+    "OmetiffValidationRowSummary",
+    "OmetiffValidationRunResult",
+    "run_validate_ometiff",
     "OutputDerivative",
     "PhysicalBoundingBox",
     "PixelBoundingBox",
