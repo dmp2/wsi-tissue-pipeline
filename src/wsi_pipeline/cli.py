@@ -22,6 +22,18 @@ from .config import PipelineConfig, create_default_config, load_config
 
 console = Console()
 
+SETUP_WORKFLOW_MODE_CHOICES = (
+    "existing-ometiff-upload",
+    "convert-single-tissue",
+    "extract-convert-upload",
+)
+
+
+def _positive_float(ctx: click.Context, param: click.Parameter, value: float) -> float:
+    if value <= 0:
+        raise click.BadParameter("must be greater than 0", ctx=ctx, param=param)
+    return value
+
 
 @click.group()
 @click.version_option(version=__version__, prog_name="wsi-pipeline")
@@ -46,6 +58,470 @@ def main(ctx: click.Context, verbose: bool):
     )
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
+
+
+@main.group()
+def submit():
+    """Submission factory commands for database-ready batches."""
+
+
+@submit.command("preflight")
+@click.option(
+    "--profile",
+    "profile_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to database profile YAML.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to submission manifest CSV.",
+)
+@click.option(
+    "--json-report",
+    "json_report_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a machine-readable preflight report JSON.",
+)
+@click.option(
+    "--state-out",
+    "state_out_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a draft preflight batch state JSON.",
+)
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="In strict mode, warnings or deferred requirements also return non-zero.",
+)
+def submit_preflight(
+    profile_path: Path,
+    manifest_path: Path,
+    json_report_path: Path | None,
+    state_out_path: Path | None,
+    strict: bool,
+):
+    """Validate a database profile and submission manifest before image processing."""
+    from .submission import ProfileValidationError, run_preflight
+
+    try:
+        result = run_preflight(
+            profile_path,
+            manifest_path,
+            json_report_path=json_report_path,
+            state_out_path=state_out_path,
+            strict=strict,
+        )
+    except (FileNotFoundError, ProfileValidationError) as exc:
+        console.print(f"[bold red]Preflight failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_preflight_summary(result)
+    exit_code = result.exit_code()
+    if exit_code:
+        sys.exit(exit_code)
+
+
+@submit.command("setup")
+@click.option(
+    "--profile",
+    "profile_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to database profile YAML.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to submission manifest CSV.",
+)
+@click.option(
+    "--mode",
+    "workflow_mode",
+    required=True,
+    type=click.Choice(SETUP_WORKFLOW_MODE_CHOICES),
+    help="Workflow mode selected for this batch.",
+)
+@click.option(
+    "--setup-report",
+    "setup_report_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a deterministic setup summary JSON.",
+)
+@click.option(
+    "--upload-mbps",
+    type=float,
+    default=100.0,
+    show_default=True,
+    callback=_positive_float,
+    help="Estimated upload bandwidth in megabits per second.",
+)
+@click.option(
+    "--upload-overhead",
+    type=float,
+    default=1.25,
+    show_default=True,
+    callback=_positive_float,
+    help="Upload time multiplier for protocol/retry overhead.",
+)
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="In strict mode, warnings or deferred requirements also return non-zero.",
+)
+def submit_setup(
+    profile_path: Path,
+    manifest_path: Path,
+    workflow_mode: str,
+    setup_report_path: Path | None,
+    upload_mbps: float,
+    upload_overhead: float,
+    strict: bool,
+):
+    """Summarize batch setup, blockers, and rough processing/upload estimates."""
+    from .submission import ProfileValidationError, run_setup
+
+    try:
+        result = run_setup(
+            profile_path,
+            manifest_path,
+            workflow_mode,
+            setup_report_path=setup_report_path,
+            upload_mbps=upload_mbps,
+            upload_overhead=upload_overhead,
+            strict=strict,
+        )
+    except (FileNotFoundError, ProfileValidationError, ValueError) as exc:
+        console.print(f"[bold red]Setup failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_setup_summary(result)
+    exit_code = result.exit_code()
+    if exit_code:
+        sys.exit(exit_code)
+
+
+@submit.command("validate-ometiff")
+@click.option(
+    "--profile",
+    "profile_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to database profile YAML.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to submission manifest CSV.",
+)
+@click.option(
+    "--validation-report",
+    "validation_report_path",
+    type=click.Path(path_type=Path),
+    help="Optional path to write a deterministic structural validation JSON report.",
+)
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="In strict mode, warnings or deferred requirements also return non-zero.",
+)
+def submit_validate_ometiff(
+    profile_path: Path,
+    manifest_path: Path,
+    validation_report_path: Path | None,
+    strict: bool,
+):
+    """Run filesystem/manifest-only checks for existing OME-TIFF-like batches."""
+    from .submission import ProfileValidationError, run_validate_ometiff
+
+    try:
+        result = run_validate_ometiff(
+            profile_path,
+            manifest_path,
+            validation_report_path=validation_report_path,
+            strict=strict,
+        )
+    except (FileNotFoundError, ProfileValidationError, ValueError) as exc:
+        console.print(f"[bold red]Existing OME-TIFF structural check failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_ometiff_validation_summary(result)
+    exit_code = result.exit_code()
+    if exit_code:
+        sys.exit(exit_code)
+
+
+@submit.command("plan-tissues")
+@click.option(
+    "--state",
+    "state_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to preflight state JSON from submit preflight.",
+)
+@click.option(
+    "--plan-out",
+    "plan_out_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to write the tissue-detection dry-run plan JSON.",
+)
+def submit_plan_tissues(state_path: Path, plan_out_path: Path):
+    """Create a dry-run plan for future tissue detection from preflight state."""
+    from .submission import TissuePlanError, plan_tissues_from_state
+
+    try:
+        result = plan_tissues_from_state(state_path, plan_out_path=plan_out_path)
+    except (FileNotFoundError, TissuePlanError) as exc:
+        console.print(f"[bold red]Tissue planning failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_tissue_plan_summary(result)
+
+
+def _print_setup_summary(result):
+    report = result.report
+    status_style = "green" if report.ready_for_next_action else "red"
+    if report.ready_for_next_action and (report.warning_count or report.deferred_count):
+        status_style = "yellow"
+
+    table = Table(title="Submission Setup")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Workflow mode", report.workflow_mode.value)
+    table.add_row("Profile/database target", report.profile_name)
+    table.add_row("Profile identifier", report.profile_identifier)
+    table.add_row("Manifest", str(report.manifest_path))
+    table.add_row("Rows/files inspected", str(report.row_count))
+    table.add_row("Valid rows", str(report.valid_row_count))
+    table.add_row("Blocked rows", str(report.blocked_row_count))
+    table.add_row("Deferred rows", str(report.deferred_row_count))
+    table.add_row("Warnings", str(report.warning_count))
+    table.add_row("Errors", str(report.error_count))
+    table.add_row("Known input size", _format_bytes(report.known_input_bytes))
+    table.add_row("Unknown size rows", str(report.unknown_size_row_count))
+    table.add_row(
+        "Estimated output size",
+        _format_byte_range(report.estimated_output_bytes_low, report.estimated_output_bytes_high),
+    )
+    table.add_row(
+        "Estimated processing time",
+        _format_seconds_range(
+            report.estimated_processing_seconds_low,
+            report.estimated_processing_seconds_high,
+        ),
+    )
+    table.add_row(
+        "Estimated upload time",
+        _format_seconds_range(
+            report.estimated_upload_seconds_low, report.estimated_upload_seconds_high
+        ),
+    )
+    table.add_row(
+        "Estimated total time",
+        _format_seconds_range(
+            report.estimated_total_seconds_low, report.estimated_total_seconds_high
+        ),
+    )
+    table.add_row(
+        "Ready for next action",
+        f"[{status_style}]{'yes' if report.ready_for_next_action else 'no'}[/]",
+    )
+    table.add_row("Next action", report.next_action)
+    table.add_row("Recommended next action", report.recommended_next_action)
+
+    if result.setup_report_path is not None:
+        table.add_row("Setup JSON", str(result.setup_report_path))
+
+    console.print(table)
+
+    if report.error_count:
+        console.print("[bold red]Setup found blocking errors.[/]")
+    elif report.strict and (report.warning_count or report.deferred_count):
+        console.print(
+            "[bold yellow]Strict mode returns non-zero for warnings/deferred findings.[/]"
+        )
+    elif report.warning_count or report.deferred_count:
+        console.print("[bold yellow]Setup is ready with warnings or deferred requirements.[/]")
+    else:
+        console.print("[bold green]Setup is ready for the next action.[/]")
+
+
+def _print_ometiff_validation_summary(result):
+    report = result.report
+    status_style = "green" if report.ready_for_next_action else "red"
+    if report.ready_for_next_action and (report.warning_count or report.deferred_count):
+        status_style = "yellow"
+
+    table = Table(title="Existing OME-TIFF Structural Batch Check")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Validation scope", report.validation_scope)
+    table.add_row("Profile", report.profile_identifier)
+    table.add_row("Manifest", str(report.manifest_path))
+    table.add_row("Rows inspected", str(report.row_count))
+    table.add_row("Valid files", str(report.valid_row_count))
+    table.add_row("Blocked files", str(report.blocked_row_count))
+    table.add_row("Deferred rows", str(report.deferred_row_count))
+    table.add_row("Deferred checks", str(report.deferred_count))
+    table.add_row("Warnings", str(report.warning_count))
+    table.add_row("Errors", str(report.error_count))
+    table.add_row("Total known upload size", _format_bytes(report.known_input_bytes))
+    table.add_row(
+        "Ready for next action",
+        f"[{status_style}]{'yes' if report.ready_for_next_action else 'no'}[/]",
+    )
+    table.add_row("Next action", report.next_action)
+    table.add_row("Recommended next action", report.recommended_next_action)
+
+    if result.validation_report_path is not None:
+        table.add_row("Validation JSON", str(result.validation_report_path))
+
+    console.print(table)
+
+    if report.error_count:
+        console.print("[bold red]Structural check found blocking errors.[/]")
+    elif report.strict and (report.warning_count or report.deferred_count):
+        console.print(
+            "[bold yellow]Strict mode returns non-zero for warnings/deferred findings.[/]"
+        )
+    elif report.deferred_count:
+        console.print("[bold yellow]Structural check passed with deferred checks.[/]")
+    elif report.warning_count:
+        console.print("[bold yellow]Structural check passed with warnings.[/]")
+    else:
+        console.print("[bold green]Structural check passed.[/]")
+
+
+def _format_byte_range(low: int | None, high: int | None) -> str:
+    if low is None or high is None:
+        return "unavailable"
+    if low == high:
+        return _format_bytes(low)
+    return f"{_format_bytes(low)} to {_format_bytes(high)}"
+
+
+def _format_bytes(value: int | None) -> str:
+    if value is None:
+        return "unavailable"
+    units = ("B", "KB", "MB", "GB", "TB")
+    size = float(value)
+    unit = units[0]
+    for unit in units:
+        if abs(size) < 1000 or unit == units[-1]:
+            break
+        size /= 1000
+    if unit == "B":
+        return f"{int(size)} {unit}"
+    return f"{size:.2f} {unit}"
+
+
+def _format_seconds_range(low: float | None, high: float | None) -> str:
+    if low is None or high is None:
+        return "unavailable"
+    if low == high:
+        return _format_seconds(low)
+    return f"{_format_seconds(low)} to {_format_seconds(high)}"
+
+
+def _format_seconds(value: float) -> str:
+    if value < 60:
+        return f"{value:.1f}s"
+    if value < 3600:
+        return f"{value / 60:.1f}m"
+    return f"{value / 3600:.1f}h"
+
+
+def _print_tissue_plan_summary(result):
+    plan = result.plan
+    if plan.plan_status.value == "TISSUE_PLAN_BLOCKED":
+        status_style = "red"
+    elif plan.plan_status.value == "TISSUE_PLAN_READY":
+        status_style = "green"
+    else:
+        status_style = "yellow"
+
+    table = Table(title="Tissue Detection Plan")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("State", str(plan.source_state_path))
+    table.add_row("Batch", plan.batch_id)
+    table.add_row("Profile", plan.profile_identifier)
+    table.add_row("Rows inspected", str(plan.total_rows))
+    table.add_row("Planned jobs", str(plan.eligible_job_count))
+    table.add_row("Blocked rows", str(plan.blocked_row_count))
+    table.add_row("Deferred rows", str(plan.deferred_row_count))
+    table.add_row("Skipped rows", str(plan.skipped_row_count))
+    table.add_row("Plan status", f"[{status_style}]{plan.plan_status.value}[/]")
+
+    if result.plan_out_path is not None:
+        table.add_row("Plan JSON", str(result.plan_out_path))
+
+    console.print(table)
+
+    if plan.plan_status.value == "TISSUE_PLAN_BLOCKED":
+        console.print("[bold red]No local tissue-detection jobs can be planned yet.[/]")
+    elif plan.plan_status.value == "TISSUE_PLAN_READY_WITH_DEFERRED_REQUIREMENTS":
+        console.print("[bold yellow]Tissue plan includes deferred or skipped row requirements.[/]")
+    elif plan.plan_status.value == "TISSUE_PLAN_EMPTY":
+        console.print("[bold yellow]Tissue plan has no eligible local jobs.[/]")
+    else:
+        console.print("[bold green]Tissue plan ready.[/]")
+
+
+def _print_preflight_summary(result):
+    report = result.report
+    status_style = "red" if report.error_count else "green"
+
+    table = Table(title="Submission Preflight")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Profile", report.profile_identifier)
+    table.add_row("Database target", report.profile_name)
+    table.add_row("Manifest", str(report.manifest_path))
+    table.add_row("Rows inspected", str(report.total_row_count))
+    table.add_row("Valid rows", str(report.valid_row_count))
+    table.add_row("Rows with warnings", str(report.rows_with_warnings))
+    table.add_row("Rows with deferred requirements", str(report.rows_with_deferred_requirements))
+    table.add_row("Rows with errors", str(report.rows_with_errors))
+    table.add_row("Warnings", str(report.warning_count))
+    table.add_row("Deferred requirements", str(report.deferred_count))
+    table.add_row("Errors", str(report.error_count))
+    table.add_row("Batch status", f"[{status_style}]{report.batch_status.value}[/]")
+    table.add_row("Ready for next stage", "yes" if report.ready_for_next_stage else "no")
+
+    if result.json_report_path is not None:
+        table.add_row("JSON report", str(result.json_report_path))
+    if result.state_out_path is not None:
+        table.add_row("State file", str(result.state_out_path))
+
+    console.print(table)
+
+    if report.error_count:
+        console.print("[bold red]Preflight found blocking errors.[/]")
+    elif report.deferred_count:
+        console.print("[bold yellow]Preflight passed with deferred requirements.[/]")
+    elif report.warning_count:
+        console.print("[bold yellow]Preflight passed with warnings.[/]")
+    else:
+        console.print("[bold green]Preflight passed.[/]")
+
+    if report.strict and (report.warning_count or report.deferred_count) and not report.error_count:
+        console.print("[bold yellow]Strict mode returns non-zero for these findings.[/]")
 
 
 @main.command()
@@ -1035,7 +1511,9 @@ def benchmark_vsi_transcode_cmd(
     show_default=True,
     help="Seed for random and stratified tile sampling.",
 )
-@click.option("--estimate-only", is_flag=True, help="Estimate source-level output without writing TIFFs.")
+@click.option(
+    "--estimate-only", is_flag=True, help="Estimate source-level output without writing TIFFs."
+)
 @click.option(
     "--config",
     "-c",

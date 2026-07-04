@@ -1,0 +1,2 @@
+specimen_id,slide_id,source_path,stain,block_id,section_number,notes
+E241,Image_01,/path/to/E241/Image_01.vsi,H&E,blockA,1,example row
