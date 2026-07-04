@@ -45,13 +45,14 @@ The submission-factory scaffold provides:
 - `wsi-pipeline submit setup` for novice-facing batch summaries, mode checks, and rough estimates
 - `wsi-pipeline submit preflight` for manifest/profile/path checks
 - `wsi-pipeline submit validate-ometiff` for structural-only existing OME-TIFF batch checks
+- `wsi-pipeline submit package-ometiff --dry-run` for planning existing OME-TIFF package contents without copying, linking, or uploading files
 - `wsi-pipeline submit plan-tissues` for lower-level state-only tissue-detection dry runs
 - documentation for the intended workflow and review roles
 - tests for the scaffold, preflight, setup, and tissue-planning layers
 
 The current submission commands do not implement VSI/ETS reading, pixel
 inspection, tissue detection, thresholding, connected components, cropping,
-OME-TIFF writing, batch conversion orchestration, upload packaging, a
+OME-TIFF writing, batch conversion orchestration, real upload packaging, a
 dashboard, notebooks, QuPath integration, napari integration, Slicer
 integration, or Neuroglancer export.
 
@@ -74,6 +75,7 @@ Implemented commands:
 wsi-pipeline submit setup --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv --mode extract-convert-upload --setup-report setup_report.json
 wsi-pipeline submit preflight --profile configs/database_profiles/national_database_ometiff.yaml --manifest examples/submission_factory/example_submission_manifest.csv
 wsi-pipeline submit validate-ometiff --profile configs/database_profiles/national_database_ometiff.yaml --manifest existing_ometiff_manifest.csv --validation-report ometiff_structural_report.json
+wsi-pipeline submit package-ometiff --profile configs/database_profiles/national_database_ometiff.yaml --manifest existing_ometiff_manifest.csv --output-dir package_dry_run --dry-run
 wsi-pipeline submit plan-tissues --state preflight_state.json --plan-out tissue_detection_plan.json
 ```
 
@@ -86,8 +88,13 @@ upload time from simple workflow constants. Supported setup modes are
 visible but make full-batch estimates unavailable. `validate-ometiff` is a
 filesystem/manifest-only structural check for existing OME-TIFF-like files; it
 does not open TIFF files, parse OME-XML, inspect pixels, compute checksums,
-package uploads, or upload to a database. `plan-tissues` remains a lower-level
-dry run for future tissue detection internals.
+package uploads, or upload to a database. `package-ometiff --dry-run` consumes
+that structural readiness and writes `package_plan.json`, `package_manifest.csv`,
+and `package_summary.txt` showing planned package names, blockers, warnings, and
+row-specific deferred checks. It does not copy, symlink, hardlink, upload, read
+image pixels, parse TIFF headers, parse OME-XML, or compute checksums. Actual
+copy/link/upload behavior remains planned for a later PR. `plan-tissues` remains
+a lower-level dry run for future tissue detection internals.
 
 Later commands remain planned:
 

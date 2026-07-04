@@ -261,6 +261,72 @@ def submit_validate_ometiff(
         sys.exit(exit_code)
 
 
+@submit.command("package-ometiff")
+@click.option(
+    "--profile",
+    "profile_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to database profile YAML.",
+)
+@click.option(
+    "--manifest",
+    "manifest_path",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Path to submission manifest CSV.",
+)
+@click.option(
+    "--output-dir",
+    "output_dir",
+    required=True,
+    type=click.Path(path_type=Path),
+    help="Directory for dry-run package planning artifacts.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Required. Write package planning artifacts only; do not copy/link/upload files.",
+)
+@click.option(
+    "--strict/--no-strict",
+    default=False,
+    show_default=True,
+    help="In strict mode, warnings or deferred checks also return non-zero.",
+)
+def submit_package_ometiff(
+    profile_path: Path,
+    manifest_path: Path,
+    output_dir: Path,
+    dry_run: bool,
+    strict: bool,
+):
+    """Plan an existing OME-TIFF package without copying, linking, or uploading files."""
+    from .submission import ProfileValidationError, run_package_ometiff_dry_run
+
+    if not dry_run:
+        raise click.UsageError(
+            "--dry-run is required; copy/link/upload package execution is not implemented."
+        )
+
+    try:
+        result = run_package_ometiff_dry_run(
+            profile_path,
+            manifest_path,
+            output_dir,
+            strict=strict,
+        )
+    except (FileNotFoundError, ProfileValidationError, ValueError) as exc:
+        console.print(f"[bold red]OME-TIFF package dry run failed:[/] {exc}")
+        sys.exit(1)
+
+    _print_ometiff_package_plan_summary(result)
+    exit_code = result.exit_code()
+    if exit_code:
+        sys.exit(exit_code)
+
+
 @submit.command("plan-tissues")
 @click.option(
     "--state",
@@ -403,6 +469,51 @@ def _print_ometiff_validation_summary(result):
         console.print("[bold yellow]Structural check passed with warnings.[/]")
     else:
         console.print("[bold green]Structural check passed.[/]")
+
+
+def _print_ometiff_package_plan_summary(result):
+    report = result.report
+    status_style = "green" if report.ready_for_next_action else "red"
+    if report.ready_for_next_action and (
+        report.ready_with_warnings_count or report.deferred_check_count
+    ):
+        status_style = "yellow"
+
+    table = Table(title="OME-TIFF Package Dry Run")
+    table.add_column("Item", style="cyan")
+    table.add_column("Value")
+
+    table.add_row("Validation scope", report.validation_scope)
+    table.add_row("Profile", report.profile_identifier)
+    table.add_row("Manifest", str(report.manifest_path))
+    table.add_row("Output directory", str(report.output_dir))
+    table.add_row("Rows planned", str(report.row_count))
+    table.add_row("Ready", str(report.ready_count))
+    table.add_row("Ready with warnings", str(report.ready_with_warnings_count))
+    table.add_row("Blocked", str(report.blocked_count))
+    table.add_row("Deferred checks", str(report.deferred_check_count))
+    table.add_row("Total known input size", _format_bytes(report.total_known_input_bytes))
+    table.add_row(
+        "Ready for package review",
+        f"[{status_style}]{'yes' if report.ready_for_next_action else 'no'}[/]",
+    )
+    table.add_row("Recommended next action", report.recommended_next_action)
+    table.add_row("Package plan JSON", str(result.package_plan_path))
+    table.add_row("Package manifest CSV", str(result.package_manifest_path))
+    table.add_row("Package summary", str(result.package_summary_path))
+
+    console.print(table)
+
+    if report.blocked_count:
+        console.print("[bold red]Package dry run found blocked rows.[/]")
+    elif report.strict and report.deferred_check_count:
+        console.print(
+            "[bold yellow]Strict mode returns non-zero for deferred package-review checks.[/]"
+        )
+    elif report.deferred_check_count:
+        console.print("[bold yellow]Package plan is ready for review with deferred checks.[/]")
+    else:
+        console.print("[bold green]Package plan is ready for dry-run review.[/]")
 
 
 def _format_byte_range(low: int | None, high: int | None) -> str:
