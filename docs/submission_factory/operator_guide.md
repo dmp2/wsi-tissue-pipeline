@@ -111,6 +111,48 @@ Tests and smoke examples may use tiny nonzero fake `.ome.tiff` files as
 OME-TIFF-like filesystem fixtures. Those fixtures validate command behavior only
 and are not scientifically valid OME-TIFF images.
 
+## Existing OME-TIFF Package Dry Run
+
+`wsi-pipeline submit package-ometiff --dry-run` is for batches that already
+have an OME-TIFF submission manifest and need a package-content review before
+any future copy, link, upload, or database-submission behavior exists. It
+answers:
+
+> What files would be included, what would they be called, which rows are
+> blocked, and what checks remain deferred?
+
+Example command:
+
+```bash
+wsi-pipeline submit package-ometiff \
+  --profile configs/database_profiles/national_database_ometiff.yaml \
+  --manifest existing_ometiff_manifest.csv \
+  --output-dir package_dry_run \
+  --dry-run
+```
+
+The command creates the output directory if needed and writes or overwrites only
+these planning artifacts:
+
+- `package_plan.json`
+- `package_manifest.csv`
+- `package_summary.txt`
+
+The package dry run is downstream of `validate-ometiff`; it reuses the same
+filesystem and manifest structural checks and keeps
+`validation_scope: "filesystem_and_manifest_only"`. Planned names use the
+database profile naming template where possible, preserve `.ome.tif` or
+`.ome.tiff` suffixes, and block rows with duplicate package names or unresolved
+naming-template placeholders. Batch readiness means ready for dry-run package
+review, not ready for upload.
+
+This command does not copy, symlink, hardlink, upload, rename, move, modify, or
+open image payload files. It does not read pixels, parse TIFF headers, parse
+OME-XML, validate OME-TIFF metadata, compute checksums, launch notebooks, or
+use QuPath, napari, or Neuroglancer. True OME-TIFF metadata validation, OME-XML
+parsing, checksum computation when required, and actual copy/link/upload
+execution remain deferred to later workflow stages.
+
 ## Preflight
 
 Preflight is the first check before tissue detection or conversion. It answers:
@@ -202,6 +244,7 @@ Available now:
 wsi-pipeline submit setup
 wsi-pipeline submit preflight
 wsi-pipeline submit validate-ometiff
+wsi-pipeline submit package-ometiff --dry-run
 wsi-pipeline submit plan-tissues
 ```
 
