@@ -54,6 +54,9 @@ def _integrate_inverse_flow(xv, v, *, emlddmm_module, interp2d=None, grid_sample
 
 def _warp_time_series(x, image, phis, *, emlddmm_module, interp2d=None, grid_sample_kwargs=None):
     """Warp an image along a stored phi^{-1}_t trajectory."""
+    x = tuple(
+        torch.as_tensor(axis, device=phis.device, dtype=phis.dtype) for axis in x
+    )
     image = torch.as_tensor(image, device=phis.device, dtype=phis.dtype)
     warped = []
     for t in range(phis.shape[0]):
@@ -191,7 +194,7 @@ def _promote_2d_pair_config_for_backend(config, dtype):
         backend_config.get("downJ", [1, 1]),
         1,
     )
-    backend_config["out_of_plane"] = True
+    backend_config["out_of_plane"] = True # does 'True' make sense?
     backend_config.setdefault("dtype", dtype)
     backend_config["A"] = torch.eye(4, dtype=dtype)
     backend_config["A2d"] = None

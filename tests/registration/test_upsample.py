@@ -28,6 +28,38 @@ def _fake_symmetric_backend(multiscale=None):
     )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_warp_time_series_moves_axes_to_transform_device():
+    seen_devices = []
+
+    def checking_interp(x, image, phii, **kwargs):
+        seen_devices.append(
+            (
+                tuple(axis.device.type for axis in x),
+                image.device.type,
+                phii.device.type,
+            )
+        )
+        return torch.zeros(
+            (image.shape[0], *phii.shape[1:]),
+            device=phii.device,
+            dtype=image.dtype,
+        )
+
+    backend = SimpleNamespace(interp=checking_interp)
+    axes = (torch.arange(2), torch.arange(3))
+    image = torch.ones((1, 2, 3))
+    phis = torch.zeros((2, 2, 2, 3), device="cuda")
+
+    result = symmetric_module._warp_time_series(axes, image, phis, emlddmm_module=backend)
+
+    assert result.device.type == "cuda"
+    assert seen_devices == [
+        (("cuda", "cuda"), "cuda", "cuda"),
+        (("cuda", "cuda"), "cuda", "cuda"),
+    ]
+
+
 def _axes(z_values, size_y=2, size_x=2):
     return [
         np.asarray(z_values, dtype=np.float32),

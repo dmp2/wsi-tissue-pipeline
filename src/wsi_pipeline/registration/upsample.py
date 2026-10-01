@@ -183,11 +183,29 @@ def _normalize_pair_registration_config(config):
     return normalized
 
 
-def _register_pair(ind0, ind1, xJ, J, W, config):
+def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
     """Register a pair of observed slices and cache time-resolved trajectories."""
+    from scipy.signal import convolve2d
+
     xy_axes = (np.asarray(xJ[1]), np.asarray(xJ[2]))
     I0 = np.asarray(J[:, ind0], dtype=np.float32)
     I1 = np.asarray(J[:, ind1], dtype=np.float32)
+
+    if mode == "seg":
+        # Try smoothing before mapping
+        down=8 # filter size
+        kernel = np.ones((down, down), dtype=np.float32) / (down**2)
+
+        I0 = np.stack(
+            [convolve2d(channel, kernel, mode="same") for channel in I0],
+            axis=0,
+        ).astype(np.float32)
+
+        I1 = np.stack(
+            [convolve2d(channel, kernel, mode="same") for channel in I1],
+            axis=0,
+        ).astype(np.float32)
+
     W0 = None if W is None else np.asarray(W[ind0], dtype=np.float32)
     W1 = None if W is None else np.asarray(W[ind1], dtype=np.float32)
 
@@ -368,14 +386,14 @@ def upsample_between_slices(
     if parallel and len(pairs) > 1:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(_register_pair, i0, i1, xJ, J, W, config): (i0, i1)
+                executor.submit(_register_pair, i0, i1, xJ, J, W, config, mode): (i0, i1)
                 for i0, i1 in pairs
             }
             for future in as_completed(futures):
                 results.append(future.result())
     else:
         for i0, i1 in pairs:
-            results.append(_register_pair(i0, i1, xJ, J, W, config))
+            results.append(_register_pair(i0, i1, xJ, J, W, config, mode))
 
     cache = {(i0, i1): (I0t, I1t, J0t, J1t) for i0, i1, I0t, I1t, J0t, J1t in results}
 
