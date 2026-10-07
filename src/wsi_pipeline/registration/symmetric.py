@@ -168,7 +168,7 @@ def _prepend_synthetic_axis_to_2d_schedule(value, synthetic_value):
                 promoted.append(entry)
         return promoted
     if len(entries) == 2:
-        return [synthetic_value, *entries]
+        return [[synthetic_value, *entries]]
     return value
 
 
@@ -187,11 +187,11 @@ def _mean_spacing_from_axes(*axis_groups):
 def _promote_2d_pair_config_for_backend(config, dtype):
     backend_config = dict(config)
     backend_config["downI"] = _prepend_synthetic_axis_to_2d_schedule(
-        backend_config.get("downI", [1, 1]),
+        backend_config.get("downI", [[1, 1]]),
         1,
     )
     backend_config["downJ"] = _prepend_synthetic_axis_to_2d_schedule(
-        backend_config.get("downJ", [1, 1]),
+        backend_config.get("downJ", [[1, 1]]),
         1,
     )
     backend_config["out_of_plane"] = True # does 'True' make sense?
@@ -202,6 +202,9 @@ def _promote_2d_pair_config_for_backend(config, dtype):
     backend_config["eA"] = 0.0
     backend_config["eA2d"] = 0.0
     backend_config["slice_matching"] = False
+    backend_config["update_A"] = False
+    backend_config["update_matching_weights"] = False
+
     return backend_config
 
 
@@ -287,15 +290,15 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         # synthetic z support back to a 2D velocity before warping the original pair.
         synthetic_spacing = _mean_spacing_from_axes(xI_t, xJ_t)
         synthetic_axis = torch.tensor(
-            [0.0, synthetic_spacing],
+            [-2.0, -1.0, 0.0, 1.0, 2.0],
             device=device,
             dtype=dtype,
-        )
+        ) * synthetic_spacing
         xI_backend = (synthetic_axis, *xI_t)
         xJ_backend = (synthetic_axis, *xJ_t)
-        I_backend = I_t[:, None].expand(-1, 2, -1, -1).contiguous()
-        J_backend = J_t[:, None].expand(-1, 2, -1, -1).contiguous()
-        W0_backend = W0_t[None].expand(2, -1, -1).contiguous()
+        I_backend = I_t[:, None].expand(-1, 5, -1, -1).contiguous()
+        J_backend = J_t[:, None].expand(-1, 5, -1, -1).contiguous()
+        W0_backend = W0_t[None].expand(5, -1, -1).contiguous()
         backend_cfg = _promote_2d_pair_config_for_backend(config, dtype)
     else:
         xI_backend = xI_t
@@ -331,7 +334,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
             "v",
             _lift_in_plane_velocity_to_backend(v_init_back, fwd_last["v"].shape[2]),
         )
-        out_back = emlddmm_module.emlddmm_multiscale(
+        out_bwd = emlddmm_module.emlddmm_multiscale(
             xI=xJ_backend,
             I=J_backend,
             xJ=xI_backend,
@@ -339,11 +342,11 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
             W0=W0_backend,
             **back_cfg,
         )
-        back_last, v_back_raw, _ = _extract_in_plane_velocity(out_back)
+        back_last, v_back_raw, _ = _extract_in_plane_velocity(out_bwd)
         v_back = torch.flip(-v_back_raw, [0])
     else:
         back_cfg.setdefault("v", v_init_back)
-        out_back = emlddmm_module.emlddmm_multiscale(
+        out_bwd = emlddmm_module.emlddmm_multiscale(
             xI=xJ_t,
             I=J_t,
             xJ=xI_t,
@@ -351,8 +354,55 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
             W0=W0_t,
             **back_cfg,
         )
-        back_last = out_back[-1] if isinstance(out_back, list) else out_back  # last scale output
+        back_last = out_bwd[-1] if isinstance(out_bwd, list) else out_bwd  # last scale output
         v_back = torch.flip(-back_last["v"], [0])
+
+    # DEBUG: compare raw backend velocities with extracted 2D velocities.
+    fwd_debug_last, v_fwd_debug, xv_fwd_debug = _extract_in_plane_velocity(out_fwd)
+    bwd_debug_last, v_bwd_raw_debug, xv_bwd_debug = _extract_in_plane_velocity(out_bwd)
+
+    raw_fwd = torch.as_tensor(fwd_debug_last["v"])
+    raw_bwd = torch.as_tensor(bwd_debug_last["v"])
+
+    print(
+        "RAW BACKEND VELOCITIES:",
+        "fwd shape=", tuple(raw_fwd.shape),
+        "fwd max=", float(torch.max(torch.abs(raw_fwd))),
+        "fwd rms=", float(torch.sqrt(torch.mean(raw_fwd**2))),
+        "bwd shape=", tuple(raw_bwd.shape),
+        "bwd max=", float(torch.max(torch.abs(raw_bwd))),
+        "bwd rms=", float(torch.sqrt(torch.mean(raw_bwd**2))),
+    )
+
+    print(
+        "EXTRACTED 2D VELOCITIES:",
+        "fwd shape=", tuple(v_fwd_debug.shape),
+        "fwd max=", float(torch.max(torch.abs(v_fwd_debug))),
+        "fwd rms=", float(torch.sqrt(torch.mean(v_fwd_debug**2))),
+        "bwd raw shape=", tuple(v_bwd_raw_debug.shape),
+        "bwd raw max=", float(torch.max(torch.abs(v_bwd_raw_debug))),
+        "bwd raw rms=", float(torch.sqrt(torch.mean(v_bwd_raw_debug**2))),
+    )
+
+    print("RAW FORWARD COMPONENT MAXIMA:")
+    for component in range(raw_fwd.shape[1]):
+        for z in range(raw_fwd.shape[2]):
+            slab = raw_fwd[:, component, z]
+            print(
+                f"  component={component}, z={z}: "
+                f"max={float(torch.max(torch.abs(slab))):.6g}, "
+                f"mean={float(torch.mean(slab)):.6g}"
+            )
+
+    v_bwd_debug = torch.flip(-v_bwd_raw_debug, [0])
+
+    print(
+        "ORIENTED RELATIONS:",
+        "max |fwd-bwd|=",
+        float(torch.max(torch.abs(v_fwd_debug - v_bwd_debug))),
+        "max |fwd+bwd|=",
+        float(torch.max(torch.abs(v_fwd_debug + v_bwd_debug))),
+    )
 
     if combine_velocities == "average":
         # I actually don't think this makes sense to do
@@ -426,7 +476,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
 
     out = {
         "forward": out_fwd,
-        "backward": out_back,
+        "backward": out_bwd,
         "v_symmetric": v_sym.detach().cpu(),
         "phi_I": phi_I.detach().cpu(),
         "phi_J": phi_J.detach().cpu(),

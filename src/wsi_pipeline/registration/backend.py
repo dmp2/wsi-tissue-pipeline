@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import importlib.metadata
 import importlib.util
 from collections.abc import Callable
@@ -97,14 +98,28 @@ def _build_backend(
 
 
 def _find_vendored_backend_path() -> Path:
-    """Locate the vendored legacy EM-LDDMM backend in the workspace."""
+    """Locate an EM-LDDMM backend from an explicit checkout or vendored copy."""
+
+    for env_var in ("EMLDDMM_HOME", "EMLDDMM_REPO"):
+        value = os.environ.get(env_var)
+        if not value:
+            continue
+
+        candidate = Path(value).expanduser().resolve() / "emlddmm.py"
+        if candidate.exists():
+            return candidate
 
     here = Path(__file__).resolve()
     for parent in here.parents:
         candidate = parent / "legacy_scripts" / "emlddmm.py"
         if candidate.exists():
             return candidate
-    raise ImportError("Could not locate vendored legacy_scripts/emlddmm.py")
+
+    raise ImportError(
+        "Could not locate EM-LDDMM backend. "
+        "Set EMLDDMM_HOME or EMLDDMM_REPO to an EM-LDDMM checkout, "
+        "or provide legacy_scripts/emlddmm.py."
+    )
 
 
 def _load_vendored_backend() -> EmlddmmBackend:

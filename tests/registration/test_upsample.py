@@ -11,6 +11,467 @@ import wsi_pipeline.registration.symmetric as symmetric_module
 import wsi_pipeline.registration.upsample as upsample_module
 
 
+# -------------------------------------------------------------------------
+# Real-registration / visual-QC integration tests
+# -------------------------------------------------------------------------
+
+from pathlib import Path
+
+
+def _make_binary_square_circle(
+    size: int = 128,
+    square_half_width: int = 26,
+    circle_radius: int = 30,
+):
+    """Create centered binary square and circle images.
+
+    Returns
+    -------
+    square, circle : np.ndarray
+        Arrays with shape (1, H, W), matching the registration helper's
+        channel-first 2D image convention.
+    """
+    if size < 32:
+        raise ValueError("size must be large enough for a meaningful registration test")
+
+    cy = cx = (size - 1) / 2.0
+
+    yy, xx = np.mgrid[:size, :size]
+
+    square_mask = (
+        (np.abs(xx - cx) <= square_half_width)
+        & (np.abs(yy - cy) <= square_half_width)
+    )
+
+    circle_mask = ((xx - cx) ** 2 + (yy - cy) ** 2) <= circle_radius**2
+
+    square = square_mask.astype(np.float32)[None, ...]
+    circle = circle_mask.astype(np.float32)[None, ...]
+
+    return square, circle
+
+
+def _artifact_dir():
+    """Return a deterministic repo-local directory for visual test artifacts."""
+    path = Path("tests") / "artifacts" / "registration"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_flow_montage(
+    frames,
+    output_path,
+    *,
+    title,
+    threshold=False,
+):
+    """Save all temporal samples as a horizontal montage.
+
+    Parameters
+    ----------
+    frames : array-like
+        Expected shape is either (T, C, H, W) or (T, H, W).
+    output_path : pathlib.Path
+        Destination PNG.
+    title : str
+        Figure title.
+    threshold : bool
+        If True, show binary-thresholded frames. Otherwise show the actual
+        floating-point registration output.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    frames = np.asarray(frames)
+
+    if frames.ndim == 4:
+        # T, C, H, W -> use first/only segmentation channel.
+        frames = frames[:, 0]
+
+    if frames.ndim != 3:
+        raise AssertionError(
+            f"Expected frames with shape (T,H,W) or (T,C,H,W), got {frames.shape}"
+        )
+
+    n_frames = frames.shape[0]
+
+    fig, axes = plt.subplots(
+        1,
+        n_frames,
+        figsize=(2.2 * n_frames, 2.8),
+        squeeze=False,
+    )
+    axes = axes[0]
+
+    for t, ax in enumerate(axes):
+        frame = frames[t]
+
+        if threshold:
+            frame = frame >= 0.5
+
+        ax.imshow(
+            frame,
+            cmap="gray",
+            vmin=0.0,
+            vmax=1.0,
+            interpolation="nearest",
+        )
+
+        if n_frames == 1:
+            tau = 0.0
+        else:
+            tau = t / (n_frames - 1)
+
+        ax.set_title(f"t={tau:.2f}")
+        ax.axis("off")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _centroid(image):
+    """Intensity-weighted centroid in pixel coordinates."""
+    image = np.asarray(image, dtype=np.float64)
+
+    if image.ndim == 3:
+        image = image[0]
+
+    yy, xx = np.mgrid[: image.shape[0], : image.shape[1]]
+
+    mass = image.sum()
+
+    if mass <= 0:
+        return np.array([np.nan, np.nan], dtype=np.float64)
+
+    return np.array(
+        [
+            (yy * image).sum() / mass,
+            (xx * image).sum() / mass,
+        ],
+        dtype=np.float64,
+    )
+
+
+def test_real_2d_square_to_circle_registration_writes_montage():
+    """Exercise the real symmetric registration path on two binary 2D images.
+
+    This deliberately does NOT monkeypatch:
+      - emlddmm_multiscale
+      - inverse-flow integration
+      - image warping
+      - Jacobian calculation
+
+    The primary purpose is to establish that the real registration backend
+    produces an auditable temporal deformation from square -> circle.
+    """
+    size = 128
+
+    square, circle = _make_binary_square_circle(size=size)
+
+    axes_2d = (
+        np.arange(size, dtype=np.float32),
+        np.arange(size, dtype=np.float32),
+    )
+
+    # nt is currently required by the registration machinery. This value
+    # provides a useful number of temporal samples for visual inspection.
+    #
+    # IMPORTANT:
+    # This is NOT an endorsement of the current global-gap/nt coupling in
+    # upsample_between_slices.
+    nt = 8
+
+    config = _fast_real_registration_config(nt=8)
+    from scipy.signal import convolve2d
+
+    kernel = np.ones((8, 8), dtype=np.float32) / 64.0
+
+    square_smooth = np.stack(
+        [convolve2d(ch, kernel, mode="same") for ch in square],
+        axis=0,
+    ).astype(np.float32)
+
+    circle_smooth = np.stack(
+        [convolve2d(ch, kernel, mode="same") for ch in circle],
+        axis=0,
+    ).astype(np.float32)
+    out = symmetric_module.emlddmm_multiscale_symmetric_N(
+        xI=axes_2d,
+        I=square_smooth,
+        xJ=axes_2d,
+        J=circle_smooth,
+        **config,
+    )
+    
+    # The existing unit tests establish that the symmetric helper exposes
+    # full endpoint-inclusive time series as ItAll/JtAll.
+    assert "ItAll" in out
+    assert "JtAll" in out
+
+    It_all = np.asarray(out["ItAll"])
+    Jt_all = np.asarray(out["JtAll"])
+    v = np.asarray(out["v_symmetric"])
+    phi_I = np.asarray(out["phi_I"])
+
+    disp = phi_I - phi_I[0:1]
+
+    v_abs_max = float(np.max(np.abs(v)))
+    v_rms = float(np.sqrt(np.mean(v**2)))
+    disp_abs_max = float(np.max(np.abs(disp[-1])))
+    disp_rms = float(np.sqrt(np.mean(disp[-1] ** 2)))
+
+    initial = It_all[0]
+    final = It_all[-1]
+
+    mse_initial = float(np.mean((initial - circle) ** 2))
+    mse_final = float(np.mean((final - circle) ** 2))
+
+    print("v abs max:", v_abs_max)
+    print("v RMS:", v_rms)
+    print("final displacement abs max:", disp_abs_max)
+    print("final displacement RMS:", disp_rms)
+    print("MSE initial -> circle:", mse_initial)
+    print("MSE final   -> circle:", mse_final)
+
+    assert v_abs_max > 1e-5, "Registration produced essentially zero velocity"
+    assert disp_abs_max > 1e-3, "Final transform remained essentially identity"
+    assert mse_final < mse_initial, (
+        f"Registration did not move square toward circle: "
+        f"{mse_initial=} {mse_final=}"
+    )
+
+    assert It_all.ndim == 4
+    assert Jt_all.ndim == 4
+
+    assert It_all.shape[1:] == square.shape
+    assert Jt_all.shape[1:] == circle.shape
+
+    # nt velocity intervals should yield nt + 1 temporal states.
+    assert It_all.shape[0] == nt + 1
+    assert Jt_all.shape[0] == nt + 1
+
+    # Basic sanity: registration must produce finite images.
+    assert np.all(np.isfinite(It_all))
+    assert np.all(np.isfinite(Jt_all))
+
+    # Nothing should disappear completely.
+    assert np.all(It_all.sum(axis=(1, 2, 3)) > 0)
+    assert np.all(Jt_all.sum(axis=(1, 2, 3)) > 0)
+
+    # Because source and target are centered, gross translation is not expected.
+    # Keep this deliberately loose: this is a diagnostic integration test,
+    # not a claim about exact LDDMM trajectories.
+    center = np.array([(size - 1) / 2.0, (size - 1) / 2.0])
+
+    for frame in It_all:
+        c = _centroid(frame)
+        assert np.linalg.norm(c - center) < 8.0
+
+    artifact_dir = _artifact_dir()
+
+    _save_flow_montage(
+        It_all,
+        artifact_dir / "square_to_circle_2d_ItAll_soft.png",
+        title="Real 2D registration: square → circle, source-side flow",
+        threshold=False,
+    )
+
+    _save_flow_montage(
+        It_all,
+        artifact_dir / "square_to_circle_2d_ItAll_binary.png",
+        title="Real 2D registration: square → circle, thresholded source-side flow",
+        threshold=True,
+    )
+
+    _save_flow_montage(
+        Jt_all,
+        artifact_dir / "square_to_circle_2d_JtAll_soft.png",
+        title="Real 2D registration: square → circle, target-side flow",
+        threshold=False,
+    )
+
+def test_2d_downsampling_schedule_promotion_preserves_scale_dimension():
+    assert symmetric_module._prepend_synthetic_axis_to_2d_schedule(
+        [1, 1], 1
+    ) == [[1, 1, 1]]
+
+    assert symmetric_module._prepend_synthetic_axis_to_2d_schedule(
+        [[1, 1]], 1
+    ) == [[1, 1, 1]]
+
+    assert symmetric_module._prepend_synthetic_axis_to_2d_schedule(
+        [[2, 2], [1, 1]], 1
+    ) == [[1, 2, 2], [1, 1, 1]]
+
+
+def _fast_real_registration_config(nt=8):
+    return {
+        "nt": nt,
+        "n_iter": [100],
+        "v_start": [0],
+        "ev": [5e-1],
+        "a": [2.0],
+        "dv": [1.0, 2.0, 2.0],
+        "sigmaR": [5e0],
+        "n_draw": [0],
+        "n_reduce_step": [1000],
+        "device": "cuda:0",
+        "dtype": "float32",
+        "A": np.eye(4, dtype=np.float32),
+        "update_A": False,
+        "eA": [0.0],
+        "update_matching_weights": False,
+        # "out_of_plane": False,
+    }
+
+def test_real_square_to_circle_between_3d_slices_writes_montage(monkeypatch):
+    """Exercise real upsampling between binary 2D slices in a 3D stack.
+
+    The data representation is:
+
+        J.shape == (C, Z, Y, X)
+
+        z = 0       : binary square
+        z = 1..Z-2  : missing
+        z = Z-1     : binary circle
+
+    `upsample_between_slices` must extract the observed planes as 2D images,
+    register them using the real symmetric-registration helper, and populate
+    the missing global Z planes.
+    """
+    size = 128
+
+    # Keep nine planes so that the resulting montage has useful temporal
+    # resolution without becoming unwieldy.
+    nz = 9
+
+    square, circle = _make_binary_square_circle(size=size)
+
+    J = np.zeros(
+        (1, nz, size, size),
+        dtype=np.float32,
+    )
+
+    J[:, 0] = square
+    J[:, -1] = circle
+
+    present_mask = np.zeros(nz, dtype=bool)
+    present_mask[0] = True
+    present_mask[-1] = True
+
+    xJ = [
+        np.arange(nz, dtype=np.float32),
+        np.arange(size, dtype=np.float32),
+        np.arange(size, dtype=np.float32),
+    ]
+
+    # Temporary compatibility with the CURRENT implementation:
+    # the current upsampler requires nt to cover the largest global gap.
+    #
+    # That coupling is not being defended here and should be redesigned
+    # separately. We satisfy it only so this test reaches the registration
+    # and interpolation path we actually want to inspect.
+    nt = nz - 1
+    config = _fast_real_registration_config(nt=8)
+
+    real_symmetric = symmetric_module.emlddmm_multiscale_symmetric_N
+    captured = []
+
+    def capturing_symmetric(*args, **kwargs):
+        result = real_symmetric(*args, **kwargs)
+        captured.append(result)
+        return result
+
+    monkeypatch.setattr(
+        upsample_module,
+        "emlddmm_multiscale_symmetric_N",
+        capturing_symmetric,
+    )
+
+    out = upsample_module.upsample_between_slices(
+        xJ,
+        J,
+        present_mask=present_mask,
+        mode="seg",
+        config = config,
+        parallel=False,
+    )
+
+    assert len(captured) == 2
+
+    max_v = max(
+        float(np.max(np.abs(np.asarray(pair_out["v_symmetric"]))))
+        for pair_out in captured
+    )
+
+    assert max_v > 1e-5, (
+        "Upsampling produced visually changing slices but registration "
+        "learned zero velocity; result is only endpoint blending."
+    )
+
+    for i, pair_out in enumerate(captured):
+        v = np.asarray(pair_out["v_symmetric"])
+        phi = np.asarray(pair_out["phi_I"])
+
+        disp = phi - phi[0:1]
+
+        v_abs_max = float(np.max(np.abs(v)))
+        v_rms = float(np.sqrt(np.mean(v**2)))
+        disp_abs_max = float(np.max(np.abs(disp[-1])))
+
+        print(
+            f"symmetric call {i}: "
+            f"v_abs_max={v_abs_max:.6g}, "
+            f"v_rms={v_rms:.6g}, "
+            f"disp_abs_max={disp_abs_max:.6g}"
+        )
+
+    assert out["pairs"] == [(0, nz - 1)]
+
+    filled = np.asarray(out["J_filled"])
+
+    assert filled.shape == J.shape
+    assert np.all(np.isfinite(filled))
+
+    # Observed planes must be preserved.
+    assert np.array_equal(filled[:, 0], square)
+    assert np.array_equal(filled[:, -1], circle)
+
+    # Every plane between the observed slices should now contain tissue.
+    for z in range(1, nz - 1):
+        assert filled[:, z].sum() > 0
+
+    # Gross sanity check: because square and circle are both centered,
+    # the interpolated anatomy should remain approximately centered.
+    center = np.array([(size - 1) / 2.0, (size - 1) / 2.0])
+
+    for z in range(nz):
+        c = _centroid(filled[:, z])
+        assert np.linalg.norm(c - center) < 8.0
+
+    artifact_dir = _artifact_dir()
+
+    # Convert C,Z,Y,X -> Z,C,Y,X for the montage helper.
+    filled_time = np.moveaxis(filled, 1, 0)
+
+    _save_flow_montage(
+        filled_time,
+        artifact_dir / "square_to_circle_3d_slices_soft.png",
+        title="Real upsampling: square slice → circle slice",
+        threshold=False,
+    )
+
+    _save_flow_montage(
+        filled_time,
+        artifact_dir / "square_to_circle_3d_slices_binary.png",
+        title="Real upsampling: square slice → circle slice, thresholded",
+        threshold=True,
+    )
+
 def _fake_interp(x, image, phii, interp2d=False, **kwargs):
     image_t = torch.as_tensor(image)
     phii_t = torch.as_tensor(phii)
@@ -536,8 +997,8 @@ def test_symmetric_helper_passes_coordinate_axes_as_tuples(monkeypatch):
         assert [axis.numel() for axis in kwargs["xI"]] == [2, 3, 4]
         assert [axis.numel() for axis in kwargs["xJ"]] == [2, 3, 4]
         assert tuple(kwargs["I"].shape) == (1, 2, 3, 4)
-        assert kwargs["downI"] == [1, 1, 1]
-        assert kwargs["downJ"] == [1, 1, 1]
+        assert kwargs["downI"] == [[1, 1, 1]]
+        assert kwargs["downJ"] == [[1, 1, 1]]
         assert kwargs["out_of_plane"] is True
         assert kwargs["eA"] == 0.0
         assert kwargs["eA2d"] == 0.0
@@ -545,6 +1006,8 @@ def test_symmetric_helper_passes_coordinate_axes_as_tuples(monkeypatch):
         assert kwargs["Amode"] == 0
         assert torch.allclose(kwargs["A"], torch.eye(4))
         assert kwargs["A2d"] is None
+        assert kwargs["update_A"] is False
+        assert kwargs["update_matching_weights"] is False
         return {
             "v": torch.zeros((nt, 3, 2, 3, 4), dtype=torch.float32),
             "xv": [
@@ -670,6 +1133,7 @@ def test_symmetric_helper_uses_domain_specific_axes_and_spacing(monkeypatch):
     def fake_det(phi, spacing=None):
         det_spacings.append(tuple(float(s) for s in spacing))
         return torch.ones((phi.shape[0], 2, 2), dtype=torch.float32)
+
 
     monkeypatch.setattr(
         symmetric_module,
