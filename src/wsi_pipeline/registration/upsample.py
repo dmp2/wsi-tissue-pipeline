@@ -209,6 +209,11 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
     W0 = None if W is None else np.asarray(W[ind0], dtype=np.float32)
     W1 = None if W is None else np.asarray(W[ind1], dtype=np.float32)
 
+    print("mode", mode)
+    print("I0 min/max", I0.min(), I0.max())
+    print("I0 unique-ish", np.unique(I0)[:20])
+    print("fraction nonbinary", np.mean((I0 > 0) & (I0 < 1)))
+
     out_fwd = emlddmm_multiscale_symmetric_N(
         xI=xy_axes,
         I=I0,
@@ -217,6 +222,12 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
         W0=W0,
         **config,
     )
+
+    print("mode", mode)
+    print("I0 min/max", I1.min(), I1.max())
+    print("I0 unique-ish", np.unique(I1)[:20])
+    print("fraction nonbinary", np.mean((I1 > 0) & (I1 < 1)))
+
     out_bwd = emlddmm_multiscale_symmetric_N(
         xI=xy_axes,
         I=I1,

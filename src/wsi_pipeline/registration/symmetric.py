@@ -236,7 +236,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     J,
     W0=None,
     *,
-    combine_velocities="average",
+    combine_velocities="forward", # "average", "backward"
     grid_sample_kwargs=None,
     **config,
 ):
@@ -355,7 +355,8 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         v_back = torch.flip(-back_last["v"], [0])
 
     if combine_velocities == "average":
-        v_sym = 0.5 * (v_fwd + v_back)
+        # I actually don't think this makes sense to do
+        v_sym = 0.5 * (v_fwd + v_back) 
     elif combine_velocities == "forward":
         v_sym = v_fwd
     elif combine_velocities == "backward":
@@ -363,7 +364,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     else:
         raise ValueError(f"Unknown combine_velocities='{combine_velocities}'")
 
-    # Now compute the forward and backward image flows using the average symmetric velocity
+    # Now compute the forward and backward image flows using the symmetric velocity
     # No need for tissue weighting here because we assume that's been properly handled by the forward and reverse mappings
     interp2d = is_2d_pair  # (C, H, W) -> 2D, otherwise 3D
     phi_I_velocity = _integrate_inverse_flow(
