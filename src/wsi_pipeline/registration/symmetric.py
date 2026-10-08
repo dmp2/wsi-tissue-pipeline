@@ -13,6 +13,24 @@ from .backend import resolve_emlddmm_backend
 
 _SYMMETRIC_BACKEND_ATTRS = ("emlddmm_multiscale", "interp")
 
+# def _resolve_registration_device(config, I=None):
+#     requested = config.get("device")
+
+#     if requested is None:
+#         if torch.is_tensor(I):
+#             return I.device
+#         return torch.device("cpu")
+
+#     device = torch.device(requested)
+
+#     if device.type == "cuda" and not torch.cuda.is_available():
+#         raise RuntimeError(
+#             f"CUDA device {requested!r} was requested for registration, "
+#             "but CUDA is not available."
+#         )
+
+#     return device
+
 
 def _resolve_emlddmm_module():
     """Resolve the EM-LDDMM backend module used by symmetric registration."""
@@ -516,8 +534,10 @@ def _extrude_2d_pair_for_3d_backend(
     )
 
 
-def _promote_2d_pair_config_for_backend(config, dtype):
+def _promote_2d_pair_config_for_backend(config, dtype, device):
     backend_config = dict(config)
+    backend_config["device"] = str(device)
+    backend_config["dtype"] = str(dtype).replace("torch.", "")
     backend_config["downI"] = _prepend_synthetic_axis_to_2d_schedule(
         backend_config.get("downI", [[1, 1]]),
         1,
@@ -606,18 +626,84 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     """
     # Initialize
     emlddmm_module = _resolve_emlddmm_module()
-    I_t = torch.as_tensor(I)
-    J_t = torch.as_tensor(J)
-    device, dtype = I_t.device, I_t.dtype
-    W0_t = (
-        torch.ones_like(I_t[0], device=device, dtype=dtype)
-        if W0 is None
-        else torch.as_tensor(W0, device=device, dtype=dtype)
+    requested_device = config.get("device", None)
+
+    if requested_device is None:
+        # Preserve existing behavior when no device is explicitly requested.
+        if torch.is_tensor(I):
+            device = I.device
+        else:
+            device = torch.device("cpu")
+    else:
+        device = torch.device(requested_device)
+
+    # Preserve the input floating dtype unless config explicitly specifies one.
+    dtype_name = config.get("dtype", None)
+
+    if dtype_name is None:
+        if torch.is_tensor(I) and I.is_floating_point():
+            dtype = I.dtype
+        else:
+            dtype = torch.float32
+    else:
+        dtype_map = {
+            "float32": torch.float32,
+            "float64": torch.float64,
+            "float16": torch.float16,
+        }
+        try:
+            dtype = dtype_map[str(dtype_name)]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unsupported registration dtype {dtype_name!r}"
+            ) from exc
+
+    I_t = torch.as_tensor(
+        I,
+        device=device,
+        dtype=dtype,
     )
+
+    J_t = torch.as_tensor(
+        J,
+        device=device,
+        dtype=dtype,
+    )
+
+    W0_t = (
+        torch.ones_like(
+            I_t[0],
+            device=device,
+            dtype=dtype,
+        )
+        if W0 is None
+        else torch.as_tensor(
+            W0,
+            device=device,
+            dtype=dtype,
+        )
+    )
+
     # emlddmm_multiscale interprets Python lists as per-scale schedules. The
     # coordinate axes for a 2D pair are a fixed domain, so keep them as tuples.
-    xI_t = tuple(torch.as_tensor(x, device=device, dtype=dtype) for x in xI)
-    xJ_t = tuple(torch.as_tensor(x, device=device, dtype=dtype) for x in xJ)
+    xI_t = tuple(
+        torch.as_tensor(
+            x,
+            device=device,
+            dtype=dtype,
+        )
+        for x in xI
+    )
+
+    xJ_t = tuple(
+        torch.as_tensor(
+            x,
+            device=device,
+            dtype=dtype,
+        )
+        for x in xJ
+    )
+
     is_2d_pair = (I_t.ndim == 3)
     if is_2d_pair:
         # The installed EM-LDDMM optimizer builds 3D affine/velocity domains even
@@ -647,7 +733,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         # this is a hack; there's no anatomical meaning to this synthetically extruded axis
         # there's no new information in the z-direction, and the meaningful info remains in-plane
 
-        backend_cfg = _promote_2d_pair_config_for_backend(config, dtype)
+        backend_cfg = _promote_2d_pair_config_for_backend(config, dtype, device)
         backend_cfg["dv"] = _promote_2d_dv_schedule(
             config.get("dv"),
             synthetic_spacing,
