@@ -184,6 +184,338 @@ def _mean_spacing_from_axes(*axis_groups):
     return float(sum(spacings) / len(spacings))
 
 
+import math
+
+
+def _flatten_numeric_values(value):
+    """Return all scalar numeric values contained in a nested config value."""
+    value = _to_plain_value(value)
+
+    if value is None:
+        return []
+
+    if _is_sequence(value):
+        out = []
+        for item in value:
+            out.extend(_flatten_numeric_values(item))
+        return out
+
+    return [float(value)]
+
+
+# def _synthetic_dv_z_from_config(config, synthetic_spacing):
+#     """Extract the coarsest synthetic-z dv across all requested scales."""
+#     dv = _to_plain_value(config.get("dv"))
+
+#     if dv is None:
+#         return float(synthetic_spacing)
+
+#     # Scalar dv -> legacy backend uses the same spacing in z/y/x.
+#     if not _is_sequence(dv):
+#         value = abs(float(dv))
+#         if value == 0:
+#             raise ValueError("dv must be nonzero")
+#         return value
+
+#     entries = [_to_plain_value(v) for v in dv]
+
+#     # Nested schedule: [[z,y,x], [z,y,x], ...]
+#     if entries and all(_is_sequence(entry) for entry in entries):
+#         z_values = []
+
+#         for entry in entries:
+#             entry = list(entry)
+
+#             if len(entry) == 3:
+#                 z_values.append(abs(float(entry[0])))
+#             elif len(entry) == 2:
+#                 # Still in native 2D form.  We have no user-specified z dv,
+#                 # so use the characteristic synthetic-plane spacing.
+#                 z_values.append(float(synthetic_spacing))
+#             else:
+#                 raise ValueError(
+#                     "Expected each dv scale to contain 2 or 3 spatial values; "
+#                     f"got {entry}"
+#                 )
+
+#         return max(z_values)
+
+#     # One explicit 3D vector.
+#     if len(entries) == 3:
+#         return abs(float(entries[0]))
+
+#     # One native 2D vector. z does not exist scientifically, so give the
+#     # synthetic direction its natural image spacing.
+#     if len(entries) == 2:
+#         return float(synthetic_spacing)
+
+#     # One-element multiscale/scalar schedule.
+#     if len(entries) == 1:
+#         return abs(float(entries[0]))
+
+#     raise ValueError(f"Unsupported dv specification for 2D promotion: {dv!r}")
+
+def _promote_2d_dv_schedule(dv, synthetic_spacing):
+    """Promote native 2D dv settings to backend 3D dv settings.
+
+    The synthetic z direction is an implementation detail, so its velocity-grid
+    spacing is fixed internally to ``synthetic_spacing``.  User/config values
+    control only the real in-plane y/x directions.
+
+    Examples
+    --------
+    2D scalar:
+        2.0 -> [[synthetic_spacing, 2.0, 2.0]]
+
+    one 2D scale:
+        [[2.0, 1.0]] -> [[synthetic_spacing, 2.0, 1.0]]
+
+    multiple 2D scales:
+        [[4.0, 4.0], [2.0, 2.0], [1.0, 1.0]]
+        ->
+        [
+            [synthetic_spacing, 4.0, 4.0],
+            [synthetic_spacing, 2.0, 2.0],
+            [synthetic_spacing, 1.0, 1.0],
+        ]
+    """
+    dv = _to_plain_value(dv)
+
+    if dv is None:
+        return [[
+            float(synthetic_spacing),
+            float(synthetic_spacing),
+            float(synthetic_spacing),
+        ]]
+
+    if not _is_sequence(dv):
+        value = float(dv)
+        return [[
+            float(synthetic_spacing),
+            value,
+            value,
+        ]]
+
+    entries = [_to_plain_value(v) for v in dv]
+
+    # Nested multiscale schedule.
+    if entries and all(_is_sequence(entry) for entry in entries):
+        promoted = []
+
+        for entry in entries:
+            entry = list(entry)
+
+            if len(entry) == 2:
+                dy, dx = map(float, entry)
+
+            elif len(entry) == 3:
+                # Accept already-promoted input for compatibility, but ignore
+                # the caller's synthetic-z value.  z is internal to the adapter.
+                _, dy, dx = map(float, entry)
+
+            else:
+                raise ValueError(
+                    "Each dv scale must contain 2 in-plane values "
+                    f"(or legacy/promoted 3D values); got {entry!r}"
+                )
+
+            promoted.append([
+                float(synthetic_spacing),
+                dy,
+                dx,
+            ])
+
+        return promoted
+
+    # Flat native 2D vector.
+    if len(entries) == 2:
+        dy, dx = map(float, entries)
+        return [[
+            float(synthetic_spacing),
+            dy,
+            dx,
+        ]]
+
+    # Flat legacy/promoted 3D vector. Ignore its z value.
+    if len(entries) == 3:
+        _, dy, dx = map(float, entries)
+        return [[
+            float(synthetic_spacing),
+            dy,
+            dx,
+        ]]
+
+    # One-value schedule behaves like an isotropic 2D scalar.
+    if len(entries) == 1:
+        value = float(entries[0])
+        return [[
+            float(synthetic_spacing),
+            value,
+            value,
+        ]]
+
+    raise ValueError(f"Unsupported dv specification: {dv!r}")
+
+
+def _make_synthetic_z_axis(
+    *,
+    synthetic_spacing,
+    dv_z,
+    device,
+    dtype,
+    min_velocity_intervals=4,
+):
+    """Construct a symmetric artificial z axis for a promoted 2D registration.
+
+    Parameters
+    ----------
+    synthetic_spacing
+        Spacing between repeated image planes.  Normally derived from the
+        actual y/x image spacing.
+
+    dv_z
+        Effective deformation-grid sampling interval in the artificial z
+        direction.
+
+    min_velocity_intervals
+        Minimum physical z extent expressed in deformation-grid intervals.
+        Four is deliberately conservative for the legacy 3D FFT/Sobolev
+        backend and avoids the previously observed singleton z velocity grid.
+
+    Returns
+    -------
+    torch.Tensor
+        Symmetric z coordinates centered at zero.
+
+    Notes
+    -----
+    This axis has no anatomical meaning.  Its only purpose is to give the
+    legacy 3D backend a nondegenerate numerical domain while solving a 2D
+    registration problem.
+    """
+    synthetic_spacing = float(synthetic_spacing)
+    dv_z = float(dv_z)
+
+    if not math.isfinite(synthetic_spacing) or synthetic_spacing <= 0:
+        raise ValueError(
+            f"synthetic_spacing must be finite and positive; got {synthetic_spacing}"
+        )
+
+    if not math.isfinite(dv_z) or dv_z <= 0:
+        raise ValueError(f"dv_z must be finite and positive; got {dv_z}")
+
+    if min_velocity_intervals < 2:
+        raise ValueError("min_velocity_intervals must be >= 2")
+
+    # Require the artificial slab to span at least this much physical extent.
+    required_extent = min_velocity_intervals * dv_z
+
+    # For N equally spaced image planes:
+    #
+    #     extent = (N - 1) * synthetic_spacing
+    #
+    # Choose an odd N so that there is exactly one central z=0 plane.
+    required_intervals = math.ceil(required_extent / synthetic_spacing)
+    n_planes = required_intervals + 1
+
+    if n_planes % 2 == 0:
+        n_planes += 1
+
+    # Never use a trivial slab even when dv_z is very fine.
+    n_planes = max(n_planes, 5)
+
+    half = n_planes // 2
+
+    return (
+        torch.arange(
+            -half,
+            half + 1,
+            device=device,
+            dtype=dtype,
+        )
+        * synthetic_spacing
+    )
+
+
+def _extrude_2d_pair_for_3d_backend(
+    I_t,
+    J_t,
+    W0_t,
+    xI_t,
+    xJ_t,
+    config,
+    *,
+    min_velocity_intervals=4,
+):
+    """Embed a 2D image pair in a numerically nondegenerate synthetic 3D slab.
+
+    The same 2D image is copied identically through artificial z.  No new
+    anatomical/morphological information is introduced.
+
+    Returns
+    -------
+    xI_backend, xJ_backend, I_backend, J_backend, W0_backend, synthetic_axis
+    """
+    device = I_t.device
+    dtype = I_t.dtype
+
+    synthetic_spacing = _mean_spacing_from_axes(xI_t, xJ_t)
+    dv_z = float(synthetic_spacing)
+
+    synthetic_axis = _make_synthetic_z_axis(
+        synthetic_spacing=synthetic_spacing,
+        dv_z=dv_z,
+        device=device,
+        dtype=dtype,
+        min_velocity_intervals=min_velocity_intervals,
+    )
+    # dv_z = _synthetic_dv_z_from_config(
+    #     config,
+    #     synthetic_spacing,
+    # ) # slice stencil amenable to 3D fourier transforms in em-lddmm
+
+    # synthetic_axis = _make_synthetic_z_axis(
+    #     synthetic_spacing=synthetic_spacing,
+    #     dv_z=dv_z,
+    #     device=device,
+    #     dtype=dtype,
+    #     min_velocity_intervals=min_velocity_intervals,
+    # ) 
+
+    n_planes = int(synthetic_axis.numel())
+
+    xI_backend = (synthetic_axis, *xI_t)
+    xJ_backend = (synthetic_axis, *xJ_t)
+
+    I_backend = (
+        I_t[:, None]
+        .expand(-1, n_planes, -1, -1)
+        .contiguous()
+    )
+
+    J_backend = (
+        J_t[:, None]
+        .expand(-1, n_planes, -1, -1)
+        .contiguous()
+    )
+
+    W0_backend = (
+        W0_t[None]
+        .expand(n_planes, -1, -1)
+        .contiguous()
+    )
+
+    return (
+        xI_backend,
+        xJ_backend,
+        I_backend,
+        J_backend,
+        W0_backend,
+        synthetic_axis,
+        synthetic_spacing,
+    )
+
+
 def _promote_2d_pair_config_for_backend(config, dtype):
     backend_config = dict(config)
     backend_config["downI"] = _prepend_synthetic_axis_to_2d_schedule(
@@ -194,7 +526,7 @@ def _promote_2d_pair_config_for_backend(config, dtype):
         backend_config.get("downJ", [[1, 1]]),
         1,
     )
-    backend_config["out_of_plane"] = True # does 'True' make sense?
+    backend_config.setdefault("out_of_plane", False) # does 'True' make sense? It works and has very small nonzero v_z value - let's keep false to ensure v_z=0
     backend_config.setdefault("dtype", dtype)
     backend_config["A"] = torch.eye(4, dtype=dtype)
     backend_config["A2d"] = None
@@ -215,7 +547,8 @@ def _extract_in_plane_velocity(output):
         raise ValueError(
             f"Expected backend velocity with shape (T, 3, Z, Y, X); got {tuple(v3d.shape)}"
         )
-    v2d = v3d[:, 1:].mean(dim=2)
+    # Make the 3d registration into a 2d problem again
+    v2d = v3d[:, 1:].mean(dim=2) # drops v_z; indep. averages v_x, v_y over the synthetic z-axis
     xv = tuple(
         torch.as_tensor(axis, device=v3d.device, dtype=v3d.dtype) for axis in last["xv"][-2:]
     )
@@ -223,6 +556,8 @@ def _extract_in_plane_velocity(output):
 
 
 def _lift_in_plane_velocity_to_backend(v2d, z_size):
+    # Make the 2D registration into a 3D problem by 
+    # synthetically stacking the 2D velocity along the z-axis.
     v3d = torch.zeros(
         (v2d.shape[0], 3, z_size, v2d.shape[-2], v2d.shape[-1]),
         device=v2d.device,
@@ -283,23 +618,41 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     # coordinate axes for a 2D pair are a fixed domain, so keep them as tuples.
     xI_t = tuple(torch.as_tensor(x, device=device, dtype=dtype) for x in xI)
     xJ_t = tuple(torch.as_tensor(x, device=device, dtype=dtype) for x in xJ)
-    is_2d_pair = I_t.ndim == 3
+    is_2d_pair = (I_t.ndim == 3)
     if is_2d_pair:
         # The installed EM-LDDMM optimizer builds 3D affine/velocity domains even
         # for 2D interpolation. Promote only the backend solve, then average the
         # synthetic z support back to a 2D velocity before warping the original pair.
-        synthetic_spacing = _mean_spacing_from_axes(xI_t, xJ_t)
-        synthetic_axis = torch.tensor(
-            [-2.0, -1.0, 0.0, 1.0, 2.0],
-            device=device,
-            dtype=dtype,
-        ) * synthetic_spacing
-        xI_backend = (synthetic_axis, *xI_t)
-        xJ_backend = (synthetic_axis, *xJ_t)
-        I_backend = I_t[:, None].expand(-1, 5, -1, -1).contiguous()
-        J_backend = J_t[:, None].expand(-1, 5, -1, -1).contiguous()
-        W0_backend = W0_t[None].expand(5, -1, -1).contiguous()
+        
+        # build a synthetic z axis with spacing equal to the mean of the in-plane spacings
+        # note that the synthetic domain must be thick enough that the em-lddmm's deformation 
+        # lattice has a nondegenerate z dimension. Otherwise, v_z will be NaN and v_x,v_y will be 0.
+        # Promote the 2D to a 3D registration with the synthetic z axis.
+        (
+            xI_backend, # extruded domain domain
+            xJ_backend, # extruded target domain
+            I_backend, # extruded source image
+            J_backend, # extruded target image
+            W0_backend, # extruded target image mask/weights
+            synthetic_axis, # z-axis amenable to 3D fourier transforms in em-lddmm
+            synthetic_spacing,
+        ) = _extrude_2d_pair_for_3d_backend(
+            I_t,
+            J_t,
+            W0_t,
+            xI_t,
+            xJ_t,
+            config,
+        ) # this creates a 5-slice sandwich of identity slices, centered on the observed 2d slice
+        # this is a hack; there's no anatomical meaning to this synthetically extruded axis
+        # there's no new information in the z-direction, and the meaningful info remains in-plane
+
         backend_cfg = _promote_2d_pair_config_for_backend(config, dtype)
+        backend_cfg["dv"] = _promote_2d_dv_schedule(
+            config.get("dv"),
+            synthetic_spacing,
+        )
+
     else:
         xI_backend = xI_t
         xJ_backend = xJ_t
@@ -310,6 +663,12 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
 
     # Flow forward
     fwd_cfg = dict(backend_cfg)
+    # # DEBUG
+    # print(
+    #     "WSI 2D backend config:",
+    #     "dv=", backend_cfg.get("dv"),
+    #     "out_of_plane=", backend_cfg.get("out_of_plane"),
+    # )
     out_fwd = emlddmm_module.emlddmm_multiscale(
         xI=xI_backend,
         I=I_backend,

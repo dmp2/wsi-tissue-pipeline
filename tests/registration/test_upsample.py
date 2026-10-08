@@ -308,6 +308,87 @@ def test_2d_downsampling_schedule_promotion_preserves_scale_dimension():
     ) == [[1, 2, 2], [1, 1, 1]]
 
 
+
+def test_synthetic_z_axis_expands_with_dv():
+    axis_fine = symmetric_module._make_synthetic_z_axis(
+        synthetic_spacing=1.0,
+        dv_z=1.0,
+        device="cpu",
+        dtype=torch.float32,
+        min_velocity_intervals=4,
+    )
+
+    axis_coarse = symmetric_module._make_synthetic_z_axis(
+        synthetic_spacing=1.0,
+        dv_z=2.0,
+        device="cpu",
+        dtype=torch.float32,
+        min_velocity_intervals=4,
+    )
+
+    assert axis_fine.numel() >= 5
+    assert axis_coarse.numel() > axis_fine.numel()
+
+    assert torch.isclose(axis_fine.mean(), torch.tensor(0.0))
+    assert torch.isclose(axis_coarse.mean(), torch.tensor(0.0))
+
+
+def test_synthetic_z_extent_covers_requested_velocity_support():
+    spacing = 1.0
+    dv_z = 2.0
+    minimum_intervals = 4
+
+    axis = symmetric_module._make_synthetic_z_axis(
+        synthetic_spacing=spacing,
+        dv_z=dv_z,
+        device="cpu",
+        dtype=torch.float32,
+        min_velocity_intervals=minimum_intervals,
+    )
+
+    extent = float(axis[-1] - axis[0])
+
+    assert extent >= minimum_intervals * dv_z
+
+
+def test_synthetic_extrusion_repeats_without_changing_image():
+    I = torch.arange(16, dtype=torch.float32).reshape(1, 4, 4)
+    J = I + 1
+    W = torch.ones(4, 4)
+
+    axes = (
+        torch.arange(4, dtype=torch.float32),
+        torch.arange(4, dtype=torch.float32),
+    )
+
+    (
+        xI3,
+        xJ3,
+        I3,
+        J3,
+        W3,
+        z,
+    ) = symmetric_module._extrude_2d_pair_for_3d_backend(
+        I,
+        J,
+        W,
+        axes,
+        axes,
+        {"dv": 1.0},
+    )
+
+    assert I3.ndim == 4
+    assert J3.ndim == 4
+
+    for zi in range(len(z)):
+        assert torch.equal(I3[:, zi], I)
+        assert torch.equal(J3[:, zi], J)
+        assert torch.equal(W3[zi], W)
+
+    assert len(xI3) == 3
+    assert len(xJ3) == 3
+
+
 def _fast_real_registration_config(nt=8):
     return {
         "nt": nt,
@@ -315,7 +396,7 @@ def _fast_real_registration_config(nt=8):
         "v_start": [0],
         "ev": [5e-1],
         "a": [2.0],
-        "dv": [1.0, 2.0, 2.0],
+        "dv": [[1.0, 1.0]], # changed to 2d spec; old: "dv": [[0.25, 1.0, 1.0]], [[0.5, 1.0, 1.0]], [[1.0, 2.0, 2.0]], # works
         "sigmaR": [5e0],
         "n_draw": [0],
         "n_reduce_step": [1000],
@@ -325,8 +406,71 @@ def _fast_real_registration_config(nt=8):
         "update_A": False,
         "eA": [0.0],
         "update_matching_weights": False,
-        # "out_of_plane": False,
+        "out_of_plane": False,
     }
+
+
+def test_promote_2d_dv_uses_internal_synthetic_z_spacing():
+    promoted = symmetric_module._promote_2d_dv_schedule(
+        [[0.5, 2.0]],
+        synthetic_spacing=1.0,
+    )
+
+    assert promoted == [[1.0, 0.5, 2.0]]
+
+def test_promote_2d_dv_ignores_user_supplied_synthetic_z_value():
+    promoted = symmetric_module._promote_2d_dv_schedule(
+        [[99.0, 0.5, 2.0]],
+        synthetic_spacing=1.0,
+    )
+
+    assert promoted == [[1.0, 0.5, 2.0]]
+
+
+def test_pair_config_accepts_out_of_plane_false():
+    _validate_out_of_plane_pair_config(
+        {"out_of_plane": False}
+    )
+
+
+def test_pair_config_accepts_unset_out_of_plane():
+    _validate_out_of_plane_pair_config({})
+
+
+def test_pair_config_warns_for_out_of_plane_true():
+    with pytest.warns(
+        UserWarning,
+        match="False is recommended",
+    ):
+        _validate_out_of_plane_pair_config(
+            {"out_of_plane": True}
+        )
+
+
+def test_pair_config_rejects_invalid_out_of_plane():
+    with pytest.raises(
+        ValueError,
+        match="out_of_plane must be",
+    ):
+        _validate_out_of_plane_pair_config(
+            {"out_of_plane": "sometimes"}
+        )
+
+def test_pair_config_accepts_consistent_out_of_plane_sequence():
+    _validate_out_of_plane_pair_config(
+        {"out_of_plane": [False, False]}
+    )
+
+
+def test_pair_config_rejects_mixed_out_of_plane_sequence():
+    with pytest.raises(
+        ValueError,
+        match="consistently true or consistently false",
+    ):
+        _validate_out_of_plane_pair_config(
+            {"out_of_plane": [False, True]}
+        )
+
 
 def test_real_square_to_circle_between_3d_slices_writes_montage(monkeypatch):
     """Exercise real upsampling between binary 2D slices in a 3D stack.
@@ -999,7 +1143,7 @@ def test_symmetric_helper_passes_coordinate_axes_as_tuples(monkeypatch):
         assert tuple(kwargs["I"].shape) == (1, 2, 3, 4)
         assert kwargs["downI"] == [[1, 1, 1]]
         assert kwargs["downJ"] == [[1, 1, 1]]
-        assert kwargs["out_of_plane"] is True
+        assert kwargs["out_of_plane"] is False
         assert kwargs["eA"] == 0.0
         assert kwargs["eA2d"] == 0.0
         assert kwargs["slice_matching"] is False

@@ -7,7 +7,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import numpy as np
 
 from .symmetric import emlddmm_multiscale_symmetric_N
-
+from warnings import warn
 
 def _validate_and_reshape_image_time_series(series, name):
     series = np.asarray(series)
@@ -121,22 +121,69 @@ def _validate_false_schedule(name, value):
 
 
 def _validate_out_of_plane_pair_config(config):
+    """Validate out_of_plane for between-slice pair registration.
+
+    Between-slice registration is intrinsically 2D.  The registration helper
+    temporarily extrudes the pair into a synthetic 3D slab only because the
+    legacy EM-LDDMM backend expects a 3D domain.
+
+    Therefore:
+      - False is the recommended setting: velocity is projected into the
+        physical image plane.
+      - True remains supported for backwards compatibility.
+      - unset is allowed; the symmetric 2D adapter defaults it to False.
+    """
     value = config.get("out_of_plane")
+
     if value is None:
         return
+
     if isinstance(value, np.ndarray):
         value = value.tolist()
-    entries = list(value) if isinstance(value, (list, tuple)) else [value]
-    if all(entry is True or entry == 1 for entry in entries):
-        return
-    if any(entry is False or entry == 0 for entry in entries):
+
+    entries = (
+        list(value)
+        if isinstance(value, (list, tuple))
+        else [value]
+    )
+
+    # Normalize bool-like values while rejecting arbitrary numbers/objects.
+    normalized = []
+    for entry in entries:
+        if isinstance(entry, (bool, np.bool_)):
+            normalized.append(bool(entry))
+        elif entry in (0, 1):
+            normalized.append(bool(entry))
+        else:
+            raise ValueError(
+                "out_of_plane must be true, false, or unset for "
+                f"between-slice upsampling; got {value!r}"
+            )
+
+    if not normalized:
         raise ValueError(
-            "out_of_plane=False is not supported for between-slice upsampling; "
-            "the synthetic 3D backend solve uses out_of_plane=True while affine "
-            "and slice matching remain disabled"
+            "out_of_plane must not be an empty sequence for "
+            "between-slice upsampling"
         )
+
+    if all(entry is False for entry in normalized):
+        # Recommended behavior for an intrinsically 2D registration.
+        return
+
+    if all(entry is True for entry in normalized):
+        warnings.warn(
+            "out_of_plane=True is supported for between-slice upsampling "
+            "for backwards compatibility, but False is recommended because "
+            "the synthetic third dimension is numerical scaffolding rather "
+            "than a physical deformation direction.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return
+
     raise ValueError(
-        f"out_of_plane must be true or unset for between-slice upsampling; got {value!r}"
+        "out_of_plane must be consistently true or consistently false "
+        f"for between-slice upsampling; got {value!r}"
     )
 
 
