@@ -13,25 +13,6 @@ from .backend import resolve_emlddmm_backend
 
 _SYMMETRIC_BACKEND_ATTRS = ("emlddmm_multiscale", "interp")
 
-# def _resolve_registration_device(config, I=None):
-#     requested = config.get("device")
-
-#     if requested is None:
-#         if torch.is_tensor(I):
-#             return I.device
-#         return torch.device("cpu")
-
-#     device = torch.device(requested)
-
-#     if device.type == "cuda" and not torch.cuda.is_available():
-#         raise RuntimeError(
-#             f"CUDA device {requested!r} was requested for registration, "
-#             "but CUDA is not available."
-#         )
-
-#     return device
-
-
 def _resolve_emlddmm_module():
     """Resolve the EM-LDDMM backend module used by symmetric registration."""
     module = resolve_emlddmm_backend().module

@@ -433,12 +433,13 @@ def upsample_between_slices(
             "pairs": pairs,
         }
 
-    max_gap = max(i1 - i0 for i0, i1 in pairs)
-    if nt < max_gap:
-        raise ValueError(
-            f"config['nt']={nt} must be at least the largest pair gap ({max_gap}) "
-            "measured in global z steps"
-        )
+    # not a requirement
+    # max_gap = max(i1 - i0 for i0, i1 in pairs)
+    # if nt < max_gap:
+    #     raise ValueError(
+    #         f"config['nt']={nt} must be at least the largest pair gap ({max_gap}) "
+    #         "measured in global z steps"
+    #     )
 
     results = []
     if parallel and len(pairs) > 1:
