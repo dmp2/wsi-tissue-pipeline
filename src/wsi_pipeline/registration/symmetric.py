@@ -904,6 +904,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         "forward": out_fwd,
         "backward": out_bwd,
         "v_symmetric": v_sym.detach().cpu(),
+        "xv": tuple(torch.as_tensor(axis).detach().cpu() for axis in xv),
         "phi_I": phi_I.detach().cpu(),
         "phi_J": phi_J.detach().cpu(),
         "It": It_flow_all[1:].detach().cpu(),

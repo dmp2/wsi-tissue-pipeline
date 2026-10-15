@@ -767,6 +767,7 @@ def _expected_stage_outputs(
                 _stage_dir(registration_output, "upsampling")
                 / "nearest_slice_reference_overview.png"
             ),
+            str(_stage_dir(registration_output, "upsampling") / "pair_velocities.npz"),
         ]
     return expected
 
@@ -1852,6 +1853,7 @@ def run_emlddmm_workflow(
                     "present_mask",
                     np.asarray(loaded.target.present_mask, dtype=bool),
                 )
+                upsampling_call_kwargs.setdefault("return_velocities", True)
                 stage_payloads["upsampling"] = upsampling_call_kwargs
                 _write_stage_inputs(stage_dir, _stage_input_payload(loaded, "upsampling"))
                 assert self_alignment_result is not None

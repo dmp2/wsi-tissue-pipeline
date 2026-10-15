@@ -80,7 +80,7 @@ def _artifact_kind(path: Path) -> str:
         return "image"
     if suffix == ".vtk":
         return "volume"
-    if suffix == ".npy":
+    if suffix in {".npy", ".npz"}:
         return "payload"
     if suffix == ".txt":
         return "text"
@@ -460,6 +460,11 @@ def write_upsampling_outputs(
     _volume_montage(np.asarray(upsampling["J_nearest_bad"], dtype=np.float32)).save(
         nearest_overview_path
     )
+    pair_velocities_path = None
+    if upsampling.get("pair_velocities") is not None:
+        # Plain arrays only; reload with upsample.load_pair_velocities.
+        pair_velocities_path = output_dir / "pair_velocities.npz"
+        np.savez_compressed(pair_velocities_path, **upsampling["pair_velocities"])
     metadata_path = _write_json(output_dir / "upsampling_metadata.json", metadata)
     return {
         "effective_config": str(effective_config_path),
@@ -468,4 +473,5 @@ def write_upsampling_outputs(
         "filled_volume_overview": str(filled_overview_path),
         "nearest_reference_overview": str(nearest_overview_path),
         "metadata": str(metadata_path),
+        "pair_velocities": str(pair_velocities_path) if pair_velocities_path else "",
     }

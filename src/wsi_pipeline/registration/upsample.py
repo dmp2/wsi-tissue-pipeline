@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
-import numpy as np
+import json
 
+import numpy as np
+import torch
+
+from . import symmetric as _symmetric
 from .symmetric import emlddmm_multiscale_symmetric_N
 from warnings import warn
 
@@ -230,11 +234,151 @@ def _normalize_pair_registration_config(config):
     return normalized
 
 
-def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
-    """Register a pair of observed slices and cache time-resolved trajectories."""
+def _validate_pseudotimes(pseudotimes):
+    if pseudotimes is None:
+        return None
+    s = np.atleast_1d(np.asarray(pseudotimes, dtype=np.float64))
+    if s.ndim != 1 or s.size == 0:
+        raise ValueError(f"pseudotimes must be a non-empty 1D sequence; got shape {s.shape}")
+    if not np.all(np.isfinite(s)) or np.any((s < 0.0) | (s > 1.0)):
+        raise ValueError(f"pseudotimes must lie in [0, 1]; got {s.tolist()}")
+    return s
+
+
+def _partial_inverse_flow(xv, v, s, *, emlddmm_module, grid_sample_kwargs=None):
+    """Return phi^{-1}_s on the velocity grid for a normalized time s in [0, 1].
+
+    The solver treats v as piecewise constant, using v[k] on [k/nt, (k+1)/nt).
+    For s = (m + f)/nt we take m full steps and one step of length f/nt with
+    v[m]. Scaling v[m] by f keeps the solver's dt = 1/nt, and state m+1 of
+    `_integrate_inverse_flow` never reads later steps, so the existing
+    integrator is reused unchanged. On-frame times (including s=0 and s=1)
+    use the unmodified velocity and return the stored state exactly.
+    """
+    v = torch.as_tensor(v)
+    nt = v.shape[0]
+    k = float(s) * nt
+    m = int(round(k))
+    if abs(k - m) <= 1e-6:
+        v_eff = v
+    else:
+        m = int(np.floor(k))
+        v_eff = v.clone()
+        v_eff[m] = v_eff[m] * (k - m)
+        m += 1
+    phis = _symmetric._integrate_inverse_flow(
+        xv,
+        v_eff,
+        emlddmm_module=emlddmm_module,
+        interp2d=v.shape[1] == 2,
+        grid_sample_kwargs=grid_sample_kwargs,
+    )
+    return phis[m]
+
+
+def _warp_at_times(out, image, xy_axes, times, *, device, grid_sample_kwargs=None):
+    """Warp `image` along the stored `v_symmetric` of `out` to each time in `times`.
+
+    Mirrors the solver's `phi_I` path: integrate on the velocity grid, resample
+    to the image grid, warp, and take det(D phi^{-1}) on the image grid.
+    """
+    emlddmm_module = _symmetric._resolve_emlddmm_module()
+    v = torch.as_tensor(out["v_symmetric"], device=device)
+    xv = tuple(torch.as_tensor(axis, device=device, dtype=v.dtype) for axis in out["xv"])
+    x = tuple(torch.as_tensor(axis, device=device, dtype=v.dtype) for axis in xy_axes)
+    phis_v = torch.stack(
+        [
+            _partial_inverse_flow(
+                xv,
+                v,
+                t,
+                emlddmm_module=emlddmm_module,
+                grid_sample_kwargs=grid_sample_kwargs,
+            )
+            for t in times
+        ]
+    )
+    phis = _symmetric._resample_transform_to_domain(
+        xv,
+        phis_v,
+        x,
+        emlddmm_module=emlddmm_module,
+        interp2d=True,
+        grid_sample_kwargs=grid_sample_kwargs,
+    )
+    warped = _symmetric._warp_time_series(
+        x,
+        image,
+        phis,
+        emlddmm_module=emlddmm_module,
+        interp2d=True,
+        grid_sample_kwargs=grid_sample_kwargs,
+    )
+    spacing = tuple(float(abs(axis[1] - axis[0])) for axis in xy_axes)
+    det = _symmetric._calculate_determinant_of_jacobian(phis, spacing=spacing)
+    return warped.detach().cpu().numpy(), det.detach().cpu().numpy()
+
+
+def _evaluate_pair_pseudotimes(
+    out_fwd, out_bwd, I0, I1, xy_axes, pseudotimes, config, path_mode="two-sided"
+):
+    """Evaluate both endpoint warps and their Jacobians at arbitrary pseudotimes.
+
+    I0 follows the forward solve's velocity to time s (as in I0t / J0t).
+
+    path_mode="two-sided": I1 follows the backward solve's velocity to time
+    1 - s (as in I1t), and J1s is the Jacobian of that same I1 warp. The two
+    velocities come from independent optimizations and are not time-reversals
+    of each other, so this is two-sided deformation-based interpolation: each
+    endpoint is carried part way along its own estimated flow, not along one
+    diffeomorphic path joining the sections.
+
+    path_mode="single-forward": both endpoints use the forward flow phi_t of v.
+    I1 is sampled by phi_1 o phi_s^{-1}. With w(r) = -v(1 - r), whose flow is
+    chi_r = phi_{1-r} o phi_1^{-1}, this map is chi_{1-s}^{-1}, so it is the
+    inverse flow of flip(-v) at time 1 - s (the solver's phi_J path). Both
+    warps then live in the same intermediate frame phi_s(I0 coordinates).
+    """
+    runs = {"two-sided": (("forward", out_fwd), ("backward", out_bwd)),
+            "single-forward": (("forward", out_fwd),)}[path_mode]
+    for name, out in runs:
+        if "v_symmetric" not in out or "xv" not in out:
+            raise ValueError(
+                f"pseudotimes require the {name} pair solve to return 'v_symmetric' and 'xv'"
+            )
+    device = torch.device(config.get("device") or "cpu")
+    grid_sample_kwargs = config.get("grid_sample_kwargs")
+    s = np.asarray(pseudotimes, dtype=np.float64)
+    I0s, J0s = _warp_at_times(
+        out_fwd, I0, xy_axes, s, device=device, grid_sample_kwargs=grid_sample_kwargs
+    )
+    if path_mode == "single-forward":
+        v = torch.as_tensor(out_fwd["v_symmetric"])
+        out_i1 = {"v_symmetric": torch.flip(-v, [0]), "xv": out_fwd["xv"]}
+    else:
+        out_i1 = out_bwd
+    I1s, J1s = _warp_at_times(
+        out_i1, I1, xy_axes, 1.0 - s, device=device, grid_sample_kwargs=grid_sample_kwargs
+    )
+    return I0s, I1s, J0s, J1s
+
+
+def _blend_pair(mode, p, I0_now, I1_now, J0t_now, J1t_now, W0=None, W1=None):
+    if mode == "seg":
+        return np.round((1.0 - p) * I0_now + p * I1_now)
+    if W0 is None:
+        num = ((1.0 - p) * J0t_now * I0_now) + (p * J1t_now * I1_now)
+        den = ((1.0 - p) * J0t_now) + (p * J1t_now) + 1e-8
+    else:
+        num = ((1.0 - p) * W0 * J0t_now * I0_now) + (p * W1 * J1t_now * I1_now)
+        den = ((1.0 - p) * W0 * J0t_now) + (p * W1 * J1t_now) + 1e-8
+    return num / den
+
+
+def _pair_endpoint_images(J, ind0, ind1, mode):
+    """Return the endpoint images exactly as they are registered."""
     from scipy.signal import convolve2d
 
-    xy_axes = (np.asarray(xJ[1]), np.asarray(xJ[2]))
     I0 = np.asarray(J[:, ind0], dtype=np.float32)
     I1 = np.asarray(J[:, ind1], dtype=np.float32)
 
@@ -252,6 +396,14 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
             [convolve2d(channel, kernel, mode="same") for channel in I1],
             axis=0,
         ).astype(np.float32)
+
+    return I0, I1
+
+
+def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
+    """Register a pair of observed slices and cache time-resolved trajectories."""
+    xy_axes = (np.asarray(xJ[1]), np.asarray(xJ[2]))
+    I0, I1 = _pair_endpoint_images(J, ind0, ind1, mode)
 
     W0 = None if W is None else np.asarray(W[ind0], dtype=np.float32)
     W1 = None if W is None else np.asarray(W[ind1], dtype=np.float32)
@@ -298,7 +450,125 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
         axis=0,
     )
 
-    return ind0, ind1, I0t, I1t, J0t, J1t
+    velocities = {
+        "v_forward": out_fwd.get("v_symmetric"),
+        "v_backward": out_bwd.get("v_symmetric"),
+        "xv_forward": out_fwd.get("xv"),
+        "xv_backward": out_bwd.get("xv"),
+    }
+
+    return ind0, ind1, I0t, I1t, J0t, J1t, velocities
+
+
+PAIR_VELOCITY_FORMAT = "wsi_pipeline.pair_velocities/1"
+
+PAIR_VELOCITY_CONVENTIONS = (
+    "Pair p = pairs[p] = (i0, i1) registers I0 = J[:, i0] and I1 = J[:, i1] on the "
+    "image grid (y, x); in 'seg' mode both are first 8x8 box-smoothed. "
+    "v_forward[p] is the I0 -> I1 velocity and v_backward[p] the I1 -> I0 velocity, "
+    "each (nt, 2, len(xv_y), len(xv_x)) with components (y, x) on the grid (xv_y, xv_x). "
+    "v[k] is constant on [k/nt, (k+1)/nt); phi_t^{-1} is the semi-Lagrangian "
+    "integration of symmetric._integrate_inverse_flow, so I0 o phi_t^{-1} moves I0 "
+    "toward I1. z[p] holds the physical z of (i0, i1). The two solves are independent."
+)
+
+
+def _collect_pair_velocities(xJ, pairs, velocities, mode, config):
+    """Stack every pair's stored velocities into one flat dict of plain arrays."""
+    v_forward, v_backward, xv = [], [], None
+    for pair in pairs:
+        entry = velocities[pair]
+        for direction in ("forward", "backward"):
+            if entry[f"v_{direction}"] is None or entry[f"xv_{direction}"] is None:
+                raise ValueError(
+                    f"pair {pair}: the {direction} pair solve must return 'v_symmetric' and 'xv'"
+                )
+            axes = tuple(np.asarray(axis) for axis in entry[f"xv_{direction}"])
+            if xv is None:
+                xv = axes
+            elif any(a.shape != b.shape or not np.array_equal(a, b) for a, b in zip(axes, xv)):
+                raise ValueError(f"pair {pair}: velocity grid differs from the other pair solves")
+        v_forward.append(np.asarray(entry["v_forward"]))
+        v_backward.append(np.asarray(entry["v_backward"]))
+
+    pair_array = np.array(pairs, dtype=np.int64).reshape(len(pairs), 2)
+    empty = np.zeros((0,), dtype=np.float32)
+    return {
+        "format": np.array(PAIR_VELOCITY_FORMAT),
+        "conventions": np.array(PAIR_VELOCITY_CONVENTIONS),
+        "mode": np.array(mode),
+        "grid_sample_kwargs": np.array(json.dumps(config.get("grid_sample_kwargs"))),
+        "pairs": pair_array,
+        "z": np.asarray(xJ[0], dtype=np.float64)[pair_array],
+        "y": np.asarray(xJ[1]),
+        "x": np.asarray(xJ[2]),
+        "xv_y": empty if xv is None else xv[0],
+        "xv_x": empty if xv is None else xv[1],
+        "v_forward": np.stack(v_forward) if pairs else empty,
+        "v_backward": np.stack(v_backward) if pairs else empty,
+    }
+
+
+def _assemble_pseudotime_samples(J, W, pair_velocities, pseudotimes, path_mode, device):
+    """Build pseudotime samples for every stored pair from its velocities."""
+    mode = str(pair_velocities["mode"])
+    pairs = [(int(i0), int(i1)) for i0, i1 in pair_velocities["pairs"]]
+    xy_axes = (pair_velocities["y"], pair_velocities["x"])
+    xv = (pair_velocities["xv_y"], pair_velocities["xv_x"])
+    eval_config = {
+        "device": device,
+        "grid_sample_kwargs": json.loads(str(pair_velocities["grid_sample_kwargs"])),
+    }
+
+    n_samples = len(pairs) * len(pseudotimes)
+    samples = {
+        "pair_indices": np.array(
+            [pair for pair in pairs for _ in pseudotimes], dtype=int
+        ).reshape(n_samples, 2),
+        "pseudotimes": np.tile(pseudotimes, len(pairs)),
+        "path_mode": path_mode,
+        "z": np.empty(n_samples, dtype=np.float64),
+        "J": np.empty((J.shape[0], n_samples, *J.shape[2:]), dtype=np.float32),
+    }
+
+    for pair_idx, (i0, i1) in enumerate(pairs):
+        z0, z1 = (float(z) for z in pair_velocities["z"][pair_idx])
+        I0, I1 = _pair_endpoint_images(J, i0, i1, mode)
+        I0s, I1s, J0s, J1s = _evaluate_pair_pseudotimes(
+            {"v_symmetric": pair_velocities["v_forward"][pair_idx], "xv": xv},
+            {"v_symmetric": pair_velocities["v_backward"][pair_idx], "xv": xv},
+            I0,
+            I1,
+            xy_axes,
+            pseudotimes,
+            eval_config,
+            path_mode,
+        )
+        for j, s in enumerate(pseudotimes):
+            n = pair_idx * len(pseudotimes) + j
+            samples["z"][n] = z0 + s * (z1 - z0)
+            if s == 0.0:
+                samples["J"][:, n] = J[:, i0]
+            elif s == 1.0:
+                samples["J"][:, n] = J[:, i1]
+            else:
+                samples["J"][:, n] = _blend_pair(
+                    mode,
+                    float(s),
+                    I0s[j],
+                    I1s[j],
+                    J0s[j],
+                    J1s[j],
+                    None if W is None else W[i0],
+                    None if W is None else W[i1],
+                ).astype(np.float32)
+
+    return samples
+
+
+def _validate_path_mode(path_mode):
+    if path_mode not in {"two-sided", "single-forward"}:
+        raise ValueError(f"Unsupported path_mode {path_mode!r}")
 
 
 def _validate_inputs(xJ, J, W, mode, config):
@@ -376,6 +646,9 @@ def upsample_between_slices(
     config,
     parallel=False,
     max_workers=None,
+    pseudotimes=None,
+    path_mode="two-sided",
+    return_velocities=False,
 ):
     """
     Fill missing planes on the existing global z lattice by interpolating between observed slices.
@@ -401,13 +674,45 @@ def upsample_between_slices(
         Ignored compatibility argument from the notebook prototype.
     config : dict
         Configuration for `emlddmm_multiscale_symmetric_N`. Must include `nt`.
+    pseudotimes : sequence of float | None
+        Optional normalized times s in [0, 1] to evaluate between every adjacent
+        observed pair, independent of the z lattice. The pair's forward
+        (I0 -> I1) and backward (I1 -> I0) velocities from this call are
+        integrated to s and 1 - s (with a fractional final step), so no extra
+        optimization is run. The solves are independent, so samples are a
+        two-sided blend of two warped endpoints rather than points on a single
+        diffeomorphic path. s=0 and s=1 return the observed slices.
+    path_mode : {"two-sided", "single-forward"}
+        How `pseudotimes` samples are built; ignored without `pseudotimes`.
+        "two-sided" (default) is described above. "single-forward" samples
+        both endpoints along the forward flow phi_t only: I0 by phi_s^{-1} and
+        I1 by phi_1 o phi_s^{-1}, so both lie in one intermediate frame.
+        In both modes W[i0] and W[i1] enter the blend unwarped, in their own
+        section frames rather than the intermediate frame; with spatially
+        varying W the weights are misregistered by the local deformation (and,
+        in the workflow, by any A2d alignment, since W is not reassembled).
+        W=None or per-slice constant W is unaffected.
+    return_velocities : bool
+        Also return ``"pair_velocities"``: every pair's forward and backward
+        velocity with its grids, as a flat dict of plain arrays. Save it with
+        ``np.savez_compressed(path, **pair_velocities)``, reload it with
+        `load_pair_velocities`, and evaluate new pseudotimes with
+        `evaluate_pseudotimes` without re-registering. Pseudotime samples are
+        always built from these arrays, so both routes give identical results.
 
     Returns
     -------
     dict
         Dictionary containing the original grid, filled data, and interpolation metadata.
+        When `pseudotimes` is given, also contains ``"pseudotime_samples"`` with
+        ``pair_indices`` (N, 2), ``pseudotimes`` (N,), ``z`` (N,) physical positions
+        ``z0 + s * (z1 - z0)``, ``J`` (C, N, Y, X), ordered pair-major, and
+        ``path_mode``. When `return_velocities` is true, also contains
+        ``"pair_velocities"`` (see `PAIR_VELOCITY_CONVENTIONS`).
     """
     _ = slice_spacing, n_resample, tissue_idx
+    pseudotimes = _validate_pseudotimes(pseudotimes)
+    _validate_path_mode(path_mode)
     J, W = _validate_inputs(xJ, J, W, mode, config)
     config = _normalize_pair_registration_config(config)
     _validate_pair_registration_config(config)
@@ -424,14 +729,13 @@ def upsample_between_slices(
     J_filled = np.array(J, dtype=np.float32, copy=True)
     J_nearest_bad = np.array(J, dtype=np.float32, copy=True)
 
-    if not pairs:
-        return {
-            "xJ_out": [np.array(axis, copy=True) for axis in xJ],
-            "J_filled": J_filled,
-            "J_nearest_bad": J_nearest_bad,
-            "slices_with_data": slices_with_data,
-            "pairs": pairs,
-        }
+    result = {
+        "xJ_out": [np.array(axis, copy=True) for axis in xJ],
+        "J_filled": J_filled,
+        "J_nearest_bad": J_nearest_bad,
+        "slices_with_data": slices_with_data,
+        "pairs": pairs,
+    }
 
     # not a requirement
     # max_gap = max(i1 - i0 for i0, i1 in pairs)
@@ -454,7 +758,7 @@ def upsample_between_slices(
         for i0, i1 in pairs:
             results.append(_register_pair(i0, i1, xJ, J, W, config, mode))
 
-    cache = {(i0, i1): (I0t, I1t, J0t, J1t) for i0, i1, I0t, I1t, J0t, J1t in results}
+    cache = {(i0, i1): (I0t, I1t, J0t, J1t) for i0, i1, I0t, I1t, J0t, J1t, _ in results}
 
     for i0, i1 in pairs:
         I0t, I1t, J0t, J1t = cache[(i0, i1)]
@@ -487,25 +791,90 @@ def upsample_between_slices(
             J0t_now = J0t[t_idx]
             J1t_now = J1t[t_idx]
 
-            if mode == "seg":
-                It = np.round((1.0 - p) * I0_now + p * I1_now)
-            else:
-                if W is None:
-                    num = ((1.0 - p) * J0t_now * I0_now) + (p * J1t_now * I1_now)
-                    den = ((1.0 - p) * J0t_now) + (p * J1t_now) + 1e-8
-                else:
-                    W0 = W[i0]
-                    W1 = W[i1]
-                    num = ((1.0 - p) * W0 * J0t_now * I0_now) + (p * W1 * J1t_now * I1_now)
-                    den = ((1.0 - p) * W0 * J0t_now) + (p * W1 * J1t_now) + 1e-8
-                It = num / den
+            It = _blend_pair(
+                mode,
+                p,
+                I0_now,
+                I1_now,
+                J0t_now,
+                J1t_now,
+                None if W is None else W[i0],
+                None if W is None else W[i1],
+            )
 
             J_filled[:, k] = It.astype(np.float32)
 
-    return {
-        "xJ_out": [np.array(axis, copy=True) for axis in xJ],
-        "J_filled": J_filled,
-        "J_nearest_bad": J_nearest_bad,
-        "slices_with_data": slices_with_data,
-        "pairs": pairs,
-    }
+    if pseudotimes is not None or return_velocities:
+        velocities = {(i0, i1): stored for i0, i1, *_, stored in results}
+        pair_velocities = _collect_pair_velocities(xJ, pairs, velocities, mode, config)
+        if pseudotimes is not None:
+            result["pseudotime_samples"] = _assemble_pseudotime_samples(
+                J, W, pair_velocities, pseudotimes, path_mode, config.get("device")
+            )
+        if return_velocities:
+            result["pair_velocities"] = pair_velocities
+
+    return result
+
+
+def load_pair_velocities(path):
+    """Load pair velocities written with ``np.savez_compressed(path, **pair_velocities)``."""
+    with np.load(path, allow_pickle=False) as data:
+        pair_velocities = {key: data[key] for key in data.files}
+    if str(pair_velocities.get("format")) != PAIR_VELOCITY_FORMAT:
+        raise ValueError(
+            f"{path} is not a {PAIR_VELOCITY_FORMAT!r} file; "
+            f"got format {pair_velocities.get('format')!r}"
+        )
+    return pair_velocities
+
+
+def evaluate_pseudotimes(
+    xJ,
+    J,
+    W=None,
+    *,
+    pair_velocities,
+    pseudotimes,
+    path_mode="two-sided",
+    device=None,
+):
+    """Evaluate pseudotime samples from stored pair velocities, without registering.
+
+    `xJ`, `J`, and `W` must be the stack the velocities were estimated on (for the
+    workflow, the self-alignment ``Jr`` stack and ``Wd``). The registration mode
+    stored with the velocities is reused, so seg-mode endpoints are smoothed
+    exactly as before registration. Returns the same dict as
+    ``upsample_between_slices(...)["pseudotime_samples"]``.
+    """
+    pseudotimes = _validate_pseudotimes(pseudotimes)
+    if pseudotimes is None:
+        raise ValueError("pseudotimes are required")
+    _validate_path_mode(path_mode)
+
+    J = np.asarray(J)
+    if J.ndim != 4:
+        raise ValueError(f"J must have shape (C, Z, Y, X); got {J.shape}")
+    if W is not None:
+        W = np.asarray(W)
+        if W.shape != J.shape[1:]:
+            raise ValueError(f"W must have shape (Z, Y, X); got {W.shape}")
+    for name, axis, stored in (
+        ("y", xJ[1], pair_velocities["y"]),
+        ("x", xJ[2], pair_velocities["x"]),
+    ):
+        axis = np.asarray(axis)
+        if axis.shape != stored.shape or not np.allclose(axis, stored):
+            raise ValueError(f"xJ {name} axis differs from the stored image grid")
+    if J.shape[2:] != (len(pair_velocities["y"]), len(pair_velocities["x"])):
+        raise ValueError(f"J spatial shape {J.shape[2:]} differs from the stored image grid")
+    pairs = np.asarray(pair_velocities["pairs"], dtype=int)
+    if pairs.size and (pairs.min() < 0 or pairs.max() >= J.shape[1]):
+        raise ValueError(f"stored pairs index beyond the {J.shape[1]} slices of J")
+    z_axis = np.asarray(xJ[0], dtype=np.float64)
+    if not np.allclose(z_axis[pairs], pair_velocities["z"]):
+        raise ValueError("xJ z axis differs from the stored pair positions")
+
+    return _assemble_pseudotime_samples(
+        J, W, pair_velocities, pseudotimes, path_mode, device
+    )

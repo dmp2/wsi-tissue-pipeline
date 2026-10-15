@@ -141,11 +141,16 @@ def _fake_upsample_between_slices_signature_check(
     assert present_mask.dtype.kind == "b"
     assert present_mask.shape == (J.shape[1],)
     assert mode in {"seg", "img"}
+    assert kwargs.get("return_velocities") is True
     return {
         "J_filled": J,
         "J_nearest_bad": J,
         "pairs": [(0, 2)],
         "slices_with_data": [0, 2],
+        "pair_velocities": {
+            "pairs": np.array([[0, 2]]),
+            "v_forward": np.zeros((config["nt"], 2, 2, 2), dtype=np.float32)[None],
+        },
     }
 
 
@@ -503,6 +508,9 @@ def test_workflow_runs_atlas_registration_and_upsampling(tmp_path, monkeypatch):
     assert (
         tmp_path / "emlddmm" / "upsampling" / "nearest_slice_reference_overview.png"
     ).exists()
+    with np.load(tmp_path / "emlddmm" / "upsampling" / "pair_velocities.npz") as saved:
+        assert saved["pairs"].tolist() == [[0, 2]]
+        assert saved["v_forward"].shape == (1, 10, 2, 2, 2)
     upsampling_effective_config = json.loads(
         (tmp_path / "emlddmm" / "upsampling" / "effective_config.json").read_text(
             encoding="utf-8"
