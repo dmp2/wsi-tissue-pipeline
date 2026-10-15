@@ -630,6 +630,22 @@ def _build_target_image(target: EmlddmmTarget) -> RegistrationImage:
     )
 
 
+def _reassemble_weights(
+    backend: EmlddmmBackend, xJ: list[np.ndarray], W: np.ndarray, A2d: Any
+) -> np.ndarray:
+    """Resample per-slice weights into the self-aligned frame of ``Jr``.
+
+    ``atlas_free_reconstruction`` builds ``Jr`` with exactly this call on ``J``,
+    so each weight stays on the pixel it describes. Zero padding gives no
+    confidence outside the section.
+    """
+    module = backend.module
+    XJ = np.stack(np.meshgrid(*xJ, indexing="ij"))
+    tform = module.compose_sequence([module.Transform(A2d)], XJ)
+    Wr = module.apply_transform_float(xJ, np.asarray(W)[None], tform, padding_mode="zeros")
+    return np.asarray(Wr, dtype=np.float32)[0]
+
+
 def _build_working_target(loaded: LoadedInputs) -> EmlddmmTarget:
     return EmlddmmTarget(
         xJ=loaded.xJd,
@@ -1642,6 +1658,9 @@ def run_emlddmm_workflow(
                     W=(loaded.Wd > 0).astype(np.float32),
                     **self_kwargs,
                 )
+                self_alignment_result["Wr"] = _reassemble_weights(
+                    loaded.backend, loaded.xJd, loaded.Wd, self_alignment_result["A2d"]
+                )
                 stage_artifacts = write_self_alignment_outputs(
                     backend=loaded.backend,
                     output_dir=stage_dir,
@@ -1691,7 +1710,12 @@ def run_emlddmm_workflow(
                     loaded.skip_reasons.get("self_alignment"),
                 )
                 a2d = np.repeat(np.eye(3, dtype=np.float32)[None], loaded.Jd.shape[1], axis=0)
-                self_alignment_result = {"A2d": a2d, "I": loaded.Jd, "Jr": loaded.Jd}
+                self_alignment_result = {
+                    "A2d": a2d,
+                    "I": loaded.Jd,
+                    "Jr": loaded.Jd,
+                    "Wr": loaded.Wd,
+                }
                 stage_results["self_alignment"] = {
                     "status": "skipped",
                     "reason": loaded.skip_reasons.get("self_alignment"),
@@ -1860,7 +1884,7 @@ def run_emlddmm_workflow(
                 upsampling = _upsample_between_slices_impl(
                     loaded.xJd,
                     np.asarray(self_alignment_result["Jr"], dtype=np.float32),
-                    W=np.asarray(loaded.Wd, dtype=np.float32),
+                    W=np.asarray(self_alignment_result["Wr"], dtype=np.float32),
                     **upsampling_call_kwargs,
                 )
                 stage_artifacts = write_upsampling_outputs(
@@ -1875,6 +1899,7 @@ def run_emlddmm_workflow(
                         "pair_registration": {
                             "semantics": "2d-observed-slice-pairs",
                             "input_stack": "self_alignment_result['Jr']",
+                            "input_weights": "self_alignment_result['Wr']",
                             "downI": upsampling_call_kwargs.get("config", {}).get("downI"),
                             "downJ": upsampling_call_kwargs.get("config", {}).get("downJ"),
                         },

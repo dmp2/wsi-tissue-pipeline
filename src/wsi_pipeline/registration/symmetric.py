@@ -575,6 +575,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     J,
     W0=None,
     *,
+    WI=None,
     combine_velocities="forward", # "average", "backward"
     grid_sample_kwargs=None,
     **config,
@@ -590,6 +591,9 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
     The energy is optimized using gradient descent with stepsize epsilon for nIter steps.
     The energy gradient is -(I - J)grad(I)det(D phi_{1t})
     In the multiimage setting, images I and J each have slices.
+    As in EM-LDDMM, W0 weights the matching error on J's grid, so it describes
+    the target J. The internal backward solve matches onto I and is weighted by
+    WI, the weights of I (uniform when None).
     The velocity is discretized with nT timesteps. Stored transforms include the
     identity state, so internal trajectories have nT+1 states, while returned
     It/Jt match the MATLAB convention and contain the nT non-identity samples.
@@ -665,6 +669,12 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         )
     )
 
+    WI_t = (
+        torch.ones_like(I_t[0])
+        if WI is None
+        else torch.as_tensor(WI, device=device, dtype=dtype)
+    )
+
     # emlddmm_multiscale interprets Python lists as per-scale schedules. The
     # coordinate axes for a 2D pair are a fixed domain, so keep them as tuples.
     xI_t = tuple(
@@ -714,6 +724,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         # this is a hack; there's no anatomical meaning to this synthetically extruded axis
         # there's no new information in the z-direction, and the meaningful info remains in-plane
 
+        WI_backend = WI_t[None].expand(synthetic_axis.numel(), -1, -1).contiguous()
         backend_cfg = _promote_2d_pair_config_for_backend(config, dtype, device)
         backend_cfg["dv"] = _promote_2d_dv_schedule(
             config.get("dv"),
@@ -726,6 +737,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
         I_backend = I_t
         J_backend = J_t
         W0_backend = W0_t
+        WI_backend = WI_t
         backend_cfg = dict(config)
 
     # Flow forward
@@ -765,7 +777,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
             I=J_backend,
             xJ=xI_backend,
             J=I_backend,
-            W0=W0_backend,
+            W0=WI_backend,
             **back_cfg,
         )
         back_last, v_back_raw, _ = _extract_in_plane_velocity(out_bwd)
@@ -777,7 +789,7 @@ def emlddmm_multiscale_symmetric_N(  # noqa: E741
             I=J_t,
             xJ=xI_t,
             J=I_t,
-            W0=W0_t,
+            W0=WI_t,
             **back_cfg,
         )
         back_last = out_bwd[-1] if isinstance(out_bwd, list) else out_bwd  # last scale output

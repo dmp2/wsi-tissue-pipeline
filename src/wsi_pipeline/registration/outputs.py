@@ -319,6 +319,14 @@ def write_self_alignment_outputs(
         np.asarray(self_alignment["Jr"], dtype=np.float32),
         "target_registered",
     )
+    # Wd in the frame of Jr: with Jr, the inputs of between-slice upsampling.
+    registered_weights_vtk = images_dir / "target_registered_weights.vtk"
+    backend.write_vtk_data(
+        str(registered_weights_vtk),
+        target.xJ,
+        np.asarray(self_alignment["Wr"], dtype=np.float32)[None],
+        "target_registered_weights",
+    )
 
     input_preview = qc_dir / "input_target_overview.png"
     _volume_montage(
@@ -351,6 +359,7 @@ def write_self_alignment_outputs(
             "input_vtk": str(input_vtk),
             "template_vtk": str(template_vtk),
             "registered_vtk": str(registered_vtk),
+            "registered_weights_vtk": str(registered_weights_vtk),
             "a2d_matrices": written_a2d,
         },
     )
@@ -363,6 +372,7 @@ def write_self_alignment_outputs(
         "input_vtk": str(input_vtk),
         "template_vtk": str(template_vtk),
         "registered_vtk": str(registered_vtk),
+        "registered_weights_vtk": str(registered_weights_vtk),
         "qc": [str(input_preview), str(registered_preview), str(template_preview)],
     }
 

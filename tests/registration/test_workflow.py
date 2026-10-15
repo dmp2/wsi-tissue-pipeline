@@ -33,7 +33,13 @@ class FakeBackend:
     def __init__(self) -> None:
         self.last_multiscale_kwargs = None
         self.last_self_alignment_kwargs = None
-        self.module = SimpleNamespace(__file__=__file__)
+        # Identity A2d transform helpers (atlas_free_reconstruction returns identity A2d).
+        self.module = SimpleNamespace(
+            __file__=__file__,
+            Transform=lambda data: data,
+            compose_sequence=lambda transforms, X: X,
+            apply_transform_float=lambda x, image, Xout, **kwargs: image,
+        )
 
     def read_data(self, path):
         path = Path(path)
@@ -152,6 +158,34 @@ def _fake_upsample_between_slices_signature_check(
             "v_forward": np.zeros((config["nt"], 2, 2, 2), dtype=np.float32)[None],
         },
     }
+
+
+def test_workflow_upsamples_with_weights_in_the_frame_of_jr(tmp_path, monkeypatch):
+    backend = FakeBackend()
+    # Stand-in for a nontrivial A2d: the reassembly call shifts every slice.
+    backend.module.apply_transform_float = lambda x, image, Xout, **kwargs: np.roll(image, 1, axis=-1)
+    seen = {}
+
+    def capture_upsampling(xJ, J, W=None, **kwargs):
+        seen["W"] = np.asarray(W)
+        return _fake_upsample_between_slices_signature_check(xJ, J, W, **kwargs)
+
+    monkeypatch.setattr(workflow_module, "_upsample_between_slices_impl", capture_upsampling)
+    workflow_module.run_emlddmm_workflow(
+        dataset_root=tmp_path,
+        target_source=tmp_path,
+        target_source_format="prepared-dir",
+        registration_output=tmp_path / "emlddmm",
+        upsample_between_slices=True,
+        upsample_mode="img",
+        backend=backend,
+    )
+
+    Wd = np.zeros((3, 2, 2), dtype=np.float32)
+    Wd[[0, 2]] = 1.0
+    assert np.array_equal(seen["W"], np.roll(Wd, 1, axis=-1))
+    images = tmp_path / "emlddmm" / "self_alignment" / "images"
+    assert (images / "target_registered_weights.vtk").exists()
 
 
 def test_plan_workflow_resolves_atlas_free_prepared_dir(tmp_path):
@@ -534,6 +568,7 @@ def test_workflow_runs_atlas_registration_and_upsampling(tmp_path, monkeypatch):
     assert upsampling_effective_config["pair_registration"] == {
         "semantics": "2d-observed-slice-pairs",
         "input_stack": "self_alignment_result['Jr']",
+        "input_weights": "self_alignment_result['Wr']",
         "downI": [[1, 1]],
         "downJ": [[1, 1]],
     }
@@ -716,3 +751,30 @@ def test_workflow_writes_provenance_and_replay_metadata(tmp_path):
     assert provenance["backend"]["backend_name"] == "fake-backend"
     assert provenance["resolved_cli"]["normalized_command"]
     assert "--dataset-root" in replay
+
+
+def test_reassembled_weights_follow_jr_for_nonidentity_a2d():
+    try:
+        backend = workflow_module.resolve_emlddmm_backend()
+    except ImportError:
+        pytest.skip("EM-LDDMM backend is unavailable")
+    module = backend.module
+    xJ = [np.arange(3, dtype=np.float32) * 5.0, np.arange(8, dtype=np.float32), np.arange(10, dtype=np.float32)]
+    J = 0.5 + np.random.default_rng(0).random((1, 3, 8, 10)).astype(np.float32)
+    A2d = np.repeat(np.eye(3, dtype=np.float32)[None], 3, axis=0)
+    A2d[1, :2, 2] = [1.0, -2.0]  # whole-pixel translation in (row, col)
+    angle = 0.3
+    A2d[2, :2, :2] = [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]]
+
+    # Jr exactly as atlas_free_reconstruction builds it.
+    tform = module.compose_sequence([module.Transform(A2d)], np.stack(np.meshgrid(*xJ, indexing="ij")))
+    Jr = np.asarray(module.apply_transform_float(xJ, J, tform, padding_mode="zeros"))
+
+    # A weight equal to the image is resampled exactly like the image.
+    Wr = workflow_module._reassemble_weights(backend, xJ, J[0], A2d)
+    assert np.array_equal(Wr, Jr[0])
+    assert np.allclose(Wr[0], J[0, 0], atol=1e-6)
+    assert not np.allclose(Wr[2], J[0, 2])
+    # Jr(y, x) = J(y + 1, x - 2): weights move with the section; none from outside it.
+    assert np.allclose(Wr[1, :-1, 2:], J[0, 1, 1:, :-2], atol=1e-6)
+    assert np.allclose(Wr[1, -1], 0.0, atol=1e-6) and np.allclose(Wr[1, :, :2], 0.0, atol=1e-6)

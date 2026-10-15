@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import hashlib
 import json
 
 import numpy as np
@@ -276,11 +277,33 @@ def _partial_inverse_flow(xv, v, s, *, emlddmm_module, grid_sample_kwargs=None):
     return phis[m]
 
 
-def _warp_at_times(out, image, xy_axes, times, *, device, grid_sample_kwargs=None):
+def _pull_back_weight(x, weight, phis, *, emlddmm_module, grid_sample_kwargs=None):
+    """Sample a weight map through the maps that warp its image: W o phi^{-1}.
+
+    A weight is a scalar confidence, not a density, so no Jacobian factor is
+    applied (the blend applies the image's Jacobian once). Bilinear sampling
+    keeps weights nonnegative and zero padding gives no confidence to points
+    mapped from outside the image grid.
+    """
+    kwargs = {**(grid_sample_kwargs or {}), "padding_mode": "zeros"}
+    return _symmetric._warp_time_series(
+        x,
+        np.asarray(weight)[None],
+        phis,
+        emlddmm_module=emlddmm_module,
+        interp2d=True,
+        grid_sample_kwargs=kwargs,
+    )[:, 0]
+
+
+def _warp_at_times(
+    out, image, xy_axes, times, *, device, grid_sample_kwargs=None, weight=None
+):
     """Warp `image` along the stored `v_symmetric` of `out` to each time in `times`.
 
     Mirrors the solver's `phi_I` path: integrate on the velocity grid, resample
-    to the image grid, warp, and take det(D phi^{-1}) on the image grid.
+    to the image grid, warp, and take det(D phi^{-1}) on the image grid. An
+    optional `weight` is pulled back through the same maps (None otherwise).
     """
     emlddmm_module = _symmetric._resolve_emlddmm_module()
     v = torch.as_tensor(out["v_symmetric"], device=device)
@@ -316,13 +339,22 @@ def _warp_at_times(out, image, xy_axes, times, *, device, grid_sample_kwargs=Non
     )
     spacing = tuple(float(abs(axis[1] - axis[0])) for axis in xy_axes)
     det = _symmetric._calculate_determinant_of_jacobian(phis, spacing=spacing)
-    return warped.detach().cpu().numpy(), det.detach().cpu().numpy()
+    if weight is not None:
+        weight = _pull_back_weight(
+            x, weight, phis, emlddmm_module=emlddmm_module, grid_sample_kwargs=grid_sample_kwargs
+        ).detach().cpu().numpy()
+    return warped.detach().cpu().numpy(), det.detach().cpu().numpy(), weight
 
 
 def _evaluate_pair_pseudotimes(
-    out_fwd, out_bwd, I0, I1, xy_axes, pseudotimes, config, path_mode="two-sided"
+    out_fwd, out_bwd, I0, I1, xy_axes, pseudotimes, config, path_mode="two-sided",
+    W0=None, W1=None,
 ):
     """Evaluate both endpoint warps and their Jacobians at arbitrary pseudotimes.
+
+    Returns (I0s, I1s, J0s, J1s, W0s, W1s). W0s / W1s are W0 / W1 pulled back
+    through the same maps as I0 / I1, so each weight stays on the image it
+    describes in the intermediate frame; they are None when W0 / W1 are None.
 
     I0 follows the forward solve's velocity to time s (as in I0t / J0t).
 
@@ -349,18 +381,19 @@ def _evaluate_pair_pseudotimes(
     device = torch.device(config.get("device") or "cpu")
     grid_sample_kwargs = config.get("grid_sample_kwargs")
     s = np.asarray(pseudotimes, dtype=np.float64)
-    I0s, J0s = _warp_at_times(
-        out_fwd, I0, xy_axes, s, device=device, grid_sample_kwargs=grid_sample_kwargs
+    I0s, J0s, W0s = _warp_at_times(
+        out_fwd, I0, xy_axes, s, device=device, grid_sample_kwargs=grid_sample_kwargs, weight=W0
     )
     if path_mode == "single-forward":
         v = torch.as_tensor(out_fwd["v_symmetric"])
         out_i1 = {"v_symmetric": torch.flip(-v, [0]), "xv": out_fwd["xv"]}
     else:
         out_i1 = out_bwd
-    I1s, J1s = _warp_at_times(
-        out_i1, I1, xy_axes, 1.0 - s, device=device, grid_sample_kwargs=grid_sample_kwargs
+    I1s, J1s, W1s = _warp_at_times(
+        out_i1, I1, xy_axes, 1.0 - s, device=device, grid_sample_kwargs=grid_sample_kwargs,
+        weight=W1,
     )
-    return I0s, I1s, J0s, J1s
+    return I0s, I1s, J0s, J1s, W0s, W1s
 
 
 def _blend_pair(mode, p, I0_now, I1_now, J0t_now, J1t_now, W0=None, W1=None):
@@ -413,12 +446,16 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
     print("I0 unique-ish", np.unique(I0)[:20])
     print("fraction nonbinary", np.mean((I0 > 0) & (I0 < 1)))
 
+    # EM-LDDMM weights the matching error on the target grid, so each solve
+    # takes the target's weights as W0 and the source's as WI (the target of
+    # its internal backward solve).
     out_fwd = emlddmm_multiscale_symmetric_N(
         xI=xy_axes,
         I=I0,
         xJ=xy_axes,
         J=I1,
-        W0=W0,
+        W0=W1,
+        WI=W0,
         **config,
     )
 
@@ -432,7 +469,8 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
         I=I1,
         xJ=xy_axes,
         J=I0,
-        W0=W1,
+        W0=W0,
+        WI=W1,
         **config,
     )
 
@@ -450,6 +488,25 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
         axis=0,
     )
 
+    # Only the image-mode blend uses weights. Pull each back through the maps
+    # that produced its image frames: I0t from forward phi_I, I1t from the
+    # flipped backward phi_I (both include the identity state at index 0).
+    W0t = W1t = None
+    if W is not None and mode != "seg":
+        emlddmm_module = _symmetric._resolve_emlddmm_module()
+        grid_sample_kwargs = config.get("grid_sample_kwargs")
+        W0t = _pull_back_weight(
+            xy_axes, W0, torch.as_tensor(out_fwd["phi_I"])[1:],
+            emlddmm_module=emlddmm_module, grid_sample_kwargs=grid_sample_kwargs,
+        ).numpy()
+        W1t = np.flip(
+            _pull_back_weight(
+                xy_axes, W1, torch.as_tensor(out_bwd["phi_I"])[1:],
+                emlddmm_module=emlddmm_module, grid_sample_kwargs=grid_sample_kwargs,
+            ).numpy(),
+            axis=0,
+        )
+
     velocities = {
         "v_forward": out_fwd.get("v_symmetric"),
         "v_backward": out_bwd.get("v_symmetric"),
@@ -457,10 +514,14 @@ def _register_pair(ind0, ind1, xJ, J, W, config, mode=None):
         "xv_backward": out_bwd.get("xv"),
     }
 
-    return ind0, ind1, I0t, I1t, J0t, J1t, velocities
+    return ind0, ind1, I0t, I1t, J0t, J1t, W0t, W1t, velocities
 
 
-PAIR_VELOCITY_FORMAT = "wsi_pipeline.pair_velocities/1"
+PAIR_VELOCITY_FORMAT = "wsi_pipeline.pair_velocities/2"
+
+# /1 archives carry no input fingerprints, and their weighted solves used the
+# source slice's weights for the target.
+_UNVERIFIABLE_PAIR_VELOCITY_FORMATS = ("wsi_pipeline.pair_velocities/1",)
 
 PAIR_VELOCITY_CONVENTIONS = (
     "Pair p = pairs[p] = (i0, i1) registers I0 = J[:, i0] and I1 = J[:, i1] on the "
@@ -469,11 +530,79 @@ PAIR_VELOCITY_CONVENTIONS = (
     "each (nt, 2, len(xv_y), len(xv_x)) with components (y, x) on the grid (xv_y, xv_x). "
     "v[k] is constant on [k/nt, (k+1)/nt); phi_t^{-1} is the semi-Lagrangian "
     "integration of symmetric._integrate_inverse_flow, so I0 o phi_t^{-1} moves I0 "
-    "toward I1. z[p] holds the physical z of (i0, i1). The two solves are independent."
+    "toward I1. z[p] holds the physical z of (i0, i1). The two solves are independent. "
+    "W[i] (same frame as J) weights slice i as a registration target and is pulled "
+    "back with its image for blending. Input identity: J_sha256[k] and W_sha256[k] are "
+    "SHA-256 digests of J[:, input_slices[k]] and W[input_slices[k]] as registered, "
+    "little-endian float32 in C order prefixed by dtype and shape (see "
+    "upsample._slice_sha256); W_sha256 is empty when no weights were used. They identify "
+    "the inputs, not the software environment that produced the velocities."
 )
 
 
-def _collect_pair_velocities(xJ, pairs, velocities, mode, config):
+def _slice_sha256(array):
+    """SHA-256 of one registration input slice in the float32 form the solver sees.
+
+    The dtype and shape are hashed first, so equal bytes with another layout
+    differ. Hashing one slice at a time bounds the copy to a single slice.
+    """
+    array = np.ascontiguousarray(array, dtype="<f4")
+    digest = hashlib.sha256(f"<f4{array.shape}".encode())
+    digest.update(array)
+    return digest.hexdigest()
+
+
+def _input_fingerprints(J, W, pairs):
+    """Fingerprint every slice that enters a pair solve (J, and W when used)."""
+    slices = np.unique(np.asarray(pairs, dtype=np.int64))
+    no_digests = np.zeros((0,), dtype="<U64")
+    return {
+        "input_slices": slices,
+        "J_sha256": np.array([_slice_sha256(J[:, i]) for i in slices], dtype="<U64"),
+        "W_sha256": (
+            no_digests if W is None
+            else np.array([_slice_sha256(W[i]) for i in slices], dtype="<U64")
+        ),
+    }
+
+
+def _verify_input_fingerprints(J, W, pair_velocities):
+    """Reject J / W that differ from the stack the velocities were estimated on."""
+    slices = pair_velocities["input_slices"]
+    stored_w = pair_velocities["W_sha256"]
+    if slices.size and W is None and stored_w.size:
+        raise ValueError("the velocities were registered with weights W; pass the same W")
+    if slices.size and W is not None and not stored_w.size:
+        raise ValueError("the velocities were registered without weights; pass W=None")
+    checks = [("J", pair_velocities["J_sha256"], lambda i: J[:, i])]
+    if W is not None:
+        checks.append(("W", stored_w, lambda i: W[i]))
+    for name, stored, data in checks:
+        bad = [
+            int(i) for i, digest in zip(slices, stored, strict=True)
+            if _slice_sha256(data(int(i))) != str(digest)
+        ]
+        if bad:
+            raise ValueError(
+                f"{name} differs from the registration inputs of these velocities at "
+                f"slices {bad} (SHA-256 of the float32 values)"
+            )
+
+
+def _check_pair_velocity_format(pair_velocities, source="pair_velocities"):
+    fmt = str(pair_velocities.get("format"))
+    if fmt in _UNVERIFIABLE_PAIR_VELOCITY_FORMATS:
+        raise ValueError(
+            f"{source} has format {fmt!r}, which records no input fingerprints and "
+            "predates the target-weight correction, so its inputs cannot be verified. "
+            "Re-run upsample_between_slices(..., return_velocities=True) to write a "
+            f"{PAIR_VELOCITY_FORMAT!r} archive."
+        )
+    if fmt != PAIR_VELOCITY_FORMAT:
+        raise ValueError(f"{source} is not a {PAIR_VELOCITY_FORMAT!r} file; got format {fmt!r}")
+
+
+def _collect_pair_velocities(xJ, J, W, pairs, velocities, mode, config):
     """Stack every pair's stored velocities into one flat dict of plain arrays."""
     v_forward, v_backward, xv = [], [], None
     for pair in pairs:
@@ -506,6 +635,7 @@ def _collect_pair_velocities(xJ, pairs, velocities, mode, config):
         "xv_x": empty if xv is None else xv[1],
         "v_forward": np.stack(v_forward) if pairs else empty,
         "v_backward": np.stack(v_backward) if pairs else empty,
+        **_input_fingerprints(J, W, pair_array),
     }
 
 
@@ -534,7 +664,8 @@ def _assemble_pseudotime_samples(J, W, pair_velocities, pseudotimes, path_mode, 
     for pair_idx, (i0, i1) in enumerate(pairs):
         z0, z1 = (float(z) for z in pair_velocities["z"][pair_idx])
         I0, I1 = _pair_endpoint_images(J, i0, i1, mode)
-        I0s, I1s, J0s, J1s = _evaluate_pair_pseudotimes(
+        weighted = W is not None and mode != "seg"
+        I0s, I1s, J0s, J1s, W0s, W1s = _evaluate_pair_pseudotimes(
             {"v_symmetric": pair_velocities["v_forward"][pair_idx], "xv": xv},
             {"v_symmetric": pair_velocities["v_backward"][pair_idx], "xv": xv},
             I0,
@@ -543,6 +674,8 @@ def _assemble_pseudotime_samples(J, W, pair_velocities, pseudotimes, path_mode, 
             pseudotimes,
             eval_config,
             path_mode,
+            np.asarray(W[i0], dtype=np.float32) if weighted else None,
+            np.asarray(W[i1], dtype=np.float32) if weighted else None,
         )
         for j, s in enumerate(pseudotimes):
             n = pair_idx * len(pseudotimes) + j
@@ -559,8 +692,8 @@ def _assemble_pseudotime_samples(J, W, pair_velocities, pseudotimes, path_mode, 
                     I1s[j],
                     J0s[j],
                     J1s[j],
-                    None if W is None else W[i0],
-                    None if W is None else W[i1],
+                    None if W0s is None else W0s[j],
+                    None if W1s is None else W1s[j],
                 ).astype(np.float32)
 
     return samples
@@ -660,7 +793,10 @@ def upsample_between_slices(
     J : np.ndarray
         Channel-first data with shape (C, Z, Y, X).
     W : np.ndarray | None
-        Optional scalar weight map with shape (Z, Y, X).
+        Optional scalar weight map with shape (Z, Y, X), in the same frame as J
+        (for the workflow, Wd resampled with the A2d that produced Jr). W[i]
+        weights slice i wherever it is a registration target, and in the
+        image-mode blend.
     present_mask : np.ndarray | None
         Optional boolean mask of length Z identifying which global slices are observed.
     slice_spacing : float | None
@@ -687,11 +823,8 @@ def upsample_between_slices(
         "two-sided" (default) is described above. "single-forward" samples
         both endpoints along the forward flow phi_t only: I0 by phi_s^{-1} and
         I1 by phi_1 o phi_s^{-1}, so both lie in one intermediate frame.
-        In both modes W[i0] and W[i1] enter the blend unwarped, in their own
-        section frames rather than the intermediate frame; with spatially
-        varying W the weights are misregistered by the local deformation (and,
-        in the workflow, by any A2d alignment, since W is not reassembled).
-        W=None or per-slice constant W is unaffected.
+        In both modes, and on the z lattice, W[i0] and W[i1] are pulled back
+        through the same maps as their images before blending.
     return_velocities : bool
         Also return ``"pair_velocities"``: every pair's forward and backward
         velocity with its grids, as a flat dict of plain arrays. Save it with
@@ -758,10 +891,10 @@ def upsample_between_slices(
         for i0, i1 in pairs:
             results.append(_register_pair(i0, i1, xJ, J, W, config, mode))
 
-    cache = {(i0, i1): (I0t, I1t, J0t, J1t) for i0, i1, I0t, I1t, J0t, J1t, _ in results}
+    cache = {(i0, i1): frames for i0, i1, *frames, _ in results}
 
     for i0, i1 in pairs:
-        I0t, I1t, J0t, J1t = cache[(i0, i1)]
+        I0t, I1t, J0t, J1t, W0t, W1t = cache[(i0, i1)]
         z0 = float(z_axis[i0])
         z1 = float(z_axis[i1])
         delta_z = z1 - z0
@@ -798,15 +931,15 @@ def upsample_between_slices(
                 I1_now,
                 J0t_now,
                 J1t_now,
-                None if W is None else W[i0],
-                None if W is None else W[i1],
+                None if W0t is None else W0t[t_idx],
+                None if W1t is None else W1t[t_idx],
             )
 
             J_filled[:, k] = It.astype(np.float32)
 
     if pseudotimes is not None or return_velocities:
         velocities = {(i0, i1): stored for i0, i1, *_, stored in results}
-        pair_velocities = _collect_pair_velocities(xJ, pairs, velocities, mode, config)
+        pair_velocities = _collect_pair_velocities(xJ, J, W, pairs, velocities, mode, config)
         if pseudotimes is not None:
             result["pseudotime_samples"] = _assemble_pseudotime_samples(
                 J, W, pair_velocities, pseudotimes, path_mode, config.get("device")
@@ -821,11 +954,7 @@ def load_pair_velocities(path):
     """Load pair velocities written with ``np.savez_compressed(path, **pair_velocities)``."""
     with np.load(path, allow_pickle=False) as data:
         pair_velocities = {key: data[key] for key in data.files}
-    if str(pair_velocities.get("format")) != PAIR_VELOCITY_FORMAT:
-        raise ValueError(
-            f"{path} is not a {PAIR_VELOCITY_FORMAT!r} file; "
-            f"got format {pair_velocities.get('format')!r}"
-        )
+    _check_pair_velocity_format(pair_velocities, str(path))
     return pair_velocities
 
 
@@ -842,15 +971,19 @@ def evaluate_pseudotimes(
     """Evaluate pseudotime samples from stored pair velocities, without registering.
 
     `xJ`, `J`, and `W` must be the stack the velocities were estimated on (for the
-    workflow, the self-alignment ``Jr`` stack and ``Wd``). The registration mode
-    stored with the velocities is reused, so seg-mode endpoints are smoothed
-    exactly as before registration. Returns the same dict as
+    workflow, self-alignment ``Jr`` and ``Wr``, written as
+    ``images/target_registered.vtk`` and ``images/target_registered_weights.vtk``).
+    The grid is checked against the stored axes and every slice entering a pair
+    against its stored SHA-256 fingerprint; mismatches raise ValueError. The
+    registration mode stored with the velocities is reused, so seg-mode endpoints
+    are smoothed exactly as before registration. Returns the same dict as
     ``upsample_between_slices(...)["pseudotime_samples"]``.
     """
     pseudotimes = _validate_pseudotimes(pseudotimes)
     if pseudotimes is None:
         raise ValueError("pseudotimes are required")
     _validate_path_mode(path_mode)
+    _check_pair_velocity_format(pair_velocities)
 
     J = np.asarray(J)
     if J.ndim != 4:
@@ -874,6 +1007,7 @@ def evaluate_pseudotimes(
     z_axis = np.asarray(xJ[0], dtype=np.float64)
     if not np.allclose(z_axis[pairs], pair_velocities["z"]):
         raise ValueError("xJ z axis differs from the stored pair positions")
+    _verify_input_fingerprints(J, W, pair_velocities)
 
     return _assemble_pseudotime_samples(
         J, W, pair_velocities, pseudotimes, path_mode, device

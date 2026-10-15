@@ -691,10 +691,12 @@ def _fake_img_helper(xI, I, xJ, J, W0=None, **config):
     jac_value = 1.0 if float(np.mean(I)) <= float(np.mean(J)) else 3.0
     It = np.full((nt, I.shape[0], I.shape[1], I.shape[2]), image_value, dtype=np.float32)
     det = np.full((nt, I.shape[1], I.shape[2]), jac_value, dtype=np.float32)
+    identity = np.stack(np.meshgrid(*[np.asarray(axis) for axis in xI], indexing="ij"))
     return {
         "It": It,
         "det_jac_phi_I": det,
         "det_jac_phi_J": det,
+        "phi_I": np.repeat(identity[None], nt + 1, axis=0),  # weights are pulled back with It
     }
 
 

@@ -66,7 +66,7 @@ def test_zero_velocity_is_identity_at_arbitrary_pseudotimes(monkeypatch):
 
     image = np.random.default_rng(0).random((2, 9, 9))
     out = {"v_symmetric": v, "xv": xv}
-    warped, det = upsample_module._warp_at_times(
+    warped, det, _ = upsample_module._warp_at_times(
         out, image, [a.numpy() for a in xv], PSEUDOTIMES, device=torch.device("cpu")
     )
     assert np.allclose(warped, image[None], atol=1e-12)
@@ -111,7 +111,7 @@ def test_time_dependent_velocity_uses_fractional_final_step(monkeypatch):
 
     # Jacobian of the same map on the image grid: det = scale**2 for 2D scaling.
     out = {"v_symmetric": v, "xv": xv}
-    _, det = upsample_module._warp_at_times(
+    _, det, _ = upsample_module._warp_at_times(
         out, np.ones((1, 9, 9)), [ax.numpy() for ax in xv], [0.73], device=torch.device("cpu")
     )
     scale = float(torch.prod(1.0 - a[:5] * dt)) * (1.0 - 0.84 * float(a[5]) * dt)
@@ -172,7 +172,7 @@ def _pair_stack():
 
 def _register_and_evaluate(xJ, J, config, pseudotimes, path_mode="two-sided"):
     """Register pair (0, 4), then evaluate its stored velocities at `pseudotimes`."""
-    *_, I0t, I1t, J0t, J1t, stored = upsample_module._register_pair(
+    _, _, I0t, I1t, J0t, J1t, _, _, stored = upsample_module._register_pair(
         0, 4, xJ, J, None, config, mode="img"
     )
     I0, I1 = upsample_module._pair_endpoint_images(J, 0, 4, "img")
@@ -186,7 +186,7 @@ def _register_and_evaluate(xJ, J, config, pseudotimes, path_mode="two-sided"):
         config,
         path_mode,
     )
-    return (I0t, I1t, J0t, J1t), samples
+    return (I0t, I1t, J0t, J1t), samples[:4]
 
 
 @pytest.fixture
@@ -305,7 +305,7 @@ def _single_forward(v, xv, I0, I1, pseudotimes):
         pseudotimes,
         {},
         "single-forward",
-    )
+    )[:4]
 
 
 def _map_to_i1(xv, v, s, backend):
@@ -362,7 +362,7 @@ def test_single_forward_endpoints_share_intermediate_frame(monkeypatch):
     assert np.allclose(I0s, I1s, atol=1e-6)
 
     # Two-sided with an independent backward flow does not share the frame.
-    I0b, I1b, _, _ = upsample_module._evaluate_pair_pseudotimes(
+    I0b, I1b, *_ = upsample_module._evaluate_pair_pseudotimes(
         {"v_symmetric": v, "xv": xv},
         {"v_symmetric": torch.zeros_like(v), "xv": xv},
         I0,
@@ -647,3 +647,237 @@ def test_return_velocities_with_no_pairs():
     assert vel["pairs"].shape == (0, 2) and vel["v_forward"].size == 0
     samples = upsample_module.evaluate_pseudotimes(xJ, J, pair_velocities=vel, pseudotimes=[0.5])
     assert samples["J"].shape == (2, 0, SIZE, SIZE)
+
+
+# -------------------------------------------------------------------------
+# Spatial weights: each weight belongs to its image and shares its frame
+# -------------------------------------------------------------------------
+
+
+def test_each_solve_weights_its_target(monkeypatch):
+    """EM-LDDMM weights the target: I0 -> I1 uses W[i1], its internal reverse W[i0]."""
+    seen = []
+
+    def recording_multiscale(**kwargs):
+        seen.append((float(kwargs["I"].mean()), float(kwargs["J"].mean()), float(kwargs["W0"].mean())))
+        return _stub_multiscale(**kwargs)
+
+    _use_backend(monkeypatch, recording_multiscale)
+    xJ, J, _ = _pair_stack()  # mean(J[:, 0]) ~ 0.5 < mean(J[:, 4]) ~ 1.5
+    W = np.zeros(J.shape[1:], dtype=np.float32)
+    W[0], W[4] = 2.0, 7.0  # distinct per-slice constants still matter
+    config = upsample_module._normalize_pair_registration_config({"nt": NT})
+    upsample_module._register_pair(0, 4, xJ, J, W, config, mode="img")
+
+    i0, i1 = float(J[:, 0].mean()), float(J[:, 4].mean())
+    # Backend solves: (fwd, its reverse), then (bwd, its reverse).
+    expected = [(i0, i1, 7.0), (i1, i0, 2.0), (i1, i0, 2.0), (i0, i1, 7.0)]
+    assert np.allclose(seen, expected, atol=1e-5)
+
+
+def _translation(n=24, c=(2.0, -3.0), nt=8):
+    axis = torch.arange(n, dtype=torch.float64)
+    xv = (axis, axis.clone())
+    c = torch.tensor(c, dtype=torch.float64)
+    return xv, c[None, :, None, None].expand(nt, 2, n, n).clone()
+
+
+def test_weights_are_pulled_back_with_their_image(monkeypatch):
+    """W o phi_1^{-1} for a whole-pixel translation, with zero weight from outside."""
+    _use_backend(monkeypatch)
+    xv, v = _translation()
+    n = xv[0].numel()
+    yy, xx = np.mgrid[:n, :n]
+    W = (1.0 + np.sin(yy / 3.0) * np.cos(xx / 4.0)) * ((yy > 4) & (xx < 18))
+    image = np.random.default_rng(7).random((1, n, n))
+
+    def warp(weight):
+        return upsample_module._warp_at_times(
+            {"v_symmetric": v, "xv": xv}, image, [a.numpy() for a in xv], [0.5, 1.0],
+            device=CPU, weight=weight,
+        )
+
+    warped, det, Ws = warp(W)
+    _, _, ones = warp(np.ones((n, n)))
+    assert np.allclose(det, 1.0, atol=1e-12)  # weights carry no Jacobian of their own
+    assert Ws.min() >= 0.0
+    # s = 1: phi^{-1}(x) = x - (2, -3), so both become W(y - 2, x + 3).
+    assert np.allclose(Ws[1, 2:, :-3], W[:-2, 3:], atol=1e-12)
+    assert np.allclose(warped[1, 0, 2:, :-3], image[0, :-2, 3:], atol=1e-12)
+    # Points sampled from outside the grid get zero weight; the image is border-clamped.
+    assert np.allclose(ones[1, :2], 0.0, atol=1e-12) and np.allclose(ones[1, :, -3:], 0.0, atol=1e-12)
+    assert np.allclose(ones[1, 2:, :-3], 1.0, atol=1e-12)
+    assert np.allclose(warped[1, 0, 0, :-3], image[0, 0, 3:], atol=1e-12)
+    # s = 0.5 is a half-pixel shift in x: bilinear weights stay in [0, 1].
+    assert ones[0].min() >= 0.0 and ones[0].max() <= 1.0 + 1e-12 and 0.1 < ones[0, 5, -2] < 0.9
+
+
+@pytest.mark.parametrize("path_mode", ["two-sided", "single-forward"])
+def test_pseudotime_weights_use_the_maps_of_their_images(monkeypatch, path_mode):
+    """With W = I (positive, single channel), warped W equals warped I where in bounds."""
+    _use_backend(monkeypatch)
+    xv, v = _translation()
+    n = xv[0].numel()
+    rng = np.random.default_rng(8)
+    I0, I1 = 0.5 + rng.random((1, n, n)), 0.5 + rng.random((1, n, n))
+    v_bwd = {"v_symmetric": -0.5 * v, "xv": xv}
+    I0s, I1s, J0s, J1s, W0s, W1s = upsample_module._evaluate_pair_pseudotimes(
+        {"v_symmetric": v, "xv": xv}, v_bwd, I0, I1, [a.numpy() for a in xv],
+        [0.25, 0.5, 0.75], {}, path_mode, W0=I0[0], W1=I1[0],
+    )
+    interior = (slice(3, -3), slice(3, -3))  # every map here moves < 3 pixels
+    assert np.allclose(W0s[(slice(None), *interior)], I0s[(slice(None), 0, *interior)], atol=1e-12)
+    assert np.allclose(W1s[(slice(None), *interior)], I1s[(slice(None), 0, *interior)], atol=1e-12)
+    # Unwarped weights would sit in the section frames, not the intermediate one.
+    assert not np.allclose(W1s[(slice(None), *interior)], I1[(0, *interior)], atol=1e-3)
+    # The blend uses these warped weights and the Jacobians exactly once.
+    blended = upsample_module._blend_pair("img", 0.5, I0s[1], I1s[1], J0s[1], J1s[1], W0s[1], W1s[1])
+    num = 0.5 * W0s[1] * J0s[1] * I0s[1] + 0.5 * W1s[1] * J1s[1] * I1s[1]
+    den = 0.5 * W0s[1] * J0s[1] + 0.5 * W1s[1] * J1s[1] + 1e-8
+    assert np.allclose(blended, num / den)
+
+
+def test_lattice_weights_follow_their_image_frames(captured_solves):
+    """Legacy z-lattice blend: W0t / W1t use the same maps and frame order as I0t / I1t."""
+    xJ, J, _ = _pair_stack()
+    W = np.zeros(J.shape[1:], dtype=np.float32)
+    W[0], W[4] = J[0, 0], J[0, 4]  # weights equal to the images
+    config = upsample_module._normalize_pair_registration_config({"nt": NT})
+    _, _, I0t, I1t, _, _, W0t, W1t, _ = upsample_module._register_pair(
+        0, 4, xJ, J, W, config, mode="img"
+    )
+    out_fwd, out_bwd = captured_solves
+
+    def in_bounds(phi):
+        phi = np.asarray(phi)
+        return (phi >= 0).all(axis=0) & (phi <= SIZE - 1).all(axis=0)
+
+    for t in range(NT):
+        fwd = in_bounds(out_fwd["phi_I"][t + 1])
+        bwd = in_bounds(out_bwd["phi_I"][NT - t])
+        assert fwd.any() and not fwd.all()  # the stub moves points across the boundary
+        assert np.allclose(W0t[t][fwd], I0t[t][0][fwd], atol=1e-5)
+        assert np.allclose(W1t[t][bwd], I1t[t][0][bwd], atol=1e-5)
+
+    *_, W0t_seg, W1t_seg, _ = upsample_module._register_pair(0, 4, xJ, J, W, config, mode="seg")
+    assert W0t_seg is None and W1t_seg is None  # the seg blend uses no weights
+
+
+@pytest.mark.parametrize("path_mode", ["two-sided", "single-forward"])
+def test_uniform_weights_match_unweighted_blend_in_bounds(captured_solves, path_mode):
+    xJ, J, present = _pair_stack()
+    kwargs = dict(present_mask=present, mode="img", config={"nt": NT}, path_mode=path_mode)
+    out = upsample_module.upsample_between_slices(xJ, J, pseudotimes=[0.3, 0.6], **kwargs)
+    ones = upsample_module.upsample_between_slices(
+        xJ, J, np.ones(J.shape[1:], dtype=np.float32), pseudotimes=[0.3, 0.6], **kwargs
+    )
+    # Uniform weights are zero only where a point comes from outside the grid,
+    # so they leave the blend unchanged wherever both warps stay in bounds.
+    a, b = out["pseudotime_samples"]["J"], ones["pseudotime_samples"]["J"]
+    assert a.shape == b.shape and np.all(np.isfinite(b))
+    assert np.allclose(a[..., 4:-4, 4:-4], b[..., 4:-4, 4:-4], atol=1e-5)
+
+
+# -------------------------------------------------------------------------
+# Input identity of stored velocities
+# -------------------------------------------------------------------------
+
+
+def _weighted_archive(tmp_path, W=None):
+    xJ, J, present = _three_slice_stack()
+    out = upsample_module.upsample_between_slices(
+        xJ, J, W, present_mask=present, mode="img", config={"nt": NT}, return_velocities=True
+    )
+    path = tmp_path / "pair_velocities.npz"
+    np.savez_compressed(path, **out["pair_velocities"])
+    return xJ, J, upsample_module.load_pair_velocities(path)
+
+
+def _spatial_weights(shape):
+    yy, xx = np.mgrid[: shape[1], : shape[2]]
+    return np.broadcast_to(0.2 + (yy + xx) / (2.0 * SIZE), shape).astype(np.float32).copy()
+
+
+def test_archive_records_input_fingerprints(captured_solves, tmp_path):
+    xJ, J, present = _three_slice_stack()
+    W = _spatial_weights(J.shape[1:])
+    _, _, vel = _weighted_archive(tmp_path, W)
+
+    assert str(vel["format"]) == "wsi_pipeline.pair_velocities/2"
+    assert vel["input_slices"].tolist() == [0, 2, 5]
+    assert vel["J_sha256"].dtype.kind == vel["W_sha256"].dtype.kind == "U"
+    assert vel["J_sha256"][1] == upsample_module._slice_sha256(J[:, 2])
+    assert vel["W_sha256"][2] == upsample_module._slice_sha256(W[5])
+    assert "SHA-256" in str(vel["conventions"])
+
+
+def test_slice_digest_is_canonical_float32_with_shape():
+    a = np.arange(12, dtype=np.float32).reshape(3, 4)
+    digest = upsample_module._slice_sha256(a)
+    assert digest == upsample_module._slice_sha256(a.astype(np.float64))  # the solver sees float32
+    assert digest == upsample_module._slice_sha256(np.asfortranarray(a))
+    assert digest != upsample_module._slice_sha256(a.reshape(4, 3))  # same bytes, other shape
+    assert digest != upsample_module._slice_sha256(a.reshape(1, 3, 4))
+
+
+def test_evaluate_accepts_identical_inputs_and_new_pseudotimes(captured_solves, tmp_path):
+    xJ, J, present = _three_slice_stack()
+    W = _spatial_weights(J.shape[1:])
+    _, _, vel = _weighted_archive(tmp_path, W)
+    for path_mode in ("two-sided", "single-forward"):
+        reference = upsample_module.upsample_between_slices(
+            xJ, J, W, present_mask=present, mode="img", config={"nt": NT},
+            pseudotimes=[0.2, 0.65], path_mode=path_mode,
+        )["pseudotime_samples"]
+        got = upsample_module.evaluate_pseudotimes(
+            xJ, J.astype(np.float64), W.copy(), pair_velocities=vel,
+            pseudotimes=[0.2, 0.65], path_mode=path_mode,
+        )
+        assert np.array_equal(got["J"], reference["J"])
+
+    # Slices outside every pair never reach a solve, so they are not part of the identity.
+    J_gap = J.copy()
+    J_gap[:, 3] = 9.0
+    upsample_module.evaluate_pseudotimes(xJ, J_gap, W, pair_velocities=vel, pseudotimes=[0.5])
+
+
+def test_evaluate_rejects_modified_inputs(captured_solves, tmp_path):
+    xJ, J, present = _three_slice_stack()
+    W = _spatial_weights(J.shape[1:])
+    _, _, vel = _weighted_archive(tmp_path, W)
+
+    J_bad = J.copy()
+    J_bad[1, 2, 5, 5] += 1e-3  # same shape, axes, and dtype
+    with pytest.raises(ValueError, match=r"J differs .* slices \[2\]"):
+        upsample_module.evaluate_pseudotimes(xJ, J_bad, W, pair_velocities=vel, pseudotimes=[0.5])
+
+    W_bad = W.copy()
+    W_bad[5, 0, 0] = 0.0
+    with pytest.raises(ValueError, match=r"W differs .* slices \[5\]"):
+        upsample_module.evaluate_pseudotimes(xJ, J, W_bad, pair_velocities=vel, pseudotimes=[0.5])
+
+    with pytest.raises(ValueError, match="registered with weights"):
+        upsample_module.evaluate_pseudotimes(xJ, J, None, pair_velocities=vel, pseudotimes=[0.5])
+
+
+def test_evaluate_rejects_weights_for_an_unweighted_archive(captured_solves, tmp_path):
+    xJ, J, vel = _weighted_archive(tmp_path)
+    assert vel["W_sha256"].size == 0
+    upsample_module.evaluate_pseudotimes(xJ, J, None, pair_velocities=vel, pseudotimes=[0.5])
+    with pytest.raises(ValueError, match="without weights"):
+        upsample_module.evaluate_pseudotimes(
+            xJ, J, np.ones(J.shape[1:], dtype=np.float32), pair_velocities=vel, pseudotimes=[0.5]
+        )
+
+
+def test_version_1_archives_are_rejected_as_unverifiable(captured_solves, tmp_path):
+    xJ, J, vel = _weighted_archive(tmp_path)
+    legacy = {k: v for k, v in vel.items() if k not in {"input_slices", "J_sha256", "W_sha256"}}
+    legacy["format"] = np.array("wsi_pipeline.pair_velocities/1")
+    path = tmp_path / "legacy.npz"
+    np.savez_compressed(path, **legacy)
+
+    with pytest.raises(ValueError, match="cannot be verified"):
+        upsample_module.load_pair_velocities(path)
+    with pytest.raises(ValueError, match="cannot be verified"):
+        upsample_module.evaluate_pseudotimes(xJ, J, pair_velocities=legacy, pseudotimes=[0.5])
