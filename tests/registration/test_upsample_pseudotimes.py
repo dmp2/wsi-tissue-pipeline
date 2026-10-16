@@ -703,18 +703,26 @@ def test_weights_are_pulled_back_with_their_image(monkeypatch):
     assert Ws.min() >= 0.0
     # s = 1: phi^{-1}(x) = x - (2, -3), so both become W(y - 2, x + 3).
     assert np.allclose(Ws[1, 2:, :-3], W[:-2, 3:], atol=1e-12)
-    assert np.allclose(warped[1, 0, 2:, :-3], image[0, :-2, 3:], atol=1e-12)
-    # Points sampled from outside the grid get zero weight; the image is border-clamped.
+    expected = np.where(W[:-2, 3:] > 1e-8, image[0, :-2, 3:], 0.0)
+    assert np.allclose(warped[1, 0, 2:, :-3], expected, atol=1e-12)
+    # Points without pulled-back support have zero image and weight.
     assert np.allclose(ones[1, :2], 0.0, atol=1e-12) and np.allclose(ones[1, :, -3:], 0.0, atol=1e-12)
     assert np.allclose(ones[1, 2:, :-3], 1.0, atol=1e-12)
-    assert np.allclose(warped[1, 0, 0, :-3], image[0, 0, 3:], atol=1e-12)
+    assert np.all(warped[:, 0][Ws <= 1e-8] == 0.0)
     # s = 0.5 is a half-pixel shift in x: bilinear weights stay in [0, 1].
     assert ones[0].min() >= 0.0 and ones[0].max() <= 1.0 + 1e-12 and 0.1 < ones[0, 5, -2] < 0.9
+    WI = W * image[0]
+    numerator = 0.5 * (WI[:-1, 1:-1] + WI[:-1, 2:])
+    denominator = 0.5 * (W[:-1, 1:-1] + W[:-1, 2:])
+    expected = np.divide(
+        numerator, denominator, out=np.zeros_like(numerator), where=denominator > 1e-8
+    )
+    assert np.allclose(warped[0, 0, 1:, :-2], expected, atol=1e-12)
 
 
 @pytest.mark.parametrize("path_mode", ["two-sided", "single-forward"])
 def test_pseudotime_weights_use_the_maps_of_their_images(monkeypatch, path_mode):
-    """With W = I (positive, single channel), warped W equals warped I where in bounds."""
+    """With W = I, warped W = warp(I) and warped image = warp(I**2) / warp(I)."""
     _use_backend(monkeypatch)
     xv, v = _translation()
     n = xv[0].numel()
@@ -726,8 +734,22 @@ def test_pseudotime_weights_use_the_maps_of_their_images(monkeypatch, path_mode)
         [0.25, 0.5, 0.75], {}, path_mode, W0=I0[0], W1=I1[0],
     )
     interior = (slice(3, -3), slice(3, -3))  # every map here moves < 3 pixels
-    assert np.allclose(W0s[(slice(None), *interior)], I0s[(slice(None), 0, *interior)], atol=1e-12)
-    assert np.allclose(W1s[(slice(None), *interior)], I1s[(slice(None), 0, *interior)], atol=1e-12)
+    unweighted = upsample_module._evaluate_pair_pseudotimes(
+        {"v_symmetric": v, "xv": xv}, v_bwd, I0, I1, [a.numpy() for a in xv],
+        [0.25, 0.5, 0.75], {}, path_mode,
+    )
+    squared = upsample_module._evaluate_pair_pseudotimes(
+        {"v_symmetric": v, "xv": xv}, v_bwd, I0**2, I1**2, [a.numpy() for a in xv],
+        [0.25, 0.5, 0.75], {}, path_mode,
+    )
+    for weights, images, plain, weighted in zip(
+        (W0s, W1s), (I0s, I1s), unweighted[:2], squared[:2]
+    ):
+        assert np.allclose(weights[(slice(None), *interior)], plain[(slice(None), 0, *interior)], atol=1e-12)
+        assert np.allclose(
+            (weights[:, None] * images)[(slice(None), 0, *interior)],
+            weighted[(slice(None), 0, *interior)], atol=1e-12,
+        )
     # Unwarped weights would sit in the section frames, not the intermediate one.
     assert not np.allclose(W1s[(slice(None), *interior)], I1[(0, *interior)], atol=1e-3)
     # The blend uses these warped weights and the Jacobians exactly once.

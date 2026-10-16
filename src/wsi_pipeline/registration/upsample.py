@@ -331,19 +331,27 @@ def _warp_at_times(
     )
     warped = _symmetric._warp_time_series(
         x,
-        image,
+        image if weight is None else image * np.asarray(weight),
         phis,
         emlddmm_module=emlddmm_module,
         interp2d=True,
-        grid_sample_kwargs=grid_sample_kwargs,
+        grid_sample_kwargs=(
+            grid_sample_kwargs if weight is None
+            else {**(grid_sample_kwargs or {}), "padding_mode": "zeros"}
+        ),
     )
     spacing = tuple(float(abs(axis[1] - axis[0])) for axis in xy_axes)
     det = _symmetric._calculate_determinant_of_jacobian(phis, spacing=spacing)
+    warped = warped.detach().cpu().numpy()
     if weight is not None:
         weight = _pull_back_weight(
             x, weight, phis, emlddmm_module=emlddmm_module, grid_sample_kwargs=grid_sample_kwargs
         ).detach().cpu().numpy()
-    return warped.detach().cpu().numpy(), det.detach().cpu().numpy(), weight
+        # Normalize the weighted observation only where it has pulled-back support.
+        warped = np.divide(
+            warped, weight[:, None], out=np.zeros_like(warped), where=weight[:, None] > 1e-8
+        )
+    return warped, det.detach().cpu().numpy(), weight
 
 
 def _evaluate_pair_pseudotimes(
